@@ -106,7 +106,21 @@ def terrain_is_stairs(
   env: ManagerBasedRlEnv,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-  """Return a dynamic 1/0 stair flag from the robot's current terrain tile."""
+  """Return a dynamic 1/0 stair flag from the robot's current terrain tile.
+
+  MjLab multi-env robot root positions are effectively expressed around each
+  env origin.  The terrain grid, however, is laid out in global terrain-grid
+  coordinates.  Therefore we add terrain.env_origins before converting the
+  robot position to terrain row/column indices.
+
+  Logic:
+    flat tile            -> 0
+    pyramid_stairs tile  -> 1
+
+  In curriculum train mode, flat/stairs are fixed columns.
+  In random play mode, we use step_boundary_counts so randomly arranged flat
+  and stair tiles are still labeled correctly.
+  """
   terrain = env.scene.terrain
   if terrain is None or terrain.terrain_origins is None:
     return torch.zeros(env.num_envs, 1, device=env.device)
@@ -125,16 +139,32 @@ def terrain_is_stairs(
   asset = env.scene[asset_cfg.name]
   root_pos_w = asset.data.root_link_pos_w
 
+  # Important:
+  # root_link_pos_w is around each env origin in this vectorized setup.
+  # Add env_origins to map the robot back into the global terrain grid.
+  env_origins = getattr(terrain, "env_origins", None)
+  if env_origins is not None and env_origins.shape[0] == env.num_envs:
+    root_pos_for_grid = root_pos_w + env_origins
+  else:
+    root_pos_for_grid = root_pos_w
+
   num_rows, num_cols = terrain.terrain_origins.shape[:2]
   tile_size_x, tile_size_y = terrain_generator.size
   grid_min_x = -0.5 * num_rows * float(tile_size_x)
   grid_min_y = -0.5 * num_cols * float(tile_size_y)
 
-  terrain_rows = torch.floor((root_pos_w[:, 0] - grid_min_x) / float(tile_size_x)).long()
-  terrain_cols = torch.floor((root_pos_w[:, 1] - grid_min_y) / float(tile_size_y)).long()
+  terrain_rows = torch.floor(
+    (root_pos_for_grid[:, 0] - grid_min_x) / float(tile_size_x)
+  ).long()
+  terrain_cols = torch.floor(
+    (root_pos_for_grid[:, 1] - grid_min_y) / float(tile_size_y)
+  ).long()
+
   terrain_rows = terrain_rows.clamp(0, num_rows - 1)
   terrain_cols = terrain_cols.clamp(0, num_cols - 1)
 
+  # Best path for both train and random play:
+  # flat tiles have 0 step boundaries, pyramid stairs have >0.
   step_boundary_counts = getattr(terrain, "step_boundary_counts", None)
   if (
     step_boundary_counts is not None
@@ -145,6 +175,7 @@ def terrain_is_stairs(
     is_stairs = step_boundary_counts[terrain_rows, terrain_cols] > 0
     return is_stairs.float().unsqueeze(-1)
 
+  # Fallback for simple curriculum terrain layouts.
   if num_cols == len(sub_terrain_names):
     current_type_ids = terrain_cols
   else:
@@ -161,7 +192,6 @@ def terrain_is_stairs(
     is_stairs |= current_type_ids == type_id
 
   return is_stairs.float().unsqueeze(-1)
-
 
 def terrain_is_stairs_metric(
   env: ManagerBasedRlEnv,

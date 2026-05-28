@@ -186,7 +186,7 @@ def _unitree_g1_teacher_student_runner_cfg(
       "teacher": ("teacher", "camera"),
     },
     experiment_name=experiment_name,
-    save_interval=50,
+    save_interval=200,
     num_steps_per_env=num_steps_per_env,
     max_iterations=40_001,
   )
