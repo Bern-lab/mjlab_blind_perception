@@ -13,10 +13,10 @@ import tyro
 
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
-from mjlab.scripts._cli import maybe_print_top_level_help
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
-from mjlab.utils.os import get_wandb_checkpoint_path
+from mjlab.utils.lstm import reset_policy_state
+from mjlab.utils.os import get_task_log_root, get_wandb_checkpoint_path
 from mjlab.utils.torch import configure_torch_backends
 from mjlab.utils.wrappers import VideoRecorder
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
@@ -49,8 +49,8 @@ class PlayConfig:
   viewer: Literal["auto", "native", "viser"] = "auto"
   no_terminations: bool = False
   """Disable all termination conditions (useful for viewing motions with dummy agents)."""
-  log_root: str = "logs/rsl_rl"
-  """Root directory under which experiment logs are written."""
+  show_step_danger_zones: bool = False
+  """Show non-colliding stair lip/riser danger zones when the terrain supports them."""
 
   # Internal flag used by demo script.
   _demo_mode: tyro.conf.Suppress[bool] = False
@@ -63,6 +63,18 @@ def run_play(task_id: str, cfg: PlayConfig):
 
   env_cfg = load_env_cfg(task_id, play=True)
   agent_cfg = load_rl_cfg(task_id)
+
+  if cfg.show_step_danger_zones:
+    terrain_cfg = (
+      env_cfg.scene.terrain.terrain_generator
+      if env_cfg.scene.terrain is not None
+      else None
+    )
+    if terrain_cfg is not None and hasattr(terrain_cfg, "step_danger_visualization"):
+      terrain_cfg.step_danger_visualization.enabled = True
+      print("[INFO]: Step danger-zone visualization enabled")
+    else:
+      print("[WARN]: Step danger-zone visualization requested, but this terrain does not support it")
 
   DUMMY_MODE = cfg.agent in {"zero", "random"}
   TRAINED_MODE = not DUMMY_MODE
@@ -132,7 +144,7 @@ def run_play(task_id: str, cfg: PlayConfig):
   log_dir: Path | None = None
   resume_path: Path | None = None
   if TRAINED_MODE:
-    log_root_path = (Path(cfg.log_root) / agent_cfg.experiment_name).resolve()
+    log_root_path = get_task_log_root(agent_cfg.experiment_name, task_id).resolve()
     if cfg.checkpoint_file is not None:
       resume_path = Path(cfg.checkpoint_file)
       if not resume_path.exists():
@@ -167,6 +179,11 @@ def run_play(task_id: str, cfg: PlayConfig):
     print(
       "[WARN] Video recording with dummy agents is disabled (no checkpoint/log_dir)."
     )
+
+  # # TODO--- 修正缓冲区溢出问题 ---
+  # env_cfg.nconmax = 512  # 大幅增加碰撞槽位
+  # env_cfg.njmax = 4096  # 大幅增加约束槽位
+
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
 
   if TRAINED_MODE and cfg.video:
@@ -206,6 +223,7 @@ def run_play(task_id: str, cfg: PlayConfig):
       str(resume_path), load_cfg={"actor": True}, strict=True, map_location=device
     )
     policy = runner.get_inference_policy(device=device)
+    reset_policy_state(policy)
 
   # Build checkpoint manager for hot-swapping checkpoints in the viewer.
   ckpt_manager: CheckpointManager | None = None
@@ -219,7 +237,9 @@ def run_play(task_id: str, cfg: PlayConfig):
         strict=True,
         map_location=device,
       )
-      return _ckpt_runner.get_inference_policy(device=device)
+      policy = _ckpt_runner.get_inference_policy(device=device)
+      reset_policy_state(policy)
+      return policy
 
     if cfg.wandb_run_path is None:
       ckpt_dir = resume_path.parent
@@ -298,8 +318,6 @@ def run_play(task_id: str, cfg: PlayConfig):
 
 
 def main():
-  maybe_print_top_level_help("play")
-
   # Parse first argument to choose the task.
   # Import tasks to populate the registry.
   import mjlab.tasks  # noqa: F401

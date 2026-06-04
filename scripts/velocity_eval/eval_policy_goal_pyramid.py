@@ -116,6 +116,13 @@ def _make_goal_terrain(cfg: GoalPyramidEvalConfig) -> EvalTerrainSpec:
   )
 
 
+def _force_single_goal_terrain_tile(env_cfg: Any) -> None:
+  terrain_cfg = getattr(env_cfg.scene, "terrain", None)
+  if terrain_cfg is None or terrain_cfg.terrain_generator is None:
+    return
+  terrain_cfg.terrain_generator.num_cols = 1
+
+
 def _computed_start_distance(cfg: GoalPyramidEvalConfig) -> float:
   if cfg.start_distance is not None:
     return cfg.start_distance
@@ -249,7 +256,9 @@ def _spawn_on_pyramid_apron(
 def _get_twist_term(env: ManagerBasedRlEnv) -> UniformVelocityCommand:
   term = env.command_manager.get_term("twist")
   if not isinstance(term, UniformVelocityCommand):
-    raise TypeError("Goal pyramid eval expects the 'twist' command to be velocity-like.")
+    raise TypeError(
+      "Goal pyramid eval expects the 'twist' command to be velocity-like."
+    )
   return term
 
 
@@ -331,8 +340,7 @@ def _empty_batch_tensors(
     for name in (*MEAN_METRIC_NAMES, *EVENT_COUNT_NAMES)
   }
   level_sums = {
-    name: torch.zeros(num_envs, max_levels, device=device)
-    for name in LEVEL_EVENT_NAMES
+    name: torch.zeros(num_envs, max_levels, device=device) for name in LEVEL_EVENT_NAMES
   }
   return metric_sums, level_sums
 
@@ -384,9 +392,7 @@ def _run_batch(
     _update_goal_command(wrapped.unwrapped, cfg, spawn, all_envs_active)
     obs = _fresh_obs_with_history(wrapped.unwrapped)
 
-    metric_sums, level_sums = _empty_batch_tensors(
-      batch_size, cfg.stair_levels, device
-    )
+    metric_sums, level_sums = _empty_batch_tensors(batch_size, cfg.stair_levels, device)
     step_counts = torch.zeros(batch_size, device=device)
     done_envs = torch.zeros(batch_size, dtype=torch.bool, device=device)
     success = torch.zeros(batch_size, dtype=torch.bool, device=device)
@@ -479,10 +485,7 @@ def _run_batch(
       "heading_failed": heading_failed.detach().cpu().tolist(),
       "timeout_failed": timeout_failed.detach().cpu().tolist(),
       "spawn_side": spawn.side_names,
-      "max_heading_error_deg": torch.rad2deg(max_heading_error)
-      .detach()
-      .cpu()
-      .tolist(),
+      "max_heading_error_deg": torch.rad2deg(max_heading_error).detach().cpu().tolist(),
       "episode_length_steps": step_counts.detach().cpu().tolist(),
       "mean_metrics": mean_metrics,
       "event_counts": event_counts,
@@ -644,6 +647,7 @@ def run_goal_pyramid_play(task_id: str, cfg: GoalPyramidEvalConfig) -> None:
     disable_actuator_delay=cfg.disable_actuator_delay,
     enable_riser_contact_sensor="g1" in task_id.lower(),
   )
+  _force_single_goal_terrain_tile(env_cfg)
   env_cfg.viewer.distance = max(env_cfg.viewer.distance, 8.0)
   env_cfg.viewer.elevation = min(env_cfg.viewer.elevation, -30.0)
   env_cfg.viewer.max_extra_envs = max(env_cfg.viewer.max_extra_envs, cfg.num_envs - 1)
@@ -783,8 +787,8 @@ def _summarize_batches(cfg: GoalPyramidEvalConfig, batches: list[dict]) -> dict:
     denom = max(1, success_count)
     summary[f"{name}_success_only"] = [float(value / denom) for value in total]
 
-  summary["collision_by_stair_level_low_to_high_success_only"] = (
-    _level_collision_table(summary, cfg)
+  summary["collision_by_stair_level_low_to_high_success_only"] = _level_collision_table(
+    summary, cfg
   )
   return summary
 
@@ -1008,10 +1012,7 @@ def run_goal_pyramid_eval(task_id: str, cfg: GoalPyramidEvalConfig) -> dict:
   batch_index = 0
   while remaining > 0:
     batch_size = min(max(1, cfg.num_envs), remaining)
-    print(
-      f"[INFO] Evaluating goal_pyramid batch {batch_index} "
-      f"({batch_size} episodes)"
-    )
+    print(f"[INFO] Evaluating goal_pyramid batch {batch_index} ({batch_size} episodes)")
     batches.append(
       _run_batch(
         task_id=task_id,

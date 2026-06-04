@@ -39,6 +39,28 @@ class RslRlModelCfg:
 
 
 @dataclass
+class RslRlSlowLatentModelCfg(RslRlModelCfg):
+  """Config for an LSTM encoder + slow latent + MLP actor model."""
+
+  class_name: str = "mjlab.rl.slow_latent_model:LSTMSlowLatentMLPModel"
+  """Qualified model class name for the slow-latent actor."""
+  use_slow_latent: bool = True
+  """Enable explicit slow terrain latent conditioning."""
+  latent_dim: int = 16
+  """Dimension of the slow terrain latent z_t."""
+  latent_hidden_dim: int = 256
+  """Hidden dimension of the latent encoder LSTM."""
+  latent_alpha: float = 0.1
+  """EMA update rate for z_t. Set to 1.0 for the no-slow-update ablation."""
+  encoder_type: Literal["lstm"] = "lstm"
+  """Recurrent encoder type. The first implementation uses LSTM."""
+  rnn_type: str | None = "lstm"
+  """Keep RSL-RL recurrent storage enabled for the latent encoder."""
+  rnn_hidden_dim: int = 256
+  """RSL-RL-style recurrent field; use latent_hidden_dim for this model."""
+
+
+@dataclass
 class RslRlPpoAlgorithmCfg:
   """Config for the PPO algorithm."""
 
@@ -77,8 +99,66 @@ class RslRlPpoAlgorithmCfg:
   """The optimizer to use."""
   share_cnn_encoders: bool = False
   """Share CNN encoders between actor and critic."""
+  rnd_cfg: dict[str, Any] | None = None
+  """Optional Random Network Distillation extension config."""
+  symmetry_cfg: dict[str, Any] | None = None
+  """Optional symmetry extension config."""
   class_name: str = "PPO"
   """Algorithm class name resolved by RSL-RL."""
+
+
+@dataclass
+class RslRlTeacherKLCfg:
+  """Config for frozen-teacher guidance regularization."""
+
+  enabled: bool = True
+  """Whether to enable frozen-teacher guidance. False makes PPOTeacherKL run as pure PPO."""
+  imitation_only: bool = False
+  """Whether to train only from teacher imitation loss and skip PPO surrogate/value losses."""
+  imitation_loss_coef: float = 1.0
+  """Loss coefficient used when ``imitation_only=True``."""
+  checkpoint_path: str | None = None
+  """Path to the rsl-rl teacher checkpoint containing ``actor_state_dict``."""
+  loss_type: Literal["kl", "mean_mse", "mean_huber"] = "kl"
+  """Teacher guidance loss: full distribution KL, action-mean MSE, or action-mean Huber."""
+  lambda_start: float = 0.8
+  """Initial weight for the teacher guidance loss."""
+  lambda_end: float = 0.0
+  """Final weight for the teacher guidance loss."""
+  warmup_iters: int = 0
+  """Number of iterations with zero teacher guidance loss before the schedule starts."""
+  constant_iters: int = 0
+  """Number of iterations to hold ``lambda_start`` for constant_then_linear."""
+  anneal_iters: int = 10000
+  """Number of iterations used by linear/cosine annealing."""
+  schedule: Literal["linear", "cosine", "constant", "constant_then_linear"] = "cosine"
+  """Teacher guidance weight schedule."""
+  huber_delta: float = 1.0
+  """Delta parameter for ``loss_type='mean_huber'``."""
+  teacher_forward_chunk_size: int = 4096
+  """Maximum flattened samples per frozen-teacher forward pass."""
+  max_teacher_loss: float | None = None
+  """Optional hard cap applied to mean-only teacher guidance losses."""
+  max_kl_loss: float | None = 10.0
+  """Optional cap applied to the KL value used in the loss when ``loss_type='kl'``."""
+  max_kl_loss_tail_slope: float = 0.0
+  """Slope to keep above ``max_kl_loss``. 0.0 keeps the existing hard cap."""
+  check_shapes: bool = True
+  """Whether to check teacher/student distribution parameter shapes once."""
+  fail_on_nonfinite_kl: bool = True
+  """Whether to raise if the teacher KL becomes NaN or Inf."""
+  debug_shapes: bool = False
+  """Print distribution parameter shapes when checking them."""
+
+
+@dataclass
+class RslRlPpoTeacherKLAlgorithmCfg(RslRlPpoAlgorithmCfg):
+  """Config for PPO with frozen-teacher KL regularization."""
+
+  class_name: str = "third_party.rsl_rl.rsl_rl.algorithms.ppo_teacher_kl:PPOTeacherKL"
+  """Algorithm class name resolved by RSL-RL."""
+  teacher_kl_cfg: RslRlTeacherKLCfg = field(default_factory=RslRlTeacherKLCfg)
+  """Frozen-teacher KL configuration."""
 
 
 @dataclass
@@ -95,9 +175,8 @@ class RslRlBaseRunnerCfg:
   save_interval: int = 50
   """The number of iterations between saves."""
   experiment_name: str = "exp1"
-  """Directory name used to group runs under ``{log_root}/{experiment_name}/``.
-  The log root defaults to ``logs/rsl_rl`` and can be overridden with
-  ``--log-root`` on the CLI."""
+  """Directory name used to group runs under
+  ``logs/rsl_rl/{experiment_name}/``."""
   run_name: str = ""
   """Optional label appended to the timestamped run directory
   (e.g. ``2025-01-27_14-30-00_{run_name}``). Also becomes the
@@ -143,3 +222,30 @@ class RslRlOnPolicyRunnerCfg(RslRlBaseRunnerCfg):
   """The critic configuration."""
   algorithm: RslRlPpoAlgorithmCfg = field(default_factory=RslRlPpoAlgorithmCfg)
   """The algorithm configuration."""
+
+
+@dataclass
+class RslRlTeacherKLRunnerCfg(RslRlOnPolicyRunnerCfg):
+  """Runner config for PPO with actor/critic/teacher observation sets."""
+
+  obs_groups: dict[str, tuple[str, ...]] = field(
+    default_factory=lambda: {
+      "actor": ("actor",),
+      "critic": ("critic",),
+      "teacher": ("teacher",),
+    },
+  )
+  teacher: RslRlModelCfg = field(
+    default_factory=lambda: RslRlModelCfg(
+      distribution_cfg={
+        "class_name": "GaussianDistribution",
+        "init_std": 1.0,
+        "std_type": "scalar",
+      }
+    )
+  )
+  """The frozen teacher actor configuration."""
+  algorithm: RslRlPpoAlgorithmCfg = field(
+    default_factory=RslRlPpoTeacherKLAlgorithmCfg
+  )
+  """The PPO + teacher-KL algorithm configuration."""

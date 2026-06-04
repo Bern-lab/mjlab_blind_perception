@@ -112,8 +112,11 @@ class SpatialSoftmaxCNN(nn.Module):
     return None
 
   def forward(self, x: torch.Tensor) -> torch.Tensor:
-    features = self.cnn(x)
-    return self.spatial_softmax(features)
+    leading_shape = x.shape[:-3]
+    x_flat = x.reshape(-1, *x.shape[-3:])
+    features = self.cnn(x_flat)
+    keypoints = self.spatial_softmax(features)
+    return keypoints.reshape(*leading_shape, -1)
 
 
 class SpatialSoftmaxCNNModel(CNNModel):

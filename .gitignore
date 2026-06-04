@@ -20,3 +20,21 @@ working_*.txt
 # Documentation outputs.
 **/_build/*
 **/generated/*
+
+# Environment diagnostic files.
+mjlab_env_report.txt
+check_mjlab_env.sh
+
+# Model files (checkpoints / export artifacts).
+*.pt
+*.onnx
+*.mnn
+*.pth
+
+# System junk.
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo
+

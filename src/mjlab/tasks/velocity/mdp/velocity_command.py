@@ -82,6 +82,8 @@ class UniformVelocityCommand(CommandTerm):
       self.heading_target[env_ids] = r.uniform_(*self.cfg.ranges.heading)
       self.is_heading_env[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_heading_envs
     self.is_standing_env[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_standing_envs
+    if self.cfg.standing_turns_to_heading and self.cfg.heading_command:
+      self.is_heading_env[env_ids] |= self.is_standing_env[env_ids]
 
     # Randomly assign world-frame envs.
     self.is_world_env[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_world_envs
@@ -134,8 +136,12 @@ class UniformVelocityCommand(CommandTerm):
       self.vel_command_b[w_ids, 1] = -sin_h * vx_w + cos_h * vy_w
 
     standing_env_ids = self.is_standing_env.nonzero(as_tuple=False).flatten()
-    self.vel_command_b[standing_env_ids, :] = 0.0
-    self.vel_command_w[standing_env_ids, :] = 0.0
+    if self.cfg.standing_turns_to_heading and self.cfg.heading_command:
+      self.vel_command_b[standing_env_ids, :2] = 0.0
+      self.vel_command_w[standing_env_ids, :2] = 0.0
+    else:
+      self.vel_command_b[standing_env_ids, :] = 0.0
+      self.vel_command_w[standing_env_ids, :] = 0.0
 
   # GUI.
 
@@ -153,9 +159,9 @@ class UniformVelocityCommand(CommandTerm):
     ranges = self.cfg.ranges
 
     axes = [
-      ("lin_vel_x", ranges.lin_vel_x[1]),
-      ("lin_vel_y", ranges.lin_vel_y[1]),
-      ("ang_vel_z", ranges.ang_vel_z[1]),
+      ("lin_vel_x", max(abs(ranges.lin_vel_x[0]), abs(ranges.lin_vel_x[1]))),
+      ("lin_vel_y", max(abs(ranges.lin_vel_y[0]), abs(ranges.lin_vel_y[1]))),
+      ("ang_vel_z", max(abs(ranges.ang_vel_z[0]), abs(ranges.ang_vel_z[1]))),
     ]
     sliders: list = []
 
@@ -167,7 +173,7 @@ class UniformVelocityCommand(CommandTerm):
           f"Max {label}",
           initial_value=max_val,
           step=0.1,
-          min=0.1,
+          min=0.0,
           max=10.0,
         )
         slider = server.gui.add_slider(
@@ -284,6 +290,13 @@ class UniformVelocityCommandCfg(CommandTermCfg):
   heading_control_stiffness: float = 1.0
   rel_standing_envs: float = 0.0
   rel_heading_envs: float = 1.0
+  standing_turns_to_heading: bool = False
+  """Whether standing envs keep a heading yaw command.
+
+  When enabled with ``heading_command=True``, standing envs command zero linear
+  velocity while still turning toward their sampled heading target. Otherwise
+  standing envs command zero linear and angular velocity.
+  """
   rel_world_envs: float = 0.0
   """Fraction of environments that use world-frame velocity commands.
   World-frame envs sample linear velocity in world frame and rotate to body
@@ -319,3 +332,5 @@ class UniformVelocityCommandCfg(CommandTermCfg):
         "The velocity command has heading commands active (heading_command=True) but "
         "the `ranges.heading` parameter is set to None."
       )
+    if self.standing_turns_to_heading and not self.heading_command:
+      raise ValueError("standing_turns_to_heading=True requires heading_command=True.")

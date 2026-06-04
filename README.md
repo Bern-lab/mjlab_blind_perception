@@ -35,9 +35,9 @@ Mjlab-Velocity-Blind-Rough-LSTM-TeacherKL-Unitree-G1
 需要 NVIDIA GPU。推荐使用 `uv` 管理环境：
 
 ```bash
-git clone <repo-url>
-cd mjlab_111
-uv sync
+git clone https://gitee.com/oakcreektech/mjlabvel.git
+cd mjlabvel
+uv sync --extra cu128
 ```
 
 如果已经在仓库里，可以直接使用：

@@ -35,7 +35,8 @@ def terrain_levels_vel(
   terrain_generator = terrain.cfg.terrain_generator
   assert terrain_generator is not None
 
-  command = env.command_manager.get_command(command_name)
+  command_term = env.command_manager.get_term(command_name)
+  command = command_term.command
   assert command is not None
 
   # Compute the distance the robot walked.
@@ -45,7 +46,20 @@ def terrain_levels_vel(
   )
 
   # Robots that walked far enough progress to harder terrains.
-  move_up = distance > terrain_generator.size[0] / 2
+  move_up_by_distance = distance > terrain_generator.size[0] / 2
+  move_up = move_up_by_distance
+
+  target_attempted = getattr(command_term, "target_command_in_episode", None)
+  target_reached = getattr(command_term, "target_reached_in_episode", None)
+  if isinstance(target_attempted, torch.Tensor) and isinstance(
+    target_reached, torch.Tensor
+  ):
+    target_attempted = target_attempted[env_ids].bool()
+    target_reached = target_reached[env_ids].bool()
+    move_up = torch.where(target_attempted, target_reached, move_up_by_distance)
+  else:
+    target_attempted = None
+    target_reached = None
 
   # Robots that walked less than half of their required distance go to
   # simpler terrains.
@@ -63,6 +77,9 @@ def terrain_levels_vel(
     "mean": torch.mean(levels),
     "max": torch.max(levels),
   }
+  if target_attempted is not None and target_reached is not None:
+    result["target_attempted"] = torch.mean(target_attempted.float())
+    result["target_reached"] = torch.mean(target_reached.float())
 
   # In curriculum mode num_cols == num_terrains (one column per type),
   # so the column index directly maps to the sub-terrain name.
