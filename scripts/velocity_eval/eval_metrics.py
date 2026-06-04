@@ -12,8 +12,12 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
 from mjlab.sensor.terrain_height_sensor import TerrainHeightSensor
 from mjlab.tasks.velocity import mdp
-from mjlab.tasks.velocity.mdp.target_heading_rewards import _current_step_boundaries
 from mjlab.utils.lab_api.math import quat_apply_inverse
+
+try:
+  from mjlab.tasks.velocity.mdp.target_heading_rewards import _current_step_boundaries
+except ImportError:
+  from mjlab.tasks.velocity.mdp.rewards import _current_step_boundaries
 
 MEAN_METRIC_NAMES = (
   "tracking_error",
@@ -129,28 +133,31 @@ class StairEventDetector:
       "asset_cfg": self.foot_asset_cfg,
     }
 
-    self._toe = mdp.toe_step_riser_slab_penalty(
-      RewardTermCfg(
-        func=mdp.toe_step_riser_slab_penalty,
-        weight=0.0,
-        params=self.toe_params,
-      ),
-      env,
-    )
-    self._heel = mdp.heel_step_riser_clearance_penalty(
-      RewardTermCfg(
-        func=mdp.heel_step_riser_clearance_penalty,
-        weight=0.0,
-        params=self.heel_params,
-      ),
-      env,
-    )
-    self._lip = mdp.foot_step_lip_volume_penalty(
-      RewardTermCfg(
-        func=mdp.foot_step_lip_volume_penalty,
-        weight=0.0,
-        params=self.lip_params,
-      ),
+    self._toe = None
+    self._heel = None
+    self._lip = None
+    if self._contact_sensor is None:
+      self._toe = self._make_geometry_detector(
+        "toe_step_riser_slab_penalty", self.toe_params, env
+      )
+      self._heel = self._make_geometry_detector(
+        "heel_step_riser_clearance_penalty", self.heel_params, env
+      )
+      self._lip = self._make_geometry_detector(
+        "foot_step_lip_volume_penalty", self.lip_params, env
+      )
+
+  def _make_geometry_detector(
+    self,
+    name: str,
+    params: dict,
+    env: ManagerBasedRlEnv,
+  ):
+    detector_cls = getattr(mdp, name, None)
+    if detector_cls is None:
+      return None
+    return detector_cls(
+      RewardTermCfg(func=detector_cls, weight=0.0, params=params),
       env,
     )
 
@@ -168,9 +175,10 @@ class StairEventDetector:
     if self._contact_sensor is not None:
       return self._compute_true_riser_contact_events(env)
 
-    toe = self._toe(env, **self.toe_params)
-    heel = self._heel(env, **self.heel_params)
-    lip = self._lip(env, **self.lip_params)
+    zeros = torch.zeros(env.num_envs, device=env.device)
+    toe = self._toe(env, **self.toe_params) if self._toe is not None else zeros
+    heel = self._heel(env, **self.heel_params) if self._heel is not None else zeros
+    lip = self._lip(env, **self.lip_params) if self._lip is not None else zeros
     return {
       "toe_riser_collision": (toe > 0.0).float(),
       "heel_riser_collision": (heel > 0.0).float(),
@@ -316,14 +324,26 @@ class StairEventDetector:
       )
 
     return {
-      "toe_riser_collision_by_level": self._toe_events_by_level(
-        env, boundaries, valid, terrain_height_m, max_levels
+      "toe_riser_collision_by_level": (
+        self._toe_events_by_level(
+          env, boundaries, valid, terrain_height_m, max_levels
+        )
+        if self._toe is not None
+        else empty["toe_riser_collision_by_level"]
       ),
-      "heel_riser_collision_by_level": self._heel_events_by_level(
-        env, boundaries, valid, terrain_height_m, max_levels
+      "heel_riser_collision_by_level": (
+        self._heel_events_by_level(
+          env, boundaries, valid, terrain_height_m, max_levels
+        )
+        if self._heel is not None
+        else empty["heel_riser_collision_by_level"]
       ),
-      "foot_lip_collision_by_level": self._lip_events_by_level(
-        env, boundaries, valid, terrain_height_m, max_levels
+      "foot_lip_collision_by_level": (
+        self._lip_events_by_level(
+          env, boundaries, valid, terrain_height_m, max_levels
+        )
+        if self._lip is not None
+        else empty["foot_lip_collision_by_level"]
       ),
     }
 
