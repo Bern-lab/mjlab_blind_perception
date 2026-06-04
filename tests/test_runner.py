@@ -318,6 +318,22 @@ def test_cnn_onnx_export_matches_actor():
   torch.testing.assert_close(actual, expected, atol=1e-6, rtol=0)
 
 
+def test_spatial_softmax_cnn_model_accepts_recurrent_camera_batches():
+  """CNN teacher batches from recurrent storage carry [time, batch, C, H, W]."""
+  actor = _make_cnn_actor(obs_normalization=False)
+  obs = TensorDict(
+    {
+      "actor": torch.randn(5, 7, _OBS_DIM_1D),
+      "camera": torch.randn(5, 7, _IMG_C, _IMG_H, _IMG_W),
+    },
+    batch_size=(5, 7),
+  )
+
+  out = actor(obs, masks=torch.ones(5, 7, dtype=torch.bool))
+
+  assert out.shape == (5, 7, _OUTPUT_DIM)
+
+
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 def test_cnn_onnx_export_to_file():
   """SpatialSoftmaxCNNModel exports to a valid ONNX file."""

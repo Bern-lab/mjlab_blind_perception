@@ -1,140 +1,122 @@
-![Project banner](https://raw.githubusercontent.com/mujocolab/mjlab/main/docs/source/_static/mjlab-banner.jpg)
+# Blind Humanoid Locomotion with Teacher-Student Optimization
 
-# mjlab
+本仓库基于 `mjlab` 和 `rsl_rl`，主要用于研究无视觉人形机器人盲走任务。训练流程采用 teacher-student 联合优化：privileged teacher 可以使用视觉、height scan 或其他仿真特权信息，blind student 只使用可部署的本体感觉观测。部署时只导出 student policy。
 
-[![GitHub Actions](https://img.shields.io/github/actions/workflow/status/mujocolab/mjlab/ci.yml?branch=main)](https://github.com/mujocolab/mjlab/actions/workflows/ci.yml?query=branch%3Amain)
-[![Documentation](https://github.com/mujocolab/mjlab/actions/workflows/docs.yml/badge.svg)](https://mujocolab.github.io/mjlab/)
-[![License](https://img.shields.io/github/license/mujocolab/mjlab)](https://github.com/mujocolab/mjlab/blob/main/LICENSE)
-[![Nightly Benchmarks](https://img.shields.io/badge/Nightly-Benchmarks-blue)](https://mujocolab.github.io/mjlab/nightly/)
-[![PyPI](https://img.shields.io/pypi/v/mjlab)](https://pypi.org/project/mjlab/)
-[![PyPI downloads](https://img.shields.io/pypi/dm/mjlab?color=blue)](https://pypistats.org/packages/mjlab)
+当前实验重点是 Unitree G1 在 rough / stairs 场景中的盲走和楼梯适应。
 
-mjlab combines [Isaac Lab](https://github.com/isaac-sim/IsaacLab)'s manager-based API with [MuJoCo Warp](https://github.com/google-deepmind/mujoco_warp), a GPU-accelerated version of [MuJoCo](https://github.com/google-deepmind/mujoco).
-The framework provides composable building blocks for environment design,
-with minimal dependencies and direct access to native MuJoCo data structures.
+## Branches
 
-## Getting Started
+### `main`
 
-mjlab requires an NVIDIA GPU for training. macOS is supported for evaluation only.
+主分支主要保留 Teacher-KL blind walking 任务：
 
-**Try it now:**
+```text
+Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1
+Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1
+Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1
+```
 
-Run the demo (no installation needed):
+其中 `TeacherKL` 表示 student 使用 PPO 训练，同时通过 frozen teacher 的动作分布进行 guidance。可以通过配置关闭 teacher guidance，得到纯 PPO；也可以打开 `imitation_only` 做纯 IL。
+
+### `lstm_teacher_policy`
+
+该分支用于 LSTM / boolean stair flag 相关任务：
+
+```text
+Mjlab-Velocity-Blind-StairsFlag-TeacherKL-Unitree-G1
+Mjlab-Velocity-Blind-StairsFlag-LSTM-TeacherKL-Unitree-G1
+Mjlab-Velocity-Blind-Rough-LSTM-TeacherKL-Unitree-G1
+```
+
+这些任务主要用于比较普通 MLP student、显式 stairs flag / boolean 信息、以及 LSTM student 在 blind walking 中的表现。
+
+## Setup
+
+需要 NVIDIA GPU。推荐使用 `uv` 管理环境：
 
 ```bash
-uvx --from mjlab --refresh demo
+git clone <repo-url>
+cd mjlab_111
+uv sync
 ```
 
-Or try in [Google Colab](https://colab.research.google.com/github/mujocolab/mjlab/blob/main/notebooks/demo.ipynb) (no local setup required).
-
-**Install from source:**
+如果已经在仓库里，可以直接使用：
 
 ```bash
-git clone https://github.com/mujocolab/mjlab.git && cd mjlab
-uv run demo
+uv run train --help
+uv run play --help
 ```
 
-For alternative installation methods (PyPI, Docker), see the [Installation Guide](https://mujocolab.github.io/mjlab/main/source/installation.html).
+## Training
 
-## Training Examples
-
-### 1. Velocity Tracking
-
-Train a Unitree G1 humanoid to follow velocity commands on flat terrain:
+训练 main 分支 Teacher-KL blind rough：
 
 ```bash
-uv run train Mjlab-Velocity-Flat-Unitree-G1 --env.scene.num-envs 4096
+uv run train Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1 \
+  --env.scene.num-envs 4096 \
+  --agent.logger tensorboard
 ```
 
-**Multi-GPU Training:** Scale to multiple GPUs using `--gpu-ids`:
+训练 target navigation Teacher-KL：
 
 ```bash
-uv run train Mjlab-Velocity-Flat-Unitree-G1 \
-  --gpu-ids "[0, 1]" \
-  --env.scene.num-envs 4096
+uv run train Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1 \
+  --env.scene.num-envs 4096 \
+  --agent.logger tensorboard
 ```
 
-See the [Distributed Training guide](https://mujocolab.github.io/mjlab/main/source/training/distributed_training.html) for details.
-
-Evaluate a policy while training (fetches latest checkpoint from Weights & Biases):
+训练 slow latent Teacher-KL：
 
 ```bash
-uv run play Mjlab-Velocity-Flat-Unitree-G1 --wandb-run-path your-org/mjlab/run-id
+uv run train Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1 \
+  --env.scene.num-envs 2048 \
+  --agent.logger tensorboard
 ```
 
-### 2. Motion Imitation
-
-Train a humanoid to mimic reference motions. See the [motion imitation guide](https://mujocolab.github.io/mjlab/main/source/training/motion_imitation.html) for preprocessing setup.
+如果显存紧张，可以先降低 `num-envs`：
 
 ```bash
-uv run train Mjlab-Tracking-Flat-Unitree-G1 --registry-name your-org/motions/motion-name --env.scene.num-envs 4096
-uv run play Mjlab-Tracking-Flat-Unitree-G1 --wandb-run-path your-org/mjlab/run-id
+--env.scene.num-envs 1024
 ```
 
-### 3. Sanity-check with Dummy Agents
+## Logs
 
-Use built-in agents to sanity check your MDP before training:
+训练日志默认保存在：
+
+```text
+logs/rsl_rl/<experiment_name>/<task_id>/<run_name>
+```
+
+例如：
+
+```text
+logs/rsl_rl/g1_blind_rough_teacherkl/
+logs/rsl_rl/g1_blind_rough_target_navigation_teacherkl/
+logs/rsl_rl/g1_blind_rough_target_navigation_slow_latent_teacherkl/
+```
+
+每个 run 的 `params/agent.yaml` 会保存 seed、PPO 参数、Teacher-KL 设置和是否为 `imitation_only`。
+
+## Evaluation
+
+使用已有 checkpoint 播放策略：
 
 ```bash
-uv run play Mjlab-Your-Task-Id --agent zero  # Sends zero actions
-uv run play Mjlab-Your-Task-Id --agent random  # Sends uniform random actions
+uv run play Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1 \
+  --load-run <run-name> \
+  --load-checkpoint model_13000.pt
 ```
 
-When running motion-tracking tasks, add `--registry-name your-org/motions/motion-name` to the command.
-
-
-## Documentation
-
-Full documentation is available at **[mujocolab.github.io/mjlab](https://mujocolab.github.io/mjlab/)**.
-
-## Development
+也可以使用 dummy agent 快速检查环境：
 
 ```bash
-make test          # Run all tests
-make test-fast     # Skip slow tests
-make format        # Format and lint
-make docs          # Build docs locally
+uv run play Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1 --agent zero
+uv run play Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1 --agent random
 ```
 
-For development setup: `uvx pre-commit install`
+## Notes
 
-## Citation
+- Student actor 是盲走策略，部署输入不应包含视觉、height scan、terrain boolean 或真实接触标签。
+- Teacher / critic 可以在训练阶段使用 privileged observation。
+- 对比实验建议固定 seed、terrain 配置、`num_steps_per_env` 和训练迭代数。
 
-mjlab is used in published research and open-source robotics projects. See the [Research](https://mujocolab.github.io/mjlab/main/source/research.html) page for publications and projects, or share your own in [Show and Tell](https://github.com/mujocolab/mjlab/discussions/categories/show-and-tell).
-
-If you use mjlab in your research, please consider citing:
-
-```bibtex
-@misc{zakka2026mjlablightweightframeworkgpuaccelerated,
-  title={mjlab: A Lightweight Framework for GPU-Accelerated Robot Learning},
-  author={Kevin Zakka and Qiayuan Liao and Brent Yi and Louis Le Lay and Koushil Sreenath and Pieter Abbeel},
-  year={2026},
-  eprint={2601.22074},
-  archivePrefix={arXiv},
-  primaryClass={cs.RO},
-  url={https://arxiv.org/abs/2601.22074},
-}
-```
-
-## License
-
-mjlab is licensed under the [Apache License, Version 2.0](LICENSE).
-
-### Third-Party Code
-
-Some portions of mjlab are forked from external projects:
-
-- **`src/mjlab/utils/lab_api/`** — Utilities forked from [NVIDIA Isaac
-  Lab](https://github.com/isaac-sim/IsaacLab) (BSD-3-Clause license, see file
-  headers)
-
-Forked components retain their original licenses. See file headers for details.
-
-## Acknowledgments
-
-mjlab wouldn't exist without the excellent work of the Isaac Lab team, whose API
-design and abstractions mjlab builds upon.
-
-Thanks to the MuJoCo Warp team — especially Erik Frey and Taylor Howell — for
-answering our questions, giving helpful feedback, and implementing features
-based on our requests countless times.
