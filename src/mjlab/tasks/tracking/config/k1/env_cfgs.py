@@ -26,10 +26,9 @@ def booster_k1_flat_tracking_env_cfg(
     name="self_collision",
     primary=ContactMatch(mode="subtree", pattern="Trunk", entity="robot"),
     secondary=ContactMatch(mode="subtree", pattern="Trunk", entity="robot"),
-    fields=("found", ),
+    fields=("found",),
     reduce="none",
     num_slots=1,
-
   )
   cfg.scene.sensors = (self_collision_cfg,)
 
@@ -41,20 +40,20 @@ def booster_k1_flat_tracking_env_cfg(
   assert isinstance(motion_cmd, MotionCommandCfg)
   motion_cmd.anchor_body_name = "Trunk"
   motion_cmd.body_names = (
-    'Trunk',
-    'Left_Hip_Roll',
-    'Left_Shank',
-    'left_foot_link',
-    'Right_Hip_Roll',
-    'Right_Shank',
-    'right_foot_link',
-    'Left_Arm_2',
-    'Left_Arm_3',
-    'left_hand_link',
-    'Right_Arm_2',
-    'Right_Arm_3',
-    'right_hand_link',
-    'Head_2',
+    "Trunk",
+    "Left_Hip_Roll",
+    "Left_Shank",
+    "left_foot_link",
+    "Right_Hip_Roll",
+    "Right_Shank",
+    "right_foot_link",
+    "Left_Arm_2",
+    "Left_Arm_3",
+    "left_hand_link",
+    "Right_Arm_2",
+    "Right_Arm_3",
+    "right_hand_link",
+    "Head_2",
   )
 
   cfg.events["foot_friction"].params[
@@ -63,8 +62,8 @@ def booster_k1_flat_tracking_env_cfg(
   cfg.events["base_com"].params["asset_cfg"].body_names = ("Trunk",)
 
   cfg.terminations["ee_body_pos"].params["body_names"] = (
-    'left_hand_link',
-    'right_hand_link',
+    "left_hand_link",
+    "right_hand_link",
     "left_foot_link",
     "right_foot_link",
   )

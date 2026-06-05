@@ -6,9 +6,9 @@
 
 ## Branches
 
-### `main`
+### `main` — 评估 + Teacher-KL + Latent 任务
 
-主分支主要保留 Teacher-KL blind walking 任务：
+本分支用于**模型评估**和训练 **Teacher-KL** 与 **Slow Latent** 类任务：
 
 ```text
 Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1
@@ -16,11 +16,16 @@ Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1
 Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1
 ```
 
-其中 `TeacherKL` 表示 student 使用 PPO 训练，同时通过 frozen teacher 的动作分布进行 guidance。可以通过配置关闭 teacher guidance，得到纯 PPO；也可以打开 `imitation_only` 做纯 IL。
+其中 `TeacherKL` 表示 student 使用 PPO 训练，同时通过 frozen teacher 的动作分布进行 guidance。`SlowLatent` 在 teacher-student 基础上引入慢变 latent 变量，提高策略稳定性。
 
-### `lstm_teacher_policy`
+本分支同时包含离线评估工具（`scripts/velocity_eval/`），用于：
+- 标准化地形评测（flat, upstairs_10cm/15cm/20cm）
+- 目标金字塔楼梯攀爬评测
+- Policy latent 采集与 PCA 分析
 
-该分支用于 LSTM / boolean stair flag 相关任务：
+### `lstm_teacher_policy` — LSTM + Boolean Stair Flag 任务
+
+该分支用于 LSTM 和 boolean stair flag 相关任务：
 
 ```text
 Mjlab-Velocity-Blind-StairsFlag-TeacherKL-Unitree-G1
@@ -35,10 +40,11 @@ Mjlab-Velocity-Blind-Rough-LSTM-TeacherKL-Unitree-G1
 需要 NVIDIA GPU。推荐使用 `uv` 管理环境：
 
 ```bash
-git clone https://gitee.com/oakcreektech/mjlabvel.git
-cd mjlabvel
+git clone https://github.com/Bern-lab/mjlab_sqm.git
+cd mjlab_sqm
 uv sync --extra cu128
 ```
+
 
 如果已经在仓库里，可以直接使用：
 
@@ -49,7 +55,7 @@ uv run play --help
 
 ## Training
 
-训练 main 分支 Teacher-KL blind rough：
+训练 Teacher-KL blind rough：
 
 ```bash
 uv run train Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1 \
@@ -73,10 +79,12 @@ uv run train Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Un
   --agent.logger tensorboard
 ```
 
-如果显存紧张，可以先降低 `num-envs`：
+训练 target heading Teacher：
 
 ```bash
---env.scene.num-envs 1024
+uv run train Mjlab-Velocity-TargetHeading-Rough-Teacher-Unitree-G1 \
+  --env.scene.num-envs 4096 \
+  --agent.logger tensorboard
 ```
 
 ## Logs
@@ -87,17 +95,11 @@ uv run train Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Un
 logs/rsl_rl/<experiment_name>/<task_id>/<run_name>
 ```
 
-例如：
-
-```text
-logs/rsl_rl/g1_blind_rough_teacherkl/
-logs/rsl_rl/g1_blind_rough_target_navigation_teacherkl/
-logs/rsl_rl/g1_blind_rough_target_navigation_slow_latent_teacherkl/
-```
-
 每个 run 的 `params/agent.yaml` 会保存 seed、PPO 参数、Teacher-KL 设置和是否为 `imitation_only`。
 
 ## Evaluation
+
+### 交互式播放
 
 使用已有 checkpoint 播放策略：
 
@@ -107,16 +109,36 @@ uv run play Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1 \
   --load-checkpoint model_13000.pt
 ```
 
-也可以使用 dummy agent 快速检查环境：
+
+### 离线地形评测
 
 ```bash
-uv run play Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1 --agent zero
-uv run play Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1 --agent random
+uv run python scripts/velocity_eval/eval_policy_on_terrains.py \
+  Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1 \
+  --checkpoint-file /path/to/model.pt \
+  --episodes-per-terrain 50 \
+  --num-envs 50
 ```
 
-## Notes
+输出 JSON（success_rate, fall_rate, collision 统计等）和 PNG 表格。
 
-- Student actor 是盲走策略，部署输入不应包含视觉、height scan、terrain boolean 或真实接触标签。
-- Teacher / critic 可以在训练阶段使用 privileged observation。
-- 对比实验建议固定 seed、terrain 配置、`num_steps_per_env` 和训练迭代数。
+### 目标金字塔评测
 
+```bash
+uv run python scripts/velocity_eval/eval_policy_goal_pyramid.py \
+  Mjlab-Velocity-Blind-Rough-LSTM-TeacherKL-Unitree-G1 \
+  --checkpoint-file /path/to/model.pt \
+  --episodes 50 \
+  --num-envs 50 \
+  --max-episode-length-s 12.0
+```
+
+详见 `scripts/velocity_eval/README.md`。
+
+### 导出部署
+
+将训练好的 policy 导出为 TorchScript 格式：
+
+```bash
+uv run python src/mjlab/scripts/export.py -c <checkpoint> -t Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1
+```

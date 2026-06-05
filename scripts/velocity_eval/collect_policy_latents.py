@@ -195,14 +195,10 @@ def _collect_for_terrain(
         arrays["command"].append(command.detach().cpu().numpy())
         arrays["base_state"].append(base_state.detach().cpu().numpy())
         arrays["gait_phase"].append(gait_phase.detach().cpu().numpy())
-        arrays["gait_phase_sincos"].append(
-          gait_phase_sincos.detach().cpu().numpy()
-        )
+        arrays["gait_phase_sincos"].append(gait_phase_sincos.detach().cpu().numpy())
         arrays["terrain_label"].extend([terrain.label] * batch_size)
         arrays["terrain_name"].extend([terrain.name] * batch_size)
-        arrays["terrain_height_m"].extend(
-          [float(terrain.height_m or 0.0)] * batch_size
-        )
+        arrays["terrain_height_m"].extend([float(terrain.height_m or 0.0)] * batch_size)
         arrays["episode_id"].append(episode_offsets.detach().cpu().numpy())
         arrays["time_step"].append(
           torch.full((batch_size,), step, device=device).detach().cpu().numpy()
@@ -217,7 +213,9 @@ def _collect_for_terrain(
     wrapped.close()
 
 
-def run_collect_latents(task_id: str, cfg: CollectLatentsConfig) -> dict[str, np.ndarray]:
+def run_collect_latents(
+  task_id: str, cfg: CollectLatentsConfig
+) -> dict[str, np.ndarray]:
   configure_torch_backends()
   device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
   terrains = get_terrain_set(cfg.terrain_set)

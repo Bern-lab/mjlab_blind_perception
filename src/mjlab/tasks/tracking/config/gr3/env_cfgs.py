@@ -26,10 +26,9 @@ def fourier_gr3_flat_tracking_env_cfg(
     name="self_collision",
     primary=ContactMatch(mode="subtree", pattern="base_link", entity="robot"),
     secondary=ContactMatch(mode="subtree", pattern="base_link", entity="robot"),
-    fields=("found", ),
+    fields=("found",),
     reduce="none",
     num_slots=1,
-
   )
   cfg.scene.sensors = (self_collision_cfg,)
 
@@ -41,32 +40,30 @@ def fourier_gr3_flat_tracking_env_cfg(
   assert isinstance(motion_cmd, MotionCommandCfg)
   motion_cmd.anchor_body_name = "base_link"
   motion_cmd.body_names = (
-    'base_link',
-    'left_thigh_roll_link',
-    'left_shank_pitch_link',
-    'left_foot_roll_link',
-    'right_thigh_roll_link',
-    'right_shank_pitch_link',
-    'right_foot_roll_link',
-    'torso_link',
-    'left_upper_arm_roll_link',
-    'left_lower_arm_pitch_link',
-    'left_end_effector_link',
-    'right_upper_arm_roll_link',
-    'right_lower_arm_pitch_link',
-    'right_end_effector_link'
+    "base_link",
+    "left_thigh_roll_link",
+    "left_shank_pitch_link",
+    "left_foot_roll_link",
+    "right_thigh_roll_link",
+    "right_shank_pitch_link",
+    "right_foot_roll_link",
+    "torso_link",
+    "left_upper_arm_roll_link",
+    "left_lower_arm_pitch_link",
+    "left_end_effector_link",
+    "right_upper_arm_roll_link",
+    "right_lower_arm_pitch_link",
+    "right_end_effector_link",
   )
 
-  cfg.events["foot_friction"].params[
-    "asset_cfg"
-  ].geom_names = []
+  cfg.events["foot_friction"].params["asset_cfg"].geom_names = []
   cfg.events["base_com"].params["asset_cfg"].body_names = ("base_link",)
 
   cfg.terminations["ee_body_pos"].params["body_names"] = (
-    'left_end_effector_link',
-    'right_end_effector_link',
-    'left_angle_roll_link',
-    'right_angle_roll_link',
+    "left_end_effector_link",
+    "right_end_effector_link",
+    "left_angle_roll_link",
+    "right_angle_roll_link",
   )
 
   cfg.viewer.body_name = "base_link"

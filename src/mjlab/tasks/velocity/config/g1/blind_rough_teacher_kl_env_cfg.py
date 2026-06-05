@@ -6,6 +6,7 @@ from copy import deepcopy
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import CameraSensorCfg
 from mjlab.tasks.velocity import mdp
 from mjlab.tasks.velocity.mdp.teacher_target_heading_command import (
@@ -235,6 +236,43 @@ def _configure_teacherkl_target_navigation(
     func=teacher_target_reached_bonus,
     weight=0.4,
     params={"command_name": "twist"},
+  )
+  del cfg.rewards["toe_riser_contact_memory_penalty"]
+
+  cfg.rewards["foot_step_lip_volume_penalty"] = RewardTermCfg(
+    func=mdp.foot_step_lip_volume_penalty,
+    weight=-3.2,
+    params={
+      "edge_radius": 0.07,
+      "edge_height_band": 0.06,
+      "support_speed_floor": 0.08,
+      "nearest_boundaries": 4,
+      "contact_sensor_name": "feet_ground_contact",
+      "min_terrain_level": 3,
+      "asset_cfg": SceneEntityCfg(
+        "robot",
+        body_names=("left_ankle_roll_link", "right_ankle_roll_link"),
+      ),
+    },
+  )
+  cfg.rewards["toe_step_riser_slab_penalty"] = RewardTermCfg(
+    func=mdp.toe_step_riser_slab_penalty,
+    weight=-4.2,
+    params={
+      "slab_depth": 0.1,
+      "u_margin": 0.02,
+      "v_margin": 0.05,
+      "toe_x_min": 0.08,
+      "toe_v_threshold": 0.02,
+      "approach_speed_floor": 0.08,
+      "surface_tol": 0.005,
+      "nearest_boundaries": 4,
+      "min_terrain_level": 3,
+      "asset_cfg": SceneEntityCfg(
+        "robot",
+        body_names=("left_ankle_roll_link", "right_ankle_roll_link"),
+      ),
+    },
   )
 
 

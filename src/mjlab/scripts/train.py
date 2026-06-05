@@ -2,8 +2,8 @@
 
 import logging
 import os
-import sys
 import re
+import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -18,7 +18,6 @@ from mjlab.tasks.tracking.mdp import MotionCommandCfg
 from mjlab.utils.gpu import select_gpus
 from mjlab.utils.os import (
   dump_yaml,
-  get_checkpoint_path,
   get_checkpoint_path_with_fallback,
   get_task_log_root,
   get_wandb_checkpoint_path,
@@ -202,7 +201,11 @@ def launch_training(task_id: str, args: TrainConfig | None = None):
     if args.agent.load_run and args.agent.load_run != ".*":
       if not log_root_path.exists():
         raise ValueError(f"Log root path does not exist: {log_root_path}")
-      matching = [d for d in log_root_path.iterdir() if d.is_dir() and re.match(args.agent.load_run, d.name)]
+      matching = [
+        d
+        for d in log_root_path.iterdir()
+        if d.is_dir() and re.match(args.agent.load_run, d.name)
+      ]
       if matching:
         matching.sort()
         chosen = matching[-1]
@@ -210,7 +213,9 @@ def launch_training(task_id: str, args: TrainConfig | None = None):
         log_dir = chosen
       else:
         # Fall back to creating a new run if no matching run found.
-        print(f"[WARN] No matching run found for '{args.agent.load_run}' under {log_root_path}; creating a new run.")
+        print(
+          f"[WARN] No matching run found for '{args.agent.load_run}' under {log_root_path}; creating a new run."
+        )
         log_dir = None  # signal to create normally
     else:
       # No explicit run regex provided: try to locate a checkpoint and resume in-place
@@ -224,7 +229,9 @@ def launch_training(task_id: str, args: TrainConfig | None = None):
         print(f"[INFO] Resuming into run directory from checkpoint: {log_dir}")
       except Exception as e:
         # If no checkpoint found, we'll create a new run as before.
-        print(f"[WARN] Could not find checkpoint to resume: {e}; will create a new run.")
+        print(
+          f"[WARN] Could not find checkpoint to resume: {e}; will create a new run."
+        )
         log_dir = None
   else:
     log_dir = None
@@ -235,7 +242,9 @@ def launch_training(task_id: str, args: TrainConfig | None = None):
     log_dir_name: str | None = None
     motion_name: str | None = None
     try:
-      if "motion" in args.env.commands and getattr(args.env.commands["motion"], "motion_file", None):
+      if "motion" in args.env.commands and getattr(
+        args.env.commands["motion"], "motion_file", None
+      ):
         motion_path = Path(args.env.commands["motion"].motion_file)
         motion_name = motion_path.stem
     except Exception:
@@ -243,7 +252,11 @@ def launch_training(task_id: str, args: TrainConfig | None = None):
 
     if motion_name:
       log_root_path.mkdir(parents=True, exist_ok=True)
-      existing = [d.name for d in log_root_path.iterdir() if d.is_dir() and d.name.startswith(f"{motion_name}-Exp-")]
+      existing = [
+        d.name
+        for d in log_root_path.iterdir()
+        if d.is_dir() and d.name.startswith(f"{motion_name}-Exp-")
+      ]
       nums: list[int] = []
       for name in existing:
         m = re.match(rf"^{re.escape(motion_name)}-Exp-(\d+)$", name)

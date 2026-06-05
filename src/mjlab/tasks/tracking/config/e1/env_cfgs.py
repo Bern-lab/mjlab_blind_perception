@@ -26,10 +26,9 @@ def noetix_e1_flat_tracking_env_cfg(
     name="self_collision",
     primary=ContactMatch(mode="subtree", pattern="base_link", entity="robot"),
     secondary=ContactMatch(mode="subtree", pattern="base_link", entity="robot"),
-    fields=("found", ),
+    fields=("found",),
     reduce="none",
     num_slots=1,
-
   )
   cfg.scene.sensors = (self_collision_cfg,)
 
@@ -41,41 +40,41 @@ def noetix_e1_flat_tracking_env_cfg(
   assert isinstance(motion_cmd, MotionCommandCfg)
   motion_cmd.anchor_body_name = "base_link"
   motion_cmd.body_names = (
-    'base_link',
-    'l_leg_hip_yaw_link',
-    'l_leg_hip_roll_link',
-    'l_leg_hip_pitch_link',
-    'l_leg_knee_link',
-    'l_leg_ankle_pitch_link',
-    'l_leg_ankle_roll_link',
-    'r_leg_hip_yaw_link',
-    'r_leg_hip_roll_link',
-    'r_leg_hip_pitch_link',
-    'r_leg_knee_link',
-    'r_leg_ankle_pitch_link',
-    'r_leg_ankle_roll_link',
-    'waist_yaw_link',
-    'waist_roll_link',
-    'l_arm_shoulder_pitch_link',
-    'l_arm_shoulder_roll_link',
-    'l_arm_shoulder_yaw_link',
-    'l_arm_elbow_pitch_link',
-    'l_arm_elbow_yaw_link',
-    'r_arm_shoulder_pitch_link',
-    'r_arm_shoulder_roll_link',
-    'r_arm_shoulder_yaw_link',
-    'r_arm_elbow_pitch_link',
-    'r_arm_elbow_yaw_link'
+    "base_link",
+    "l_leg_hip_yaw_link",
+    "l_leg_hip_roll_link",
+    "l_leg_hip_pitch_link",
+    "l_leg_knee_link",
+    "l_leg_ankle_pitch_link",
+    "l_leg_ankle_roll_link",
+    "r_leg_hip_yaw_link",
+    "r_leg_hip_roll_link",
+    "r_leg_hip_pitch_link",
+    "r_leg_knee_link",
+    "r_leg_ankle_pitch_link",
+    "r_leg_ankle_roll_link",
+    "waist_yaw_link",
+    "waist_roll_link",
+    "l_arm_shoulder_pitch_link",
+    "l_arm_shoulder_roll_link",
+    "l_arm_shoulder_yaw_link",
+    "l_arm_elbow_pitch_link",
+    "l_arm_elbow_yaw_link",
+    "r_arm_shoulder_pitch_link",
+    "r_arm_shoulder_roll_link",
+    "r_arm_shoulder_yaw_link",
+    "r_arm_elbow_pitch_link",
+    "r_arm_elbow_yaw_link",
   )
 
   cfg.events["foot_friction"].params[
     "asset_cfg"
-  ].geom_names = []#r"^(left|right)_foot[1-7]_collision$"
+  ].geom_names = []  # r"^(left|right)_foot[1-7]_collision$"
   cfg.events["base_com"].params["asset_cfg"].body_names = ("base_link",)
 
   cfg.terminations["ee_body_pos"].params["body_names"] = (
-    "l_leg_ankle_roll_link", # 左脚末端
-    "r_leg_ankle_roll_link", # 右脚末端
+    "l_leg_ankle_roll_link",  # 左脚末端
+    "r_leg_ankle_roll_link",  # 右脚末端
     "l_arm_elbow_yaw_link",  # 左手末端
     "r_arm_elbow_yaw_link",  # 右手末端
   )

@@ -91,12 +91,8 @@ class StairEventDetector:
     self._prev_heel_contact = torch.zeros(
       env.num_envs, num_feet, device=env.device, dtype=torch.bool
     )
-    self._toe_contact_cooldown = torch.zeros(
-      env.num_envs, num_feet, device=env.device
-    )
-    self._heel_contact_cooldown = torch.zeros(
-      env.num_envs, num_feet, device=env.device
-    )
+    self._toe_contact_cooldown = torch.zeros(env.num_envs, num_feet, device=env.device)
+    self._heel_contact_cooldown = torch.zeros(env.num_envs, num_feet, device=env.device)
     self._last_true_contact_slots: dict[str, torch.Tensor] | None = None
     self._last_true_contact_pos_w: torch.Tensor | None = None
 
@@ -233,9 +229,7 @@ class StairEventDetector:
 
     foot_pos_w = asset.data.body_link_pos_w[:, self.foot_asset_cfg.body_ids, :]
     foot_quat_w = asset.data.body_link_quat_w[:, self.foot_asset_cfg.body_ids, :]
-    expanded_quat = foot_quat_w[:, :, None, :].expand(
-      num_envs, num_feet, num_slots, 4
-    )
+    expanded_quat = foot_quat_w[:, :, None, :].expand(num_envs, num_feet, num_slots, 4)
     contact_pos_b = quat_apply_inverse(
       expanded_quat,
       contact_pos_w - foot_pos_w[:, :, None, :],
@@ -262,14 +256,10 @@ class StairEventDetector:
       self._heel_contact_cooldown - env.step_dt, min=0.0
     )
     new_toe_by_foot = (
-      toe_hit_by_foot
-      & ~self._prev_toe_contact
-      & (self._toe_contact_cooldown <= 0.0)
+      toe_hit_by_foot & ~self._prev_toe_contact & (self._toe_contact_cooldown <= 0.0)
     )
     new_heel_by_foot = (
-      heel_hit_by_foot
-      & ~self._prev_heel_contact
-      & (self._heel_contact_cooldown <= 0.0)
+      heel_hit_by_foot & ~self._prev_heel_contact & (self._heel_contact_cooldown <= 0.0)
     )
     if bool(new_toe_by_foot.any().item()):
       self._toe_contact_cooldown = torch.where(
@@ -325,23 +315,17 @@ class StairEventDetector:
 
     return {
       "toe_riser_collision_by_level": (
-        self._toe_events_by_level(
-          env, boundaries, valid, terrain_height_m, max_levels
-        )
+        self._toe_events_by_level(env, boundaries, valid, terrain_height_m, max_levels)
         if self._toe is not None
         else empty["toe_riser_collision_by_level"]
       ),
       "heel_riser_collision_by_level": (
-        self._heel_events_by_level(
-          env, boundaries, valid, terrain_height_m, max_levels
-        )
+        self._heel_events_by_level(env, boundaries, valid, terrain_height_m, max_levels)
         if self._heel is not None
         else empty["heel_riser_collision_by_level"]
       ),
       "foot_lip_collision_by_level": (
-        self._lip_events_by_level(
-          env, boundaries, valid, terrain_height_m, max_levels
-        )
+        self._lip_events_by_level(env, boundaries, valid, terrain_height_m, max_levels)
         if self._lip is not None
         else empty["foot_lip_collision_by_level"]
       ),
@@ -490,10 +474,7 @@ class StairEventDetector:
     )
     inside_slab = (s >= -self.params.surface_tol) & (s <= self.params.slab_depth)
     active = (
-      valid[:, None, None, :]
-      & inside_face
-      & inside_slab
-      & (toe_speed_to_riser > 0.0)
+      valid[:, None, None, :] & inside_face & inside_slab & (toe_speed_to_riser > 0.0)
     )
     active_boundary = active.any(dim=(1, 2))
     levels = self._boundary_levels(boundaries, terrain_height_m, max_levels, valid)
@@ -533,9 +514,7 @@ class StairEventDetector:
   ) -> torch.Tensor:
     points_w, _ = self._lip._foot_points_w(env, self.foot_asset_cfg)
     num_envs, num_feet = points_w.shape[:2]
-    expanded_boundaries = boundaries[:, None, :, :].expand(
-      num_envs, num_feet, -1, -1
-    )
+    expanded_boundaries = boundaries[:, None, :, :].expand(num_envs, num_feet, -1, -1)
     p0 = expanded_boundaries[..., 0:3]
     p1 = expanded_boundaries[..., 3:6]
     z_high = expanded_boundaries[..., 10]
@@ -543,11 +522,7 @@ class StairEventDetector:
     height_ok = points_w[:, :, :, None, 2] >= z_high[:, :, None, :] - (
       self.params.edge_height_band
     )
-    active = (
-      valid[:, None, None, :]
-      & (distance <= self.params.edge_radius)
-      & height_ok
-    )
+    active = valid[:, None, None, :] & (distance <= self.params.edge_radius) & height_ok
     active_boundary = active.any(dim=(1, 2))
     levels = self._boundary_levels(boundaries, terrain_height_m, max_levels, valid)
     return self._level_any(active_boundary, levels, valid, max_levels)

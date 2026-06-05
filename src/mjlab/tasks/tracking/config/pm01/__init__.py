@@ -15,7 +15,9 @@ register_mjlab_task(
 register_mjlab_task(
   task_id="Mjlab-Tracking-Flat-Engineai-PM01-No-State-Estimation",
   env_cfg=engineai_pm01_flat_tracking_env_cfg(has_state_estimation=False),
-  play_env_cfg=engineai_pm01_flat_tracking_env_cfg(has_state_estimation=False, play=True),
+  play_env_cfg=engineai_pm01_flat_tracking_env_cfg(
+    has_state_estimation=False, play=True
+  ),
   rl_cfg=engineai_pm01_tracking_ppo_runner_cfg(),
   runner_cls=MotionTrackingOnPolicyRunner,
 )

@@ -22,7 +22,9 @@ def phase(env: ManagerBasedRlEnv, period: float, command_name: str) -> torch.Ten
   phase[:, 1] = torch.cos(global_phase * torch.pi * 2.0)
 
   command = env.command_manager.get_command(command_name)
-  stand_mask = torch.linalg.norm(env.command_manager.get_command(command_name), dim=1) < 0.1#(command[:, :3], dim=1)
+  stand_mask = (
+    torch.linalg.norm(env.command_manager.get_command(command_name), dim=1) < 0.1
+  )  # (command[:, :3], dim=1)
   return torch.where(stand_mask.unsqueeze(1), torch.zeros_like(phase), phase)
 
 

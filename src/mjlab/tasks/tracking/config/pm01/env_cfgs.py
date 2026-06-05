@@ -33,7 +33,6 @@ def engineai_pm01_flat_tracking_env_cfg(
     fields=("found", "force"),
     reduce="none",
     num_slots=1,
-
   )
   cfg.scene.sensors = (self_collision_cfg,)
 
@@ -45,30 +44,30 @@ def engineai_pm01_flat_tracking_env_cfg(
   assert isinstance(motion_cmd, MotionCommandCfg)
   motion_cmd.anchor_body_name = "LINK_BASE"
   motion_cmd.body_names = (
-    'LINK_BASE',
-    'LINK_HIP_ROLL_L',
-    'LINK_KNEE_PITCH_L',
-    'LINK_ANKLE_ROLL_L',
-    'LINK_HIP_ROLL_R',
-    'LINK_KNEE_PITCH_R',
-    'LINK_ANKLE_ROLL_R',
-    'LINK_TORSO_YAW',
-    'LINK_SHOULDER_ROLL_L',
-    'LINK_ELBOW_PITCH_L',
-    'LINK_ELBOW_END_L',
-    'LINK_SHOULDER_ROLL_R',
-    'LINK_ELBOW_PITCH_R',
-    'LINK_ELBOW_END_R',
+    "LINK_BASE",
+    "LINK_HIP_ROLL_L",
+    "LINK_KNEE_PITCH_L",
+    "LINK_ANKLE_ROLL_L",
+    "LINK_HIP_ROLL_R",
+    "LINK_KNEE_PITCH_R",
+    "LINK_ANKLE_ROLL_R",
+    "LINK_TORSO_YAW",
+    "LINK_SHOULDER_ROLL_L",
+    "LINK_ELBOW_PITCH_L",
+    "LINK_ELBOW_END_L",
+    "LINK_SHOULDER_ROLL_R",
+    "LINK_ELBOW_PITCH_R",
+    "LINK_ELBOW_END_R",
   )
 
   cfg.events["foot_friction"].params[
     "asset_cfg"
-  ].geom_names = [] #TODO 改正则与脚底碰撞匹配
+  ].geom_names = []  # TODO 改正则与脚底碰撞匹配
   cfg.events["base_com"].params["asset_cfg"].body_names = ("LINK_BASE",)
 
   cfg.terminations["ee_body_pos"].params["body_names"] = (
-    'LINK_ELBOW_END_L',
-    'LINK_ELBOW_END_R',
+    "LINK_ELBOW_END_L",
+    "LINK_ELBOW_END_R",
     "LINK_ANKLE_ROLL_L",
     "LINK_ANKLE_ROLL_R",
   )

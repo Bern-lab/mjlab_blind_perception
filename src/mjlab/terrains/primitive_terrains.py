@@ -59,9 +59,7 @@ def _append_step_boundary(
     return
   normal = normal / normal_norm
   boundaries.append(
-    np.concatenate(
-      [p0, p1, normal, np.asarray([z_low, z_high], dtype=np.float32)]
-    )
+    np.concatenate([p0, p1, normal, np.asarray([z_low, z_high], dtype=np.float32)])
   )
 
 
@@ -100,16 +98,36 @@ def _append_square_step_boundaries(
     raise ValueError(f"Unknown normal_direction: {normal_direction}")
 
   _append_step_boundary(
-    boundaries, (x_min, y_max, z_high), (x_max, y_max, z_high), top_normal, z_low, z_high
+    boundaries,
+    (x_min, y_max, z_high),
+    (x_max, y_max, z_high),
+    top_normal,
+    z_low,
+    z_high,
   )
   _append_step_boundary(
-    boundaries, (x_min, y_min, z_high), (x_max, y_min, z_high), bottom_normal, z_low, z_high
+    boundaries,
+    (x_min, y_min, z_high),
+    (x_max, y_min, z_high),
+    bottom_normal,
+    z_low,
+    z_high,
   )
   _append_step_boundary(
-    boundaries, (x_max, y_min, z_high), (x_max, y_max, z_high), right_normal, z_low, z_high
+    boundaries,
+    (x_max, y_min, z_high),
+    (x_max, y_max, z_high),
+    right_normal,
+    z_low,
+    z_high,
   )
   _append_step_boundary(
-    boundaries, (x_min, y_min, z_high), (x_min, y_max, z_high), left_normal, z_low, z_high
+    boundaries,
+    (x_min, y_min, z_high),
+    (x_min, y_max, z_high),
+    left_normal,
+    z_low,
+    z_high,
   )
 
 
@@ -337,9 +355,7 @@ class BoxPyramidStairsTerrainCfg(SubTerrainCfg):
       for box, color in zip(boxes, box_colors, strict=True)
     ]
     boundaries = (
-      np.asarray(step_boundaries, dtype=np.float32)
-      if step_boundaries
-      else None
+      np.asarray(step_boundaries, dtype=np.float32) if step_boundaries else None
     )
     return TerrainOutput(
       origin=origin, geometries=geometries, step_boundaries=boundaries
@@ -531,9 +547,7 @@ class BoxInvertedPyramidStairsTerrainCfg(BoxPyramidStairsTerrainCfg):
       for box, color in zip(boxes, box_colors, strict=True)
     ]
     boundaries = (
-      np.asarray(step_boundaries, dtype=np.float32)
-      if step_boundaries
-      else None
+      np.asarray(step_boundaries, dtype=np.float32) if step_boundaries else None
     )
     return TerrainOutput(
       origin=origin, geometries=geometries, step_boundaries=boundaries

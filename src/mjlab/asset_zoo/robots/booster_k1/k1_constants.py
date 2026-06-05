@@ -9,7 +9,6 @@ from mjlab.actuator import BuiltinPositionActuatorCfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
 from mjlab.utils.actuator import (
   ElectricActuator,
-  reflected_inertia_from_two_stage_planetary,
 )
 from mjlab.utils.os import update_assets
 from mjlab.utils.spec_config import CollisionCfg
@@ -19,7 +18,12 @@ from mjlab.utils.spec_config import CollisionCfg
 ##
 
 K1_XML: Path = (
-  MJLAB_SRC_PATH / "asset_zoo" / "robots" / "booster_k1" / "xmls" / "K1_serial_armature.xml"
+  MJLAB_SRC_PATH
+  / "asset_zoo"
+  / "robots"
+  / "booster_k1"
+  / "xmls"
+  / "K1_serial_armature.xml"
   # MJLAB_SRC_PATH / "asset_zoo" / "robots" / "booster_k1" / "xmls" / "K1_serial_moonwalk.xml"
 )
 assert K1_XML.exists()
@@ -36,6 +40,7 @@ def get_spec() -> mujoco.MjSpec:
   spec.assets = get_assets(spec.meshdir)
   return spec
 
+
 ##
 # Actuator config.
 ##
@@ -44,15 +49,15 @@ def get_spec() -> mujoco.MjSpec:
 # Based on the configuration provided:
 # - 6416 motor: Hip Pitch, Knee Pitch
 # - 4310 motor: Hip Yaw
-# - 6408 motor: Hip Pitch joints  
+# - 6408 motor: Hip Pitch joints
 # - 4315 motor: Hip Roll
 # - ROB-14 motor: Arms and head
 
 ARMATURE_6416 = 0.095625
 ARMATURE_4310 = 0.0282528
-ARMATURE_6408 = 0.071719   #原始0.0478125   0.071719
-ARMATURE_4315 = 0.0353161 #原始0.0339552    0.0353161
-ARMATURE_ROB_14 = 0.001    #原始0.001    0.01
+ARMATURE_6408 = 0.071719  # 原始0.0478125   0.071719
+ARMATURE_4315 = 0.0353161  # 原始0.0339552    0.0353161
+ARMATURE_ROB_14 = 0.001  # 原始0.001    0.01
 
 ACTUATOR_6416 = ElectricActuator(
   reflected_inertia=ARMATURE_6416,
@@ -66,7 +71,7 @@ ACTUATOR_4310 = ElectricActuator(
 )
 ACTUATOR_6408 = ElectricActuator(
   reflected_inertia=ARMATURE_6408,
-  velocity_limit=32.0,  #原32
+  velocity_limit=32.0,  # 原32
   effort_limit=30.0,
 )
 ACTUATOR_4315 = ElectricActuator(
@@ -133,7 +138,10 @@ K1_ACTUATOR_KNEE_PITCH = BuiltinPositionActuatorCfg(
 
 # K1 Feet actuators
 K1_ACTUATOR_FEET = BuiltinPositionActuatorCfg(
-  target_names_expr=(".*_Ankle_Pitch", ".*_Ankle_Roll",),
+  target_names_expr=(
+    ".*_Ankle_Pitch",
+    ".*_Ankle_Roll",
+  ),
   effort_limit=20.0,
   armature=2.0 * ARMATURE_4310,
   stiffness=30.0,
@@ -277,6 +285,7 @@ K1_ARTICULATION = EntityArticulationInfoCfg(
   soft_joint_pos_limit_factor=0.9,
 )
 
+
 def get_k1_robot_cfg() -> EntityCfg:
   return EntityCfg(
     init_state=HOME_KEYFRAME,
@@ -284,6 +293,7 @@ def get_k1_robot_cfg() -> EntityCfg:
     spec_fn=get_spec,
     articulation=K1_ARTICULATION,
   )
+
 
 K1_ACTION_SCALE: dict[str, float] = {}
 for a in K1_ARTICULATION.actuators:
@@ -297,28 +307,28 @@ for a in K1_ARTICULATION.actuators:
 
 # K1 Joint names (for reference)
 K1_JOINTS = [
-  'AAHead_yaw',
-  'Head_pitch',
-  'ALeft_Shoulder_Pitch',
-  'Left_Shoulder_Roll',
-  'Left_Elbow_Pitch',
-  'Left_Elbow_Yaw',
-  'ARight_Shoulder_Pitch',
-  'Right_Shoulder_Roll',
-  'Right_Elbow_Pitch',
-  'Right_Elbow_Yaw',
-  'Left_Hip_Pitch',
-  'Left_Hip_Roll',
-  'Left_Hip_Yaw',
-  'Left_Knee_Pitch',
-  'Left_Ankle_Pitch',
-  'Left_Ankle_Roll',
-  'Right_Hip_Pitch',
-  'Right_Hip_Roll',
-  'Right_Hip_Yaw',
-  'Right_Knee_Pitch',
-  'Right_Ankle_Pitch',
-  'Right_Ankle_Roll',
+  "AAHead_yaw",
+  "Head_pitch",
+  "ALeft_Shoulder_Pitch",
+  "Left_Shoulder_Roll",
+  "Left_Elbow_Pitch",
+  "Left_Elbow_Yaw",
+  "ARight_Shoulder_Pitch",
+  "Right_Shoulder_Roll",
+  "Right_Elbow_Pitch",
+  "Right_Elbow_Yaw",
+  "Left_Hip_Pitch",
+  "Left_Hip_Roll",
+  "Left_Hip_Yaw",
+  "Left_Knee_Pitch",
+  "Left_Ankle_Pitch",
+  "Left_Ankle_Roll",
+  "Right_Hip_Pitch",
+  "Right_Hip_Roll",
+  "Right_Hip_Yaw",
+  "Right_Knee_Pitch",
+  "Right_Ankle_Pitch",
+  "Right_Ankle_Roll",
 ]
 
 if __name__ == "__main__":

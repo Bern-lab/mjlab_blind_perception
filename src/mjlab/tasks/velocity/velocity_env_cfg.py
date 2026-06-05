@@ -375,7 +375,7 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
     ),
     "idle_penalty": RewardTermCfg(
       func=mdp.idle_penalty,
-      weight=-2.0,#-2
+      weight=-2.0,  # -2
       params={
         "command_name": "twist",
         "command_threshold": 0.2,
@@ -392,7 +392,7 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
         "command_threshold": 0.1,
         "command_name": "twist",
         "sensor_name": "feet_ground_contact",
-      }
+      },
     ),
     "base_height_above_support": RewardTermCfg(
       func=mdp.base_height_above_support,

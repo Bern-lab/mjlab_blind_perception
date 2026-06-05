@@ -53,7 +53,9 @@ class TerrainOutput:
   """Spawn origin position (x, y, z) in the sub-terrain's local frame."""
   geometries: list[TerrainGeometry]
   """List of geometry elements comprising this terrain."""
-  flat_patches: dict[str, np.ndarray] | None = None#关联平坦点，保存找到的点位置，key是点的名字，value是一个(N, 3)的数组，包含N个平坦点的世界坐标。如果某个地形没有生成平坦点，则对应的值为None。
+  flat_patches: dict[str, np.ndarray] | None = (
+    None  # 关联平坦点，保存找到的点位置，key是点的名字，value是一个(N, 3)的数组，包含N个平坦点的世界坐标。如果某个地形没有生成平坦点，则对应的值为None。
+  )
   """Named sets of flat patch positions, each an (N, 3) array. None if not configured."""
   step_boundaries: np.ndarray | None = None
   """Height-discontinuity boundaries as ``[p0_high, p1_high, normal_to_low, z_low, z_high]`` rows."""
@@ -199,10 +201,7 @@ class TerrainGenerator:
 
     self.terrain_origins = np.zeros((self.cfg.num_rows, self._num_cols, 3))
     self._step_boundaries_tiles: list[list[np.ndarray]] = [
-      [
-        np.zeros((0, 11), dtype=np.float32)
-        for _ in range(self._num_cols)
-      ]
+      [np.zeros((0, 11), dtype=np.float32) for _ in range(self._num_cols)]
       for _ in range(self.cfg.num_rows)
     ]
     self.step_boundaries_by_tile = np.zeros(

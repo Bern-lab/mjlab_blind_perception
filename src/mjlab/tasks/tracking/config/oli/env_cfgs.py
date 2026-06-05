@@ -29,7 +29,6 @@ def limx_oli_flat_tracking_env_cfg(
     fields=("found", "force"),
     reduce="none",
     num_slots=1,
-
   )
   cfg.scene.sensors = (self_collision_cfg,)
 
@@ -58,16 +57,14 @@ def limx_oli_flat_tracking_env_cfg(
     "right_wrist_roll_link",
   )
 
-  cfg.events["foot_friction"].params[
-    "asset_cfg"
-  ].geom_names = [r"^(left|right)_foot$"]
+  cfg.events["foot_friction"].params["asset_cfg"].geom_names = [r"^(left|right)_foot$"]
   cfg.events["base_com"].params["asset_cfg"].body_names = "base_link"
 
   cfg.terminations["ee_body_pos"].params["body_names"] = (
-      "left_wrist_roll_link",
-      "right_wrist_roll_link",
-      "left_ankle_roll_link",
-      "right_ankle_roll_link",
+    "left_wrist_roll_link",
+    "right_wrist_roll_link",
+    "left_ankle_roll_link",
+    "right_ankle_roll_link",
   )
 
   cfg.viewer.body_name = "base_link"

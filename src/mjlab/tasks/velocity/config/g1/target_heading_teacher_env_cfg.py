@@ -286,11 +286,11 @@ def unitree_g1_target_heading_teacher_env_cfg(
   cfg.rewards["pose"].params["std_standing"] = {".*": 0.05}
   cfg.rewards["pose"].params["std_walking"] = {
     # Lower body.
-    r".*hip_pitch.*": 0.4,#0.3
+    r".*hip_pitch.*": 0.4,  # 0.3
     r".*hip_roll.*": 0.15,
     r".*hip_yaw.*": 0.15,
-    r".*knee.*": 0.45,#35
-    r".*ankle_pitch.*": 0.20,#25
+    r".*knee.*": 0.45,  # 35
+    r".*ankle_pitch.*": 0.20,  # 25
     r".*ankle_roll.*": 0.1,
     # Waist.
     r".*waist_yaw.*": 0.2,
@@ -331,7 +331,6 @@ def unitree_g1_target_heading_teacher_env_cfg(
 
   cfg.rewards["action_rate_l2"].weight = -0.15
 
-
   cfg.rewards["joint_acc_l2"] = RewardTermCfg(
     func=mdp.joint_acc_l2,
     weight=-2.5e-7,
@@ -361,7 +360,9 @@ def unitree_g1_target_heading_teacher_env_cfg(
       params={},
     )
 
-    if cfg.scene.terrain is not None and cfg.scene.terrain.terrain_generator is not None:
+    if (
+      cfg.scene.terrain is not None and cfg.scene.terrain.terrain_generator is not None
+    ):
       cfg.scene.terrain.terrain_generator.curriculum = False
       cfg.scene.terrain.terrain_generator.num_cols = 5
       cfg.scene.terrain.terrain_generator.num_rows = 5

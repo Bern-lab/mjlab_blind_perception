@@ -245,7 +245,5 @@ class RslRlTeacherKLRunnerCfg(RslRlOnPolicyRunnerCfg):
     )
   )
   """The frozen teacher actor configuration."""
-  algorithm: RslRlPpoAlgorithmCfg = field(
-    default_factory=RslRlPpoTeacherKLAlgorithmCfg
-  )
+  algorithm: RslRlPpoAlgorithmCfg = field(default_factory=RslRlPpoTeacherKLAlgorithmCfg)
   """The PPO + teacher-KL algorithm configuration."""

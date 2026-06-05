@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from pathlib import Path
-import re
 from typing import Any
 
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper

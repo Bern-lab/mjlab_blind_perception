@@ -79,7 +79,7 @@ class EvalTerrainSpec:
     raise ValueError(f"Unsupported terrain kind: {self.kind!r}")
 
 
-EVAL_TERRAIN_SETS: dict[str, tuple[EvalTerrainSpec, ...]] = {#地形类型
+EVAL_TERRAIN_SETS: dict[str, tuple[EvalTerrainSpec, ...]] = {  # 地形类型
   "eval_v1": (
     EvalTerrainSpec(name="flat", label="flat", kind="flat"),
     EvalTerrainSpec(
@@ -304,9 +304,7 @@ def apply_eval_overrides(
 
   cfg.curriculum = {}
   _fix_reset_events(cfg)
-  _fix_velocity_command(
-    cfg, command=command, max_episode_length_s=max_episode_length_s
-  )
+  _fix_velocity_command(cfg, command=command, max_episode_length_s=max_episode_length_s)
   if enable_riser_contact_sensor:
     _enable_eval_riser_contact_sensor(cfg)
 

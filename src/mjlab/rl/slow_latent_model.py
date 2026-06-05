@@ -277,10 +277,9 @@ class _TorchLSTMSlowLatentMLPModel(nn.Module):
       (self.hidden_state, self.cell_state),
     )
     z_candidate = self.latent_head(rnn_out.squeeze(0))
-    z = (
-      (1.0 - self.latent_alpha) * self.slow_latent.squeeze(0)
-      + self.latent_alpha * z_candidate
-    )
+    z = (1.0 - self.latent_alpha) * self.slow_latent.squeeze(
+      0
+    ) + self.latent_alpha * z_candidate
     self.hidden_state[:] = h
     self.cell_state[:] = c
     self.slow_latent[:] = z.unsqueeze(0)
@@ -333,10 +332,7 @@ class _OnnxLSTMSlowLatentMLPModel(nn.Module):
     x = self.obs_normalizer(obs)
     rnn_out, (h, c) = self.encoder(x.unsqueeze(0), (h_in, c_in))
     z_candidate = self.latent_head(rnn_out.squeeze(0))
-    z = (
-      (1.0 - self.latent_alpha) * z_in.squeeze(0)
-      + self.latent_alpha * z_candidate
-    )
+    z = (1.0 - self.latent_alpha) * z_in.squeeze(0) + self.latent_alpha * z_candidate
     out = self.mlp(torch.cat((x, z), dim=-1))
     actions = self.deterministic_output(out)
     return actions, h, c, z.unsqueeze(0)

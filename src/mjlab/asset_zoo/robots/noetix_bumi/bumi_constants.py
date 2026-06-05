@@ -9,7 +9,6 @@ from mjlab.actuator import BuiltinPositionActuatorCfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
 from mjlab.utils.actuator import (
   ElectricActuator,
-  reflected_inertia_from_two_stage_planetary,
 )
 from mjlab.utils.os import update_assets
 from mjlab.utils.spec_config import CollisionCfg
@@ -36,31 +35,30 @@ def get_spec() -> mujoco.MjSpec:
   spec.assets = get_assets(spec.meshdir)
   return spec
 
+
 ##
 # Actuator config.  电机参数
 ##
 
-ARMATURE_431025 =  0.0018606249999999999 #hip yaw
-ARMATURE_431536 =  0.007642512   #hip row,hip pitch,knee
-ARMATURE_431040 =  0.0045024  #waist
-ARMATURE_LZ05 =  0.001    #arm
+ARMATURE_431025 = 0.0018606249999999999  # hip yaw
+ARMATURE_431536 = 0.007642512  # hip row,hip pitch,knee
+ARMATURE_431040 = 0.0045024  # waist
+ARMATURE_LZ05 = 0.001  # arm
 
-ARMATURE_DM4340 = 0.032   # 未调用
-ARMATURE_YKS4315 = 0.033048  #未调用
-ARMATURE_LZ00 =  0.0007   # 未调用
+ARMATURE_DM4340 = 0.032  # 未调用
+ARMATURE_YKS4315 = 0.033048  # 未调用
+ARMATURE_LZ00 = 0.0007  # 未调用
 
 #############  BUMI  inertia 电子转动惯量
 
-inertia_arm = ARMATURE_LZ05 # arm
-inertia_waist_yaw = ARMATURE_431040 # waist
-inertia_hip_yaw = 0.000107 +  ARMATURE_431025 # hip yaw  拟合优度 (R²) : 0.9935  巨小
-inertia_hip_roll = 0.209604  + ARMATURE_431536 # hip roll    拟合优度 (R²) : 0.60
-inertia_hip_pitch = 0.319813  + ARMATURE_431536  # hip pitch    拟合优度 (R²) : 0.9884
-inertia_knee = 0.028678  + ARMATURE_431536 # knee    拟合优度 (R²) : 0.8447
-inertia_ankle_pitch_real = 0.021115 # ankle_pitch    拟合优度 (R²) : 0.8645
-inertia_ankle_roll_real = 0.002829 # ankle_roll    拟合优度 (R²) : 0.6867
-
-
+inertia_arm = ARMATURE_LZ05  # arm
+inertia_waist_yaw = ARMATURE_431040  # waist
+inertia_hip_yaw = 0.000107 + ARMATURE_431025  # hip yaw  拟合优度 (R²) : 0.9935  巨小
+inertia_hip_roll = 0.209604 + ARMATURE_431536  # hip roll    拟合优度 (R²) : 0.60
+inertia_hip_pitch = 0.319813 + ARMATURE_431536  # hip pitch    拟合优度 (R²) : 0.9884
+inertia_knee = 0.028678 + ARMATURE_431536  # knee    拟合优度 (R²) : 0.8447
+inertia_ankle_pitch_real = 0.021115  # ankle_pitch    拟合优度 (R²) : 0.8645
+inertia_ankle_roll_real = 0.002829  # ankle_roll    拟合优度 (R²) : 0.6867
 
 
 #############################
@@ -99,7 +97,7 @@ NATURAL_FREQ_3 = 5 * 2.0 * 3.1415926535  #  for 5Hz
 NATURAL_FREQ_4 = 10 * 2.0 * 3.1415926535  #  for 5Hz  用这个试试，这个应该是10Hz吧
 
 
-#为什么身体各个部位用的Hz大小不一样？
+# 为什么身体各个部位用的Hz大小不一样？
 STIFFNESS_arm = inertia_arm * NATURAL_FREQ_4**2 * 3
 STIFFNESS_waist = inertia_waist_yaw * NATURAL_FREQ_4**2 * 3
 STIFFNESS_hip_yaw = inertia_hip_yaw * NATURAL_FREQ_4**2 * 2
@@ -113,7 +111,6 @@ STIFFNESS_ankle_pitch = inertia_ankle_pitch_real * NATURAL_FREQ_1**2
 STIFFNESS_ankle_roll = inertia_ankle_roll_real * NATURAL_FREQ_1**2
 
 
-
 DAMPING_arm = 2 * inertia_arm * NATURAL_FREQ_4 * 3
 DAMPING_waist = 2 * inertia_waist_yaw * NATURAL_FREQ_4 * 6
 DAMPING_hip_yaw = 2 * inertia_hip_yaw * NATURAL_FREQ_4 * 8
@@ -125,7 +122,6 @@ DAMPING_knee = 0.9 * inertia_knee * NATURAL_FREQ_3 * 2
 
 DAMPING_ankle_pitch = 0.9 * inertia_ankle_pitch_real * NATURAL_FREQ_1
 DAMPING_ankle_roll = 0.9 * inertia_ankle_roll_real * NATURAL_FREQ_1
-
 
 
 # K1 Leg actuators - Hip Pitch (6408 motor)
@@ -237,7 +233,7 @@ HOME_KEYFRAME = EntityCfg.InitialStateCfg(
   joint_vel={".*": 0.0},
 )
 
-#原始bumi.py没有该套参数
+# 原始bumi.py没有该套参数
 KNEES_BENT_KEYFRAME = EntityCfg.InitialStateCfg(
   pos=(0, 0, 0.65),
   joint_pos={
@@ -274,18 +270,13 @@ KNEES_BENT_KEYFRAME = EntityCfg.InitialStateCfg(
 # Self-collisions are given condim=1 while foot collisions
 # are given condim=3 and custom friction and solimp.
 FULL_COLLISION = CollisionCfg(
-    geom_names_expr=(r"collision_.*",),
-    condim={
-        r"^collision_(left|right)_ankle$": 3,
-        r"^collision_.*": 1
-    },
-    priority={
-        r"^collision_(left|right)_ankle$": 1
-    },
-    friction={
-        # 匹配collision_left_ankle和collision_right_ankle（对应脚踝），设防滑摩擦
-        r"^collision_(left|right)_ankle$": (0.6,)
-    },
+  geom_names_expr=(r"collision_.*",),
+  condim={r"^collision_(left|right)_ankle$": 3, r"^collision_.*": 1},
+  priority={r"^collision_(left|right)_ankle$": 1},
+  friction={
+    # 匹配collision_left_ankle和collision_right_ankle（对应脚踝），设防滑摩擦
+    r"^collision_(left|right)_ankle$": (0.6,)
+  },
 )
 
 FULL_COLLISION_WITHOUT_SELF = CollisionCfg(
@@ -326,6 +317,7 @@ BUMI_ARTICULATION = EntityArticulationInfoCfg(
   soft_joint_pos_limit_factor=0.9,
 )
 
+
 def get_bumi_robot_cfg() -> EntityCfg:
   """Get a fresh G1 robot configuration instance.
 
@@ -339,6 +331,7 @@ def get_bumi_robot_cfg() -> EntityCfg:
     articulation=BUMI_ARTICULATION,
   )
 
+
 BUMI_ACTION_SCALE: dict[str, float] = {}
 for a in BUMI_ARTICULATION.actuators:
   assert isinstance(a, BuiltinPositionActuatorCfg)
@@ -351,28 +344,28 @@ for a in BUMI_ARTICULATION.actuators:
 
 # BUMI Joint names (for reference)
 BUMI_JOINTS = [
-     "waist_yaw_joint",
-      "l_arm_pitch_joint",
-      "l_arm_roll_joint",
-      "l_arm_yaw_joint",
-      "l_elbow_pitch_joint",
-      "r_arm_pitch_joint",
-      "r_arm_roll_joint",
-      "r_arm_yaw_joint",
-      "r_elbow_pitch_joint",
-      "l_leg_pitch_joint",
-      "l_leg_roll_joint",
-      "l_leg_yaw_joint",
-      "l_knee_pitch_joint",
-      "l_ankle_pitch_joint",
-      "l_ankle_roll_joint",
-      "r_leg_pitch_joint",
-      "r_leg_roll_joint",
-      "r_leg_yaw_joint",
-      "r_knee_pitch_joint",
-      "r_ankle_pitch_joint",
-      "r_ankle_roll_joint"
-     ]
+  "waist_yaw_joint",
+  "l_arm_pitch_joint",
+  "l_arm_roll_joint",
+  "l_arm_yaw_joint",
+  "l_elbow_pitch_joint",
+  "r_arm_pitch_joint",
+  "r_arm_roll_joint",
+  "r_arm_yaw_joint",
+  "r_elbow_pitch_joint",
+  "l_leg_pitch_joint",
+  "l_leg_roll_joint",
+  "l_leg_yaw_joint",
+  "l_knee_pitch_joint",
+  "l_ankle_pitch_joint",
+  "l_ankle_roll_joint",
+  "r_leg_pitch_joint",
+  "r_leg_roll_joint",
+  "r_leg_yaw_joint",
+  "r_knee_pitch_joint",
+  "r_ankle_pitch_joint",
+  "r_ankle_roll_joint",
+]
 
 if __name__ == "__main__":
   import mujoco.viewer as viewer

@@ -202,11 +202,11 @@ def unitree_g1_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.rewards["pose"].params["std_standing"] = {".*": 0.05}
   cfg.rewards["pose"].params["std_walking"] = {
     # Lower body.
-    r".*hip_pitch.*": 0.4,#0.3
+    r".*hip_pitch.*": 0.4,  # 0.3
     r".*hip_roll.*": 0.15,
     r".*hip_yaw.*": 0.15,
-    r".*knee.*": 0.45,#35
-    r".*ankle_pitch.*": 0.20,#25
+    r".*knee.*": 0.45,  # 35
+    r".*ankle_pitch.*": 0.20,  # 25
     r".*ankle_roll.*": 0.1,
     # Waist.
     r".*waist_yaw.*": 0.2,

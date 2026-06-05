@@ -75,8 +75,7 @@ def _empty_batch_tensors(
     for name in (*MEAN_METRIC_NAMES, *EVENT_COUNT_NAMES)
   }
   level_sums = {
-    name: torch.zeros(num_envs, max_levels, device=device)
-    for name in LEVEL_EVENT_NAMES
+    name: torch.zeros(num_envs, max_levels, device=device) for name in LEVEL_EVENT_NAMES
   }
   return sums, level_sums
 
@@ -130,9 +129,7 @@ def _level_collision_table(
       {
         "level_low_to_high": index + 1,
         "height_m": (
-          float((index + 1) * terrain.height_m)
-          if terrain.height_m is not None
-          else 0.0
+          float((index + 1) * terrain.height_m) if terrain.height_m is not None else 0.0
         ),
         "toe_riser_collision_count": toe_count,
         "heel_riser_collision_count": heel_count,
@@ -263,10 +260,7 @@ def _run_batch(
       "fell": fell.detach().cpu().tolist(),
       "heading_failed": heading_failed.detach().cpu().tolist(),
       "collision_stats_valid": collision_stats_valid.detach().cpu().tolist(),
-      "max_heading_error_deg": torch.rad2deg(max_heading_error)
-      .detach()
-      .cpu()
-      .tolist(),
+      "max_heading_error_deg": torch.rad2deg(max_heading_error).detach().cpu().tolist(),
       "episode_length_steps": step_counts.detach().cpu().tolist(),
       "mean_metrics": mean_metrics,
       "event_counts": event_counts,
@@ -298,9 +292,7 @@ def _summarize_batches(terrain: EvalTerrainSpec, batches: list[dict]) -> dict:
     "terrain_kind": terrain.kind,
     "height_m": terrain.height_m,
     "stair_riser_levels": (
-      terrain.stair_riser_levels
-      if terrain.kind in {"upstairs", "downstairs"}
-      else None
+      terrain.stair_riser_levels if terrain.kind in {"upstairs", "downstairs"} else None
     ),
     "collision_event_source": batches[0].get("event_source") if batches else None,
     "episodes": len(success),

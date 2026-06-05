@@ -74,24 +74,22 @@ class PPOTeacherKL(PPO):
         max_teacher_loss = self.teacher_kl_cfg.get("max_teacher_loss", self.teacher_kl_cfg.get("max_loss"))
         self.teacher_guidance_max_loss = None if max_teacher_loss is None else float(max_teacher_loss)
 
-        self.teacher_kl_cfg.update(
-            {
-                "enabled": self.teacher_guidance_enabled,
-                "imitation_only": self.teacher_imitation_only,
-                "imitation_loss_coef": self.teacher_imitation_loss_coef,
-                "loss_type": self.teacher_guidance_loss_type,
-                "lambda_start": self.teacher_kl_lambda_start,
-                "lambda_end": self.teacher_kl_lambda_end,
-                "warmup_iters": self.teacher_kl_warmup_iters,
-                "constant_iters": self.teacher_kl_constant_iters,
-                "anneal_iters": self.teacher_kl_anneal_iters,
-                "schedule": self.teacher_kl_schedule,
-                "huber_delta": self.teacher_guidance_huber_delta,
-                "teacher_forward_chunk_size": self.teacher_forward_chunk_size,
-                "max_teacher_loss": self.teacher_guidance_max_loss,
-                "log_kl_when_lambda_zero": self.teacher_kl_cfg.get("log_kl_when_lambda_zero", True),
-            }
-        )
+        self.teacher_kl_cfg.update({
+            "enabled": self.teacher_guidance_enabled,
+            "imitation_only": self.teacher_imitation_only,
+            "imitation_loss_coef": self.teacher_imitation_loss_coef,
+            "loss_type": self.teacher_guidance_loss_type,
+            "lambda_start": self.teacher_kl_lambda_start,
+            "lambda_end": self.teacher_kl_lambda_end,
+            "warmup_iters": self.teacher_kl_warmup_iters,
+            "constant_iters": self.teacher_kl_constant_iters,
+            "anneal_iters": self.teacher_kl_anneal_iters,
+            "schedule": self.teacher_kl_schedule,
+            "huber_delta": self.teacher_guidance_huber_delta,
+            "teacher_forward_chunk_size": self.teacher_forward_chunk_size,
+            "max_teacher_loss": self.teacher_guidance_max_loss,
+            "log_kl_when_lambda_zero": self.teacher_kl_cfg.get("log_kl_when_lambda_zero", True),
+        })
 
     def set_teacher_checkpoint(self, checkpoint_path: str | None) -> None:
         """Set or clear the checkpoint path used to initialize the frozen teacher."""
@@ -185,9 +183,7 @@ class PPOTeacherKL(PPO):
 
         loaded_dict = torch.load(self.teacher_checkpoint_path, weights_only=False, map_location=self.device)
         if "actor_state_dict" not in loaded_dict:
-            raise KeyError(
-                f"Cannot find 'actor_state_dict' in teacher checkpoint: {self.teacher_checkpoint_path}"
-            )
+            raise KeyError(f"Cannot find 'actor_state_dict' in teacher checkpoint: {self.teacher_checkpoint_path}")
 
         self.teacher.load_state_dict(loaded_dict["actor_state_dict"], strict=strict)
         self.teacher_loaded = True
@@ -248,12 +244,17 @@ class PPOTeacherKL(PPO):
             mean_loss = (student_mean - teacher_mean).pow(2).sum(dim=-1).mean()
             loss_key = "teacher_mean_mse"
         elif self.teacher_guidance_loss_type == "mean_huber":
-            mean_loss = functional.smooth_l1_loss(
-                student_mean,
-                teacher_mean,
-                beta=self.teacher_guidance_huber_delta,
-                reduction="none",
-            ).sum(dim=-1).mean()
+            mean_loss = (
+                functional
+                .smooth_l1_loss(
+                    student_mean,
+                    teacher_mean,
+                    beta=self.teacher_guidance_huber_delta,
+                    reduction="none",
+                )
+                .sum(dim=-1)
+                .mean()
+            )
             loss_key = "teacher_mean_huber"
         else:
             raise ValueError(f"Mean teacher loss requested for loss_type={self.teacher_guidance_loss_type}")
@@ -352,10 +353,7 @@ class PPOTeacherKL(PPO):
         batch_shape = tuple(observations.batch_size)
         num_samples = math.prod(batch_shape) if batch_shape else 1
         flat_observations = TensorDict(
-            {
-                key: value.reshape(num_samples, *value.shape[len(batch_shape) :])
-                for key, value in observations.items()
-            },
+            {key: value.reshape(num_samples, *value.shape[len(batch_shape) :]) for key, value in observations.items()},
             batch_size=[num_samples],
             device=observations.device,
         )
@@ -429,24 +427,17 @@ class PPOTeacherKL(PPO):
                 "Check teacher observation normalization, action distribution parameters, and checkpoint compatibility."
             )
         if not torch.isfinite(teacher_loss_for_update):
-            raise FloatingPointError(
-                f"Non-finite teacher guidance loss detected: {teacher_loss_for_update.item()}."
-            )
+            raise FloatingPointError(f"Non-finite teacher guidance loss detected: {teacher_loss_for_update.item()}.")
 
         teacher_loss = loss_weight * teacher_loss_for_update
         loss_logs.setdefault("teacher_loss_for_update", teacher_loss_for_update)
-        log_dict = {
-            name: self._distributed_mean_scalar(value).item()
-            for name, value in loss_logs.items()
-        }
+        log_dict = {name: self._distributed_mean_scalar(value).item() for name, value in loss_logs.items()}
         teacher_loss_log = self._distributed_mean_scalar(teacher_loss).item()
-        log_dict.update(
-            {
-                "teacher_loss": teacher_loss_log,
-                "teacher_lambda": float(loss_weight),
-                "teacher_kl_lambda": float(loss_weight),
-            }
-        )
+        log_dict.update({
+            "teacher_loss": teacher_loss_log,
+            "teacher_lambda": float(loss_weight),
+            "teacher_kl_lambda": float(loss_weight),
+        })
         if self.teacher_guidance_loss_type == "kl":
             log_dict["teacher_kl_loss"] = teacher_loss_log
         return teacher_loss, log_dict

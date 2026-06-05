@@ -75,7 +75,7 @@ class TerrainEntityCfg(EntityCfg):
   env_spacing: float | None = 2.0
   """Distance between environment origins when using grid layout. Required for
   "plane" terrain or when no sub-terrain origins exist."""
-  max_init_terrain_level: int | None = None#机器人开始出生在哪个难度等级
+  max_init_terrain_level: int | None = None  # 机器人开始出生在哪个难度等级
   """Maximum initial difficulty level (row index) for environment placement in
   curriculum mode. None uses all available rows."""
   num_envs: int = 1

@@ -74,7 +74,9 @@ def run_play(task_id: str, cfg: PlayConfig):
       terrain_cfg.step_danger_visualization.enabled = True
       print("[INFO]: Step danger-zone visualization enabled")
     else:
-      print("[WARN]: Step danger-zone visualization requested, but this terrain does not support it")
+      print(
+        "[WARN]: Step danger-zone visualization requested, but this terrain does not support it"
+      )
 
   DUMMY_MODE = cfg.agent in {"zero", "random"}
   TRAINED_MODE = not DUMMY_MODE

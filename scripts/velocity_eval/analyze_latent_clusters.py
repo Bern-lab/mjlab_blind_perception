@@ -33,9 +33,7 @@ class AnalyzeOutputPaths:
 
 def _resolve_output_paths(cfg: AnalyzeLatentsConfig) -> AnalyzeOutputPaths:
   input_path = Path(cfg.input_file)
-  output_dir = (
-    Path(cfg.output_dir) if cfg.output_dir is not None else input_path.parent
-  )
+  output_dir = Path(cfg.output_dir) if cfg.output_dir is not None else input_path.parent
   output_dir.mkdir(parents=True, exist_ok=True)
 
   output_file = (
@@ -117,9 +115,7 @@ def run_analyze_latents(cfg: AnalyzeLatentsConfig) -> None:
   data = np.load(cfg.input_file, allow_pickle=False)
   latent = np.asarray(data["latent"], dtype=np.float32)
   phase = (
-    np.asarray(data["gait_phase"], dtype=np.float32)
-    if "gait_phase" in data
-    else None
+    np.asarray(data["gait_phase"], dtype=np.float32) if "gait_phase" in data else None
   )
   n = latent.shape[0]
   if cfg.max_samples is not None and n > cfg.max_samples:

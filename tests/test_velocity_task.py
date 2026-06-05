@@ -214,7 +214,9 @@ def test_teacherkl_target_navigation_switch() -> None:
     velocity_cfg.commands["twist"],
     TeacherTargetHeadingVelocityCommandCfg,
   )
-  assert isinstance(target_cfg.commands["twist"], TeacherTargetHeadingVelocityCommandCfg)
+  assert isinstance(
+    target_cfg.commands["twist"], TeacherTargetHeadingVelocityCommandCfg
+  )
 
   assert "target_progress" not in velocity_cfg.rewards
   assert "target_reached_bonus" not in velocity_cfg.rewards
@@ -226,21 +228,38 @@ def test_teacherkl_target_navigation_switch() -> None:
 
 def test_blind_rough_variants_share_toe_riser_contact_penalty() -> None:
   """Blind-rough variants should use the shared toe-riser contact penalty config."""
-  for task_id in (
-    "Mjlab-Velocity-Blind-Rough-Unitree-G1",
-    "Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1",
-    "Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1",
-  ):
-    cfg = load_env_cfg(task_id)
-    reward = cfg.rewards["toe_riser_contact_memory_penalty"]
-    assert reward.weight == -1.5
-    assert reward.params["sensor_name"] == "toe_terrain_contact"
-    assert reward.params["min_terrain_level"] == 3
-    assert reward.params["free_hits"] == 1
-    assert cfg.sim.contact_sensor_maxmatch == 256
-    assert "toe_terrain_contact" not in cfg.observations["actor"].terms
-    assert "toe_terrain_contact" in cfg.observations["critic"].terms
-    assert "toe_terrain_contact_forces" in cfg.observations["critic"].terms
+  # Base blind-rough task keeps the old contact-memory penalty.
+  cfg = load_env_cfg("Mjlab-Velocity-Blind-Rough-Unitree-G1")
+  reward = cfg.rewards["toe_riser_contact_memory_penalty"]
+  assert reward.weight == -1.5
+  assert reward.params["sensor_name"] == "toe_terrain_contact"
+  assert reward.params["min_terrain_level"] == 3
+  assert reward.params["free_hits"] == 1
+  assert cfg.sim.contact_sensor_maxmatch == 256
+  assert "toe_terrain_contact" not in cfg.observations["actor"].terms
+  assert "toe_terrain_contact" in cfg.observations["critic"].terms
+  assert "toe_terrain_contact_forces" in cfg.observations["critic"].terms
+
+  # Non-target TeacherKL variant keeps the old penalty.
+  cfg = load_env_cfg("Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1")
+  assert "toe_riser_contact_memory_penalty" in cfg.rewards
+  assert "foot_step_lip_volume_penalty" not in cfg.rewards
+  assert "toe_step_riser_slab_penalty" not in cfg.rewards
+
+  # Target-navigation TeacherKL variant replaces it with step-boundary
+  # volume penalties but keeps the contact sensor for the critic.
+  cfg = load_env_cfg(
+    "Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1"
+  )
+  assert "toe_riser_contact_memory_penalty" not in cfg.rewards
+  assert "foot_step_lip_volume_penalty" in cfg.rewards
+  assert "toe_step_riser_slab_penalty" in cfg.rewards
+  assert cfg.rewards["foot_step_lip_volume_penalty"].weight == -3.2
+  assert cfg.rewards["toe_step_riser_slab_penalty"].weight == -4.2
+  assert cfg.sim.contact_sensor_maxmatch == 256
+  assert "toe_terrain_contact" not in cfg.observations["actor"].terms
+  assert "toe_terrain_contact" in cfg.observations["critic"].terms
+  assert "toe_terrain_contact_forces" in cfg.observations["critic"].terms
 
 
 def test_teacherkl_uses_delayed_mean_huber_guidance() -> None:

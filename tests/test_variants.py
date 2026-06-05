@@ -8,11 +8,6 @@ import mujoco
 import numpy as np
 import pytest
 import torch
-
-from mjlab.entity import (
-  EntityCfg,
-  VariantEntityCfg,
-)
 from mjlab.entity.variants import (
   SlotKey,
   VariantGeomSpec,
@@ -23,6 +18,11 @@ from mjlab.entity.variants import (
 from mjlab.viewer.model_sync import (
   disable_model_sameframe_shortcuts,
   sync_model_fields,
+)
+
+from mjlab.entity import (
+  EntityCfg,
+  VariantEntityCfg,
 )
 
 # Helpers: variant specs with visual + collision mesh geoms.

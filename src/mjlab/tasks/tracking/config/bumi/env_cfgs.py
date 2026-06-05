@@ -29,7 +29,6 @@ def noetix_bumi_flat_tracking_env_cfg(
     fields=("found", "force"),
     reduce="none",
     num_slots=1,
-
   )
   cfg.scene.sensors = (self_collision_cfg,)
 
@@ -41,28 +40,26 @@ def noetix_bumi_flat_tracking_env_cfg(
   assert isinstance(motion_cmd, MotionCommandCfg)
   motion_cmd.anchor_body_name = "base_link"
   motion_cmd.body_names = (
-    'base_link',
-    'l_leg_yaw_link',
-    'l_knee_pitch_link',
-    'l_ankle_roll_link',
-    'r_leg_yaw_link',
-    'r_knee_pitch_link',
-    'r_ankle_roll_link',
-    'waist_link',
-    'l_arm_roll_link',
-    'l_arm_elbow_link',
-    'r_arm_roll_link',
-    'r_arm_elbow_link'
+    "base_link",
+    "l_leg_yaw_link",
+    "l_knee_pitch_link",
+    "l_ankle_roll_link",
+    "r_leg_yaw_link",
+    "r_knee_pitch_link",
+    "r_ankle_roll_link",
+    "waist_link",
+    "l_arm_roll_link",
+    "l_arm_elbow_link",
+    "r_arm_roll_link",
+    "r_arm_elbow_link",
   )
 
-  cfg.events["foot_friction"].params[
-    "asset_cfg"
-  ].geom_names = []
+  cfg.events["foot_friction"].params["asset_cfg"].geom_names = []
   cfg.events["base_com"].params["asset_cfg"].body_names = "base_link"
 
   cfg.terminations["ee_body_pos"].params["body_names"] = (
-    'l_arm_roll_link',
-    'r_arm_roll_link',
+    "l_arm_roll_link",
+    "r_arm_roll_link",
     "l_ankle_roll_link",
     "r_ankle_roll_link",
   )

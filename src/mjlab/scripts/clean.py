@@ -125,7 +125,9 @@ def _checkpoint_iteration(path: Path) -> int | None:
   return int(iteration)
 
 
-def _file_sort_key(file_path: Path, kind: FileKind) -> tuple[int, float | int, float, str]:
+def _file_sort_key(
+  file_path: Path, kind: FileKind
+) -> tuple[int, float | int, float, str]:
   if kind.key == "checkpoints":
     iteration = _checkpoint_iteration(file_path)
     if iteration is not None:

@@ -74,13 +74,11 @@ def test_mean_huber_guidance_ignores_std_mismatch() -> None:
 
 def test_mean_huber_guidance_applies_loss_cap() -> None:
     """The update loss should respect max_teacher_loss for mean guidance."""
-    alg = _build_teacher_kl(
-        {
-            "loss_type": "mean_huber",
-            "huber_delta": 0.5,
-            "max_teacher_loss": 0.25,
-        }
-    )
+    alg = _build_teacher_kl({
+        "loss_type": "mean_huber",
+        "huber_delta": 0.5,
+        "max_teacher_loss": 0.25,
+    })
     teacher_params = (torch.zeros(1, NUM_ACTIONS), torch.ones(1, NUM_ACTIONS))
     student_params = (
         torch.full((1, NUM_ACTIONS), 10.0, requires_grad=True),
@@ -190,14 +188,12 @@ def test_construct_disabled_guidance_skips_teacher_loading() -> None:
 
 def test_imitation_only_update_skips_ppo_losses() -> None:
     """Teacher imitation-only update should optimize only the teacher guidance loss."""
-    alg = _build_teacher_kl(
-        {
-            "loss_type": "mean_huber",
-            "huber_delta": 0.5,
-            "imitation_only": True,
-            "imitation_loss_coef": 1.0,
-        }
-    )
+    alg = _build_teacher_kl({
+        "loss_type": "mean_huber",
+        "huber_delta": 0.5,
+        "imitation_only": True,
+        "imitation_loss_coef": 1.0,
+    })
     obs = _build_obs()
     obs_groups = {
         "actor": ["actor"],

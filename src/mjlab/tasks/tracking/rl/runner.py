@@ -70,7 +70,9 @@ class MotionTrackingOnPolicyRunner(MjlabOnPolicyRunner):
     super().__init__(env, train_cfg, log_dir, device)
     self.registry_name = registry_name
 
-  def export_policy_to_onnx_purepolicy(self, path: str, filename: str = "policy.onnx", verbose: bool = False) -> None:
+  def export_policy_to_onnx_purepolicy(
+    self, path: str, filename: str = "policy.onnx", verbose: bool = False
+  ) -> None:
     onnx_model = self.alg.get_policy().as_onnx(verbose=verbose)
     onnx_model.to("cpu")
     onnx_model.eval()

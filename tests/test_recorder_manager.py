@@ -6,17 +6,17 @@ import mujoco
 import pytest
 import torch
 from conftest import get_test_device
-
-from mjlab.actuator import BuiltinPositionActuatorCfg
-from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
-from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg, mdp
-from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.managers.recorder_manager import (
   NullRecorderManager,
   RecorderManager,
   RecorderTerm,
   RecorderTermCfg,
 )
+
+from mjlab.actuator import BuiltinPositionActuatorCfg
+from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
+from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg, mdp
+from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.scene import SceneCfg
 from mjlab.sim import MujocoCfg, SimulationCfg

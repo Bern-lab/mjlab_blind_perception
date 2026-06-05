@@ -7,10 +7,6 @@ import mujoco
 from mjlab import MJLAB_SRC_PATH
 from mjlab.actuator import BuiltinPositionActuatorCfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
-from mjlab.utils.actuator import (
-  ElectricActuator,
-  reflected_inertia_from_two_stage_planetary,
-)
 from mjlab.utils.os import update_assets
 from mjlab.utils.spec_config import CollisionCfg
 
@@ -18,10 +14,7 @@ from mjlab.utils.spec_config import CollisionCfg
 # MJCF and assets.
 ##
 
-E1_XML: Path = (
-  MJLAB_SRC_PATH / "asset_zoo" / "robots" / "noetix_e1" / "xmls" / "e1.xml"
-
-)
+E1_XML: Path = MJLAB_SRC_PATH / "asset_zoo" / "robots" / "noetix_e1" / "xmls" / "e1.xml"
 assert E1_XML.exists()
 
 
@@ -29,6 +22,7 @@ def get_assets(meshdir: str) -> dict[str, bytes]:
   assets: dict[str, bytes] = {}
   update_assets(assets, E1_XML.parent / "meshes", meshdir)
   return assets
+
 
 def get_spec() -> mujoco.MjSpec:
   abs_xml_path = E1_XML.absolute()
@@ -70,7 +64,7 @@ E1_ACTUATOR_HIP_ROLL = BuiltinPositionActuatorCfg(
   target_names_expr=(".*_hip_roll_joint",),
   effort_limit=80.0,
   armature=ARMATURE_8112,
-  stiffness=STIFFNESS_8112 *6,
+  stiffness=STIFFNESS_8112 * 6,
   damping=DAMPING_8112 * 4,
 )
 
@@ -94,7 +88,7 @@ E1_ACTUATOR_KNEE_PITCH = BuiltinPositionActuatorCfg(
 
 # E1 Feet actuators
 E1_ACTUATOR_FEET = BuiltinPositionActuatorCfg(
-  target_names_expr=(".*_ankle_pitch_joint",".*_ankle_roll_joint"),
+  target_names_expr=(".*_ankle_pitch_joint", ".*_ankle_roll_joint"),
   effort_limit=70.0,
   armature=ARMATURE_4315,
   stiffness=STIFFNESS_4315 * 10,
@@ -114,10 +108,7 @@ E1_ACTUATOR_SHOULDERS = BuiltinPositionActuatorCfg(
   damping=DAMPING_4340 * 2,
 )
 E1_ACTUATOR_ELBOWS = BuiltinPositionActuatorCfg(
-  target_names_expr=(
-    ".*_elbow_pitch_joint",
-    ".*_elbow_yaw_joint"
-  ),
+  target_names_expr=(".*_elbow_pitch_joint", ".*_elbow_yaw_joint"),
   effort_limit=20.0,
   armature=ARMATURE_4340,
   stiffness=STIFFNESS_4340 * 1.2,
@@ -131,8 +122,6 @@ E1_ACTUATOR_WAIST = BuiltinPositionActuatorCfg(
   stiffness=STIFFNESS_4315 * 2,
   damping=DAMPING_4315 * 2,
 )
-
-
 
 
 ##
@@ -168,7 +157,6 @@ HOME_KEYFRAME = EntityCfg.InitialStateCfg(
     "r_arm_elbow_yaw_joint": 0.0,
   },
   joint_vel={".*": 0.0},
- 
 )
 
 KNEES_BENT_KEYFRAME = EntityCfg.InitialStateCfg(
@@ -198,11 +186,8 @@ KNEES_BENT_KEYFRAME = EntityCfg.InitialStateCfg(
     "r_arm_shoulder_yaw_joint": 0.0,
     "r_arm_elbow_pitch_joint": 0.0,
     "r_arm_elbow_yaw_joint": 0.0,
-
-
   },
   joint_vel={".*": 0.0},
-  
 )
 
 ##
@@ -218,7 +203,7 @@ FULL_COLLISION = CollisionCfg(
   condim={
     r"^(left|right|l_leg_|r_leg_).*foot.*_collision$": 3,  # Foot collisions
     r"^(base_link|torso|waist|l_leg_hip|l_leg_knee|r_leg_hip|r_leg_knee)_collision$": 3,  # Body collisions
-    ".*_collision": 1  # Default self-collisions
+    ".*_collision": 1,  # Default self-collisions
   },
   priority={
     r"^(left|right|l_leg_|r_leg_).*foot.*_collision$": 1,
@@ -237,7 +222,7 @@ FULL_COLLISION_WITHOUT_SELF = CollisionCfg(
   condim={
     r"^(left|right|l_leg_|r_leg_).*foot.*_collision$": 3,
     r"^(base_link|torso|waist|l_leg_hip|l_leg_knee|r_leg_hip|r_leg_knee)_collision$": 3,
-    ".*_collision": 1
+    ".*_collision": 1,
   },
   priority={
     r"^(left|right|l_leg_|r_leg_).*foot.*_collision$": 1,
@@ -277,6 +262,7 @@ E1_ARTICULATION = EntityArticulationInfoCfg(
   soft_joint_pos_limit_factor=0.9,
 )
 
+
 def get_e1_robot_cfg() -> EntityCfg:
   """Get a fresh G1 robot configuration instance.
 
@@ -290,6 +276,7 @@ def get_e1_robot_cfg() -> EntityCfg:
     articulation=E1_ARTICULATION,
   )
 
+
 E1_ACTION_SCALE: dict[str, float] = {}
 for a in E1_ARTICULATION.actuators:
   assert isinstance(a, BuiltinPositionActuatorCfg)
@@ -298,8 +285,7 @@ for a in E1_ARTICULATION.actuators:
   names = a.target_names_expr
   assert e is not None
   for n in names:
-    E1_ACTION_SCALE[n] = 0.05 * e / s  #原0.25
-
+    E1_ACTION_SCALE[n] = 0.05 * e / s  # 原0.25
 
 
 if __name__ == "__main__":

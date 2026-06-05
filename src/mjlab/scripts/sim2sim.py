@@ -21,19 +21,43 @@ import mujoco
 import numpy as np
 import torch
 
-from mjlab.asset_zoo.robots.booster_k1.k1_constants import K1_ACTION_SCALE, get_k1_robot_cfg
-from mjlab.asset_zoo.robots.unitree_g1.g1_constants import G1_ACTION_SCALE, get_g1_robot_cfg
-from mjlab.asset_zoo.robots.engineai_pm01.pm01_constants import PM01_ACTION_SCALE, get_pm01_robot_cfg
-from mjlab.asset_zoo.robots.limx_oli.oli_constants import OLI_ACTION_SCALE, get_oli_robot_cfg
-from mjlab.asset_zoo.robots.fourier_gr3.gr3_constants import GR3_ACTION_SCALE, get_gr3_robot_cfg
-from mjlab.asset_zoo.robots.noetix_bumi.bumi_constants import BUMI_ACTION_SCALE, get_bumi_robot_cfg
-from mjlab.asset_zoo.robots.noetix_e1.e1_constants import E1_ACTION_SCALE, get_e1_robot_cfg
-
+from mjlab.asset_zoo.robots.booster_k1.k1_constants import (
+  K1_ACTION_SCALE,
+  get_k1_robot_cfg,
+)
+from mjlab.asset_zoo.robots.engineai_pm01.pm01_constants import (
+  PM01_ACTION_SCALE,
+  get_pm01_robot_cfg,
+)
+from mjlab.asset_zoo.robots.fourier_gr3.gr3_constants import (
+  GR3_ACTION_SCALE,
+  get_gr3_robot_cfg,
+)
+from mjlab.asset_zoo.robots.limx_oli.oli_constants import (
+  OLI_ACTION_SCALE,
+  get_oli_robot_cfg,
+)
+from mjlab.asset_zoo.robots.noetix_bumi.bumi_constants import (
+  BUMI_ACTION_SCALE,
+  get_bumi_robot_cfg,
+)
+from mjlab.asset_zoo.robots.noetix_e1.e1_constants import (
+  E1_ACTION_SCALE,
+  get_e1_robot_cfg,
+)
+from mjlab.asset_zoo.robots.unitree_g1.g1_constants import (
+  G1_ACTION_SCALE,
+  get_g1_robot_cfg,
+)
 from mjlab.entity import EntityCfg
 from mjlab.scene import Scene, SceneCfg
 from mjlab.sim import MujocoCfg, Simulation, SimulationCfg
 from mjlab.terrains import TerrainEntityCfg
-from mjlab.utils.lab_api.math import euler_xyz_from_quat, matrix_from_quat, subtract_frame_transforms
+from mjlab.utils.lab_api.math import (
+  euler_xyz_from_quat,
+  matrix_from_quat,
+  subtract_frame_transforms,
+)
 
 
 @dataclass(frozen=True)
@@ -114,8 +138,6 @@ TASK_ROBOT_PROFILES: dict[str, RobotProfile] = {
     action_scale=E1_ACTION_SCALE,
     base_link_name="base_link",
   ),
-
-
 }
 
 
@@ -264,7 +286,9 @@ class Sim2SimTester:
       self.robot_anchor_body_idx = 0
     self.motion_anchor_body_idx = 0
 
-    self.default_joint_pos = self.robot.data.default_joint_pos[:, : self.num_joints].clone()
+    self.default_joint_pos = self.robot.data.default_joint_pos[
+      :, : self.num_joints
+    ].clone()
     self.action_scale = torch.ones(self.num_joints, dtype=torch.float32, device=device)
     for i, joint_name in enumerate(self.joint_names):
       if joint_name in profile.action_scale:
@@ -333,8 +357,16 @@ class Sim2SimTester:
     robot_anchor_pos = body_poses[:, self.robot_anchor_body_idx, :3]
     robot_anchor_quat = body_poses[:, self.robot_anchor_body_idx, 3:7]
 
-    motion_anchor_pos = self.motion_data["body_pos_w"][t, self.motion_anchor_body_idx].unsqueeze(0).to(self.device)
-    motion_anchor_quat = self.motion_data["body_quat_w"][t, self.motion_anchor_body_idx].unsqueeze(0).to(self.device)
+    motion_anchor_pos = (
+      self.motion_data["body_pos_w"][t, self.motion_anchor_body_idx]
+      .unsqueeze(0)
+      .to(self.device)
+    )
+    motion_anchor_quat = (
+      self.motion_data["body_quat_w"][t, self.motion_anchor_body_idx]
+      .unsqueeze(0)
+      .to(self.device)
+    )
 
     _, relative_quat = subtract_frame_transforms(
       robot_anchor_pos,
@@ -430,7 +462,12 @@ class Sim2SimTester:
       errors["joint_pos"].append(pos_err)
       errors["joint_vel"].append(vel_err)
 
-      if self.render and self.viewer is not None and self.viewer.is_running() and step % 2 == 0:
+      if (
+        self.render
+        and self.viewer is not None
+        and self.viewer.is_running()
+        and step % 2 == 0
+      ):
         self._sync_warp_data_to_mj_data()
         self.viewer.sync()
 
@@ -442,13 +479,19 @@ class Sim2SimTester:
         if step == 0:
           body_poses = self.robot.data.body_link_pose_w
           robot_quat = body_poses[0, self.robot_anchor_body_idx, 3:7].cpu()
-          motion_quat = self.motion_data["body_quat_w"][t, self.motion_anchor_body_idx].cpu()
+          motion_quat = self.motion_data["body_quat_w"][
+            t, self.motion_anchor_body_idx
+          ].cpu()
           _, _, robot_yaw = euler_xyz_from_quat(robot_quat.unsqueeze(0))
           _, _, motion_yaw = euler_xyz_from_quat(motion_quat.unsqueeze(0))
           print(f"[INFO] robot_yaw={robot_yaw.item() * 180.0 / np.pi:.2f} deg")
           print(f"[INFO] motion_yaw={motion_yaw.item() * 180.0 / np.pi:.2f} deg")
-          print(f"[INFO] obs_mean={obs.mean().item():.4f}, obs_std={obs.std().item():.4f}")
-          print(f"[INFO] action_mean={action.mean().item():.4f}, action_std={action.std().item():.4f}")
+          print(
+            f"[INFO] obs_mean={obs.mean().item():.4f}, obs_std={obs.std().item():.4f}"
+          )
+          print(
+            f"[INFO] action_mean={action.mean().item():.4f}, action_std={action.std().item():.4f}"
+          )
 
       step += 1
 
@@ -502,13 +545,27 @@ def _build_parser() -> argparse.ArgumentParser:
       "--motion /path/to/motion.npz --device cuda:0"
     ),
   )
-  parser.add_argument("-t", "--task", required=True, choices=sorted(TASK_ROBOT_PROFILES.keys()))
-  parser.add_argument("-p", "--policy", required=True, help="Run dir, exported dir, or policy .pt")
-  parser.add_argument("--motion", default=None, help="Motion .npz path; auto-loaded from env.yaml if omitted")
+  parser.add_argument(
+    "-t", "--task", required=True, choices=sorted(TASK_ROBOT_PROFILES.keys())
+  )
+  parser.add_argument(
+    "-p", "--policy", required=True, help="Run dir, exported dir, or policy .pt"
+  )
+  parser.add_argument(
+    "--motion",
+    default=None,
+    help="Motion .npz path; auto-loaded from env.yaml if omitted",
+  )
   parser.add_argument("--device", default="cuda:0", help="cpu / cuda:0 / 0")
-  parser.add_argument("--num-steps", type=int, default=None, help="Number of control steps")
-  parser.add_argument("--dt", type=float, default=0.02, help="Control timestep in seconds")
-  parser.add_argument("--no-render", action="store_true", help="Disable interactive MuJoCo viewer")
+  parser.add_argument(
+    "--num-steps", type=int, default=None, help="Number of control steps"
+  )
+  parser.add_argument(
+    "--dt", type=float, default=0.02, help="Control timestep in seconds"
+  )
+  parser.add_argument(
+    "--no-render", action="store_true", help="Disable interactive MuJoCo viewer"
+  )
   parser.add_argument("--fps", type=float, default=None, help="Viewer FPS cap")
   parser.add_argument("--verbose", action="store_true", help="Verbose logs")
   return parser
@@ -532,7 +589,9 @@ def main() -> None:
     if motion_path is not None:
       print(f"[INFO] Motion from log: {motion_path}")
   if motion_path is None:
-    raise ValueError("Motion file required: set --motion or place policy under a log dir with params/env.yaml")
+    raise ValueError(
+      "Motion file required: set --motion or place policy under a log dir with params/env.yaml"
+    )
 
   motion_file = Path(motion_path)
   if not motion_file.exists():

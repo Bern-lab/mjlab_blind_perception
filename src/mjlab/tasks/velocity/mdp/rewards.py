@@ -28,9 +28,7 @@ _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 _DEFAULT_FOOT_BODY_CFG = SceneEntityCfg(
   "robot", body_names=("left_ankle_roll_link", "right_ankle_roll_link")
 )
-_DEFAULT_FOOT_SITE_CFG = SceneEntityCfg(
-  "robot", site_names=("left_foot", "right_foot")
-)
+_DEFAULT_FOOT_SITE_CFG = SceneEntityCfg("robot", site_names=("left_foot", "right_foot"))
 
 
 def _make_foot_volume_points(
@@ -138,9 +136,7 @@ class _StepBoundaryFootVolume:
     local_points = self._local_points.view(1, 1, num_points, 3).expand(
       num_envs, num_feet, num_points, 3
     )
-    foot_quat = foot_quat_w[:, :, None, :].expand(
-      num_envs, num_feet, num_points, 4
-    )
+    foot_quat = foot_quat_w[:, :, None, :].expand(num_envs, num_feet, num_points, 4)
     point_offsets_w = quat_apply(foot_quat, local_points)
     points_w = foot_pos_w[:, :, None, :] + point_offsets_w
     point_vel_w = foot_lin_vel_w[:, :, None, :] + torch.cross(
@@ -157,14 +153,14 @@ class _StepBoundaryFootVolume:
     foot_pos_w = asset.data.body_link_pos_w[:, asset_cfg.body_ids, :]
     foot_quat_w = asset.data.body_link_quat_w[:, asset_cfg.body_ids, :]
     num_envs, num_feet = foot_pos_w.shape[:2]
-    foot_ref_local = self._foot_ref_local.view(1, 1, 3).expand(
-      num_envs, num_feet, 3
-    )
+    foot_ref_local = self._foot_ref_local.view(1, 1, 3).expand(num_envs, num_feet, 3)
     return foot_pos_w + quat_apply(foot_quat_w, foot_ref_local)
 
   def _flat_point_weights(self, num_envs: int, num_feet: int) -> torch.Tensor:
-    return self._point_weights.view(1, 1, -1).expand(num_envs, num_feet, -1).reshape(
-      num_envs, num_feet * self._point_weights.shape[0]
+    return (
+      self._point_weights.view(1, 1, -1)
+      .expand(num_envs, num_feet, -1)
+      .reshape(num_envs, num_feet * self._point_weights.shape[0])
     )
 
   @staticmethod
@@ -387,9 +383,7 @@ class foot_step_lip_volume_penalty(_StepBoundaryFootVolume):
     )
 
     if selected_idx is None:
-      expanded_boundaries = boundaries[:, None, :, :].expand(
-        num_envs, num_feet, -1, -1
-      )
+      expanded_boundaries = boundaries[:, None, :, :].expand(num_envs, num_feet, -1, -1)
       expanded_valid = base_valid[:, None, :].expand(num_envs, num_feet, -1)
       min_dist = self._lip_min_dist(
         points_w, expanded_boundaries, expanded_valid, edge_height_band
@@ -424,8 +418,8 @@ class foot_step_lip_volume_penalty(_StepBoundaryFootVolume):
     )
     env.extras["log"]["Metrics/step_lip_penalty_mean"] = penalty.mean()
     env.extras["log"]["Metrics/step_lip_penetration_ratio"] = (
-      penetration > 0.0
-    ).float().mean()
+      (penetration > 0.0).float().mean()
+    )
     env.extras["log"]["Metrics/step_lip_min_dist_mean"] = min_dist_mean
     env.extras["log"]["Metrics/step_lip_nearest_fallback_ratio"] = fallback_ratio
 
@@ -485,9 +479,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     )
 
     if selected_idx is None:
-      expanded_boundaries = boundaries[:, None, :, :].expand(
-        num_envs, num_feet, -1, -1
-      )
+      expanded_boundaries = boundaries[:, None, :, :].expand(num_envs, num_feet, -1, -1)
       expanded_valid = base_valid[:, None, :].expand(num_envs, num_feet, -1)
       point_penalty, active, impact_speed_per_point = self._riser_slab_point_penalty(
         toe_points,
@@ -547,9 +539,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     env.extras["log"]["Metrics/toe_riser_slab_penalty_mean"] = penalty.mean()
     env.extras["log"]["Metrics/toe_riser_slab_active_ratio"] = active.float().mean()
     env.extras["log"]["Metrics/toe_riser_slab_impact_speed_mean"] = impact_speed_mean
-    env.extras["log"]["Metrics/toe_riser_slab_nearest_fallback_ratio"] = (
-      fallback_ratio
-    )
+    env.extras["log"]["Metrics/toe_riser_slab_nearest_fallback_ratio"] = fallback_ratio
 
     if log_only:
       return torch.zeros_like(penalty)
@@ -948,9 +938,7 @@ class toe_riser_contact_memory_penalty:
     self._root_z_baseline = torch.zeros(
       env.num_envs, device=env.device, dtype=torch.float32
     )
-    self._max_root_z = torch.zeros(
-      env.num_envs, device=env.device, dtype=torch.float32
-    )
+    self._max_root_z = torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
     self._ascent_active = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
     self._needs_root_z_init = torch.ones(
       env.num_envs, device=env.device, dtype=torch.bool
@@ -1016,9 +1004,7 @@ class toe_riser_contact_memory_penalty:
       self._toe_hit_count[inactive] = 0.0
       self._toe_hit_cooldown[inactive] = 0.0
 
-    self._toe_hit_cooldown = torch.clamp(
-      self._toe_hit_cooldown - env.step_dt, min=0.0
-    )
+    self._toe_hit_cooldown = torch.clamp(self._toe_hit_cooldown - env.step_dt, min=0.0)
 
     num_envs = env.num_envs
     num_feet = len(asset_cfg.body_ids) if isinstance(asset_cfg.body_ids, list) else 2
@@ -1038,9 +1024,7 @@ class toe_riser_contact_memory_penalty:
     foot_quat_w = asset.data.body_link_quat_w[:, asset_cfg.body_ids, :]
     foot_vel_w = asset.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]
 
-    expanded_quat = foot_quat_w[:, :, None, :].expand(
-      num_envs, num_feet, num_slots, 4
-    )
+    expanded_quat = foot_quat_w[:, :, None, :].expand(num_envs, num_feet, num_slots, 4)
     contact_pos_b = quat_apply_inverse(
       expanded_quat,
       contact_pos_w - foot_pos_w[:, :, None, :],
@@ -1080,9 +1064,7 @@ class toe_riser_contact_memory_penalty:
     )
     hit_by_foot = torch.any(toe_riser_hit, dim=-1)
     new_hit_by_foot = (
-      hit_by_foot
-      & active_gate[:, None]
-      & (self._toe_hit_cooldown <= 0.0)
+      hit_by_foot & active_gate[:, None] & (self._toe_hit_cooldown <= 0.0)
     )
 
     if bool(torch.any(new_hit_by_foot).item()):
@@ -1206,6 +1188,7 @@ class variable_posture:
 
     return torch.exp(-torch.mean(error_squared / (std**2), dim=1))
 
+
 def idle_penalty(
   env: ManagerBasedRlEnv,
   command_name: str,
@@ -1222,40 +1205,45 @@ def idle_penalty(
   actual_speed = torch.norm(asset.data.root_link_lin_vel_b[:, :2], dim=1)
 
   penalty = (
-    (commanded_speed > command_threshold) &
-    (actual_speed < velocity_threshold)
+    (commanded_speed > command_threshold) & (actual_speed < velocity_threshold)
   ).float()
 
   env.extras["log"]["Metrics/idle_penalty_ratio"] = torch.mean(penalty)
   return penalty
 
+
 def feet_gait(
-        env: ManagerBasedRlEnv,
-        period: float,
-        offset: list[float],
-        threshold: float,
-        command_threshold: float,
-        command_name: str,
-        sensor_name: str,
+  env: ManagerBasedRlEnv,
+  period: float,
+  offset: list[float],
+  threshold: float,
+  command_threshold: float,
+  command_name: str,
+  sensor_name: str,
 ) -> torch.Tensor:
-    sensor: ContactSensor = env.scene[sensor_name]
-    current_contact_time = sensor.data.current_contact_time
-    assert current_contact_time is not None, "Enable track_air_time=True for this contact sensor."
-    is_contact = current_contact_time > 0
-    global_phase = ((env.episode_length_buf * env.step_dt) / period).unsqueeze(1)
-    offsets = torch.as_tensor(offset, device=env.device, dtype=global_phase.dtype).view(1, -1)
-    leg_phase = (global_phase + offsets) % 1.0
-    is_stance = (leg_phase < threshold)
-    reward = (is_stance == is_contact).float().mean(dim=1)
-    if command_name is not None:
-        command = env.command_manager.get_command(command_name)
-        if command is not None:
-            linear_norm = torch.norm(command[:, :2], dim=1)
-            angular_norm = torch.abs(command[:, 2])
-            total_command = linear_norm + angular_norm
-            scale = (total_command > command_threshold).float()
-            reward *= scale
-    return reward
+  sensor: ContactSensor = env.scene[sensor_name]
+  current_contact_time = sensor.data.current_contact_time
+  assert current_contact_time is not None, (
+    "Enable track_air_time=True for this contact sensor."
+  )
+  is_contact = current_contact_time > 0
+  global_phase = ((env.episode_length_buf * env.step_dt) / period).unsqueeze(1)
+  offsets = torch.as_tensor(offset, device=env.device, dtype=global_phase.dtype).view(
+    1, -1
+  )
+  leg_phase = (global_phase + offsets) % 1.0
+  is_stance = leg_phase < threshold
+  reward = (is_stance == is_contact).float().mean(dim=1)
+  if command_name is not None:
+    command = env.command_manager.get_command(command_name)
+    if command is not None:
+      linear_norm = torch.norm(command[:, :2], dim=1)
+      angular_norm = torch.abs(command[:, 2])
+      total_command = linear_norm + angular_norm
+      scale = (total_command > command_threshold).float()
+      reward *= scale
+  return reward
+
 
 def target_progress(
   env: ManagerBasedRlEnv,
@@ -1294,6 +1282,7 @@ def target_reached_bonus(
   command_term = cast("TargetHeadingVelocityCommand", command_term)
   return command_term.target_reached_this_step.float()
 
+
 def base_height_above_support_value(
   env: ManagerBasedRlEnv,
   height_sensor_name: str,
@@ -1329,32 +1318,32 @@ def base_height_above_support_value(
 
 
 def base_height_above_support(
-    env,
-    height_sensor_name: str,
-    contact_sensor_name: str,
-    min_height: float = 0.74,
-    error_scale: float = 1.0,
-    asset_cfg: SceneEntityCfg = _DEFAULT_FOOT_SITE_CFG,
+  env,
+  height_sensor_name: str,
+  contact_sensor_name: str,
+  min_height: float = 0.74,
+  error_scale: float = 1.0,
+  asset_cfg: SceneEntityCfg = _DEFAULT_FOOT_SITE_CFG,
 ) -> torch.Tensor:
-    asset = env.scene[asset_cfg.name]
-    height_sensor = env.scene[height_sensor_name]
-    contact_sensor = env.scene[contact_sensor_name]
+  asset = env.scene[asset_cfg.name]
+  height_sensor = env.scene[height_sensor_name]
+  contact_sensor = env.scene[contact_sensor_name]
 
-    base_z = asset.data.root_link_pos_w[:, 2]
+  base_z = asset.data.root_link_pos_w[:, 2]
 
-    foot_z = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]
-    foot_height_above_terrain = height_sensor.data.heights
-    terrain_z_under_feet = foot_z - foot_height_above_terrain
+  foot_z = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]
+  foot_height_above_terrain = height_sensor.data.heights
+  terrain_z_under_feet = foot_z - foot_height_above_terrain
 
-    contact = (contact_sensor.data.found > 0).float()
-    contact_sum = contact.sum(dim=1).clamp_min(1.0)
+  contact = (contact_sensor.data.found > 0).float()
+  contact_sum = contact.sum(dim=1).clamp_min(1.0)
 
-    support_terrain_z = (terrain_z_under_feet * contact).sum(dim=1) / contact_sum
-    fallback_terrain_z = terrain_z_under_feet.max(dim=1).values
-    has_contact = contact.sum(dim=1) > 0
+  support_terrain_z = (terrain_z_under_feet * contact).sum(dim=1) / contact_sum
+  fallback_terrain_z = terrain_z_under_feet.max(dim=1).values
+  has_contact = contact.sum(dim=1) > 0
 
-    terrain_z = torch.where(has_contact, support_terrain_z, fallback_terrain_z)
-    base_height_rel = base_z - terrain_z
+  terrain_z = torch.where(has_contact, support_terrain_z, fallback_terrain_z)
+  base_height_rel = base_z - terrain_z
 
-    height_error = torch.relu(min_height - base_height_rel) * error_scale
-    return torch.square(height_error)
+  height_error = torch.relu(min_height - base_height_rel) * error_scale
+  return torch.square(height_error)

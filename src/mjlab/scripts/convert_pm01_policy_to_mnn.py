@@ -47,7 +47,6 @@ import argparse
 import json
 import shutil
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -171,9 +170,7 @@ def _compute_output_permutation(
   return [source_order.index(name) for name in target_order]
 
 
-def _replace_graph_inputs(
-  graph: onnx.GraphProto, old_name: str, new_name: str
-) -> None:
+def _replace_graph_inputs(graph: onnx.GraphProto, old_name: str, new_name: str) -> None:
   for node in graph.node:
     for i, input_name in enumerate(node.input):
       if input_name == old_name:
@@ -257,13 +254,17 @@ def _prune_onnx_to_obs_actions(model: onnx.ModelProto) -> onnx.ModelProto:
     )
 
   kept_nodes = [node for node in graph.node if id(node) in needed_node_ids]
-  kept_initializers = [init for init in graph.initializer if init.name in needed_tensors]
+  kept_initializers = [
+    init for init in graph.initializer if init.name in needed_tensors
+  ]
   obs_input = _find_value_info(list(graph.input), "obs")
   actions_output = _find_value_info(list(graph.output), "actions")
   if obs_input is None or actions_output is None:
     raise RuntimeError("Failed to locate obs/actions value infos while pruning ONNX.")
 
-  kept_value_info = [value for value in graph.value_info if value.name in needed_tensors]
+  kept_value_info = [
+    value for value in graph.value_info if value.name in needed_tensors
+  ]
 
   new_graph = helper.make_graph(
     nodes=kept_nodes,
@@ -422,7 +423,9 @@ def _infer_torchscript_input_dim(module: torch.jit.RecursiveScriptModule) -> int
   for _, parameter in module.named_parameters():
     if parameter.ndim == 2:
       return int(parameter.shape[1])
-  raise RuntimeError("Unable to infer TorchScript input dimension from model parameters.")
+  raise RuntimeError(
+    "Unable to infer TorchScript input dimension from model parameters."
+  )
 
 
 def convert_torchscript_to_onnx_with_joint_reorder(
@@ -622,7 +625,9 @@ def main() -> None:
       f"Unsupported input suffix {input_path.suffix!r}. Expected .onnx or exported TorchScript .pt"
     )
 
-  report["target_runtime"] = "pm01-engineai_robotics_native_sdk-main/assets/config/pm01_edu/rl_dance_example"
+  report["target_runtime"] = (
+    "pm01-engineai_robotics_native_sdk-main/assets/config/pm01_edu/rl_dance_example"
+  )
 
   if args.output_mnn:
     output_mnn = Path(args.output_mnn)

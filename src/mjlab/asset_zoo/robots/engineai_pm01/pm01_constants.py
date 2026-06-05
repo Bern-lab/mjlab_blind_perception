@@ -7,10 +7,6 @@ import mujoco
 from mjlab import MJLAB_SRC_PATH
 from mjlab.actuator import BuiltinPositionActuatorCfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
-from mjlab.utils.actuator import (
-  ElectricActuator,
-  reflected_inertia_from_two_stage_planetary,
-)
 from mjlab.utils.os import update_assets
 from mjlab.utils.spec_config import CollisionCfg
 
@@ -35,6 +31,7 @@ def get_spec() -> mujoco.MjSpec:
   spec = mujoco.MjSpec.from_file(str(PM01_XML))
   spec.assets = get_assets(spec.meshdir)
   return spec
+
 
 #######上部分为k1相关参数，以下为pm01参数
 joint_armature_hip_pitch = 0.0453
@@ -96,7 +93,10 @@ PM01_ACTUATOR_KNEE_PITCH = BuiltinPositionActuatorCfg(
 
 # PM01 Feet actuators
 PM01_ACTUATOR_FEET = BuiltinPositionActuatorCfg(
-  target_names_expr=(".*_ANKLE_PITCH_.*", ".*_ANKLE_ROLL_.*",),
+  target_names_expr=(
+    ".*_ANKLE_PITCH_.*",
+    ".*_ANKLE_ROLL_.*",
+  ),
   effort_limit=UPPER_BODY_EFFORT_LIMIT,
   armature=joint_armature_ankle,
   stiffness=UPPER_BODY_STIFFNESS,
@@ -108,7 +108,7 @@ PM01_ACTUATOR_ARMS = BuiltinPositionActuatorCfg(
   target_names_expr=(
     ".*SHOULDER.*",
     ".*ELBOW.*",
-    #".*_ELBOW_YAW_.*",
+    # ".*_ELBOW_YAW_.*",
   ),
   effort_limit=UPPER_BODY_EFFORT_LIMIT,
   armature=joint_armature_shoulder,
@@ -141,30 +141,30 @@ PM01_ACTUATOR_HEAD = BuiltinPositionActuatorCfg(
 HOME_KEYFRAME = EntityCfg.InitialStateCfg(
   pos=(0, 0, 0.9),
   joint_pos={
-    "J00_HIP_PITCH_L":-0.06,
-    "J01_HIP_ROLL_L":0.0,
-    "J02_HIP_YAW_L":0.0,
-    "J03_KNEE_PITCH_L":0.12,
-    "J04_ANKLE_PITCH_L":-0.06,
-    "J05_ANKLE_ROLL_L":0.0,
-    "J06_HIP_PITCH_R":-0.06,
-    "J07_HIP_ROLL_R":0.0,
-    "J08_HIP_YAW_R":0.0,
-    "J09_KNEE_PITCH_R":0.12,
-    "J10_ANKLE_PITCH_R":-0.06,
-    "J11_ANKLE_ROLL_R":0.0,
-    "J12_WAIST_YAW":0.0,
-    "J13_SHOULDER_PITCH_L":0.0,
-    "J14_SHOULDER_ROLL_L":0.15,
-    "J15_SHOULDER_YAW_L":0.0,
-    "J16_ELBOW_PITCH_L":-0.25,
-    "J17_ELBOW_YAW_L":0.0,
-    "J18_SHOULDER_PITCH_R":0.0,
-    "J19_SHOULDER_ROLL_R":-0.15,
-    "J20_SHOULDER_YAW_R":0.0,
-    "J21_ELBOW_PITCH_R":-0.25,
-    "J22_ELBOW_YAW_R":0.0,
-    "J23_HEAD_YAW":0.0
+    "J00_HIP_PITCH_L": -0.06,
+    "J01_HIP_ROLL_L": 0.0,
+    "J02_HIP_YAW_L": 0.0,
+    "J03_KNEE_PITCH_L": 0.12,
+    "J04_ANKLE_PITCH_L": -0.06,
+    "J05_ANKLE_ROLL_L": 0.0,
+    "J06_HIP_PITCH_R": -0.06,
+    "J07_HIP_ROLL_R": 0.0,
+    "J08_HIP_YAW_R": 0.0,
+    "J09_KNEE_PITCH_R": 0.12,
+    "J10_ANKLE_PITCH_R": -0.06,
+    "J11_ANKLE_ROLL_R": 0.0,
+    "J12_WAIST_YAW": 0.0,
+    "J13_SHOULDER_PITCH_L": 0.0,
+    "J14_SHOULDER_ROLL_L": 0.15,
+    "J15_SHOULDER_YAW_L": 0.0,
+    "J16_ELBOW_PITCH_L": -0.25,
+    "J17_ELBOW_YAW_L": 0.0,
+    "J18_SHOULDER_PITCH_R": 0.0,
+    "J19_SHOULDER_ROLL_R": -0.15,
+    "J20_SHOULDER_YAW_R": 0.0,
+    "J21_ELBOW_PITCH_R": -0.25,
+    "J22_ELBOW_YAW_R": 0.0,
+    "J23_HEAD_YAW": 0.0,
   },
   joint_vel={".*": 0.0},
 )
@@ -172,30 +172,30 @@ HOME_KEYFRAME = EntityCfg.InitialStateCfg(
 KNEES_BENT_KEYFRAME = EntityCfg.InitialStateCfg(
   pos=(0, 0, 0.68),
   joint_pos={
-    "J00_HIP_PITCH_L":-0.312,
-    "J01_HIP_ROLL_L":0.0,
-    "J02_HIP_YAW_L":0.0,
-    "J03_KNEE_PITCH_L":0.669,
-    "J04_ANKLE_PITCH_L":-0.363,
-    "J05_ANKLE_ROLL_L":0.0,
-    "J06_HIP_PITCH_R":-0.24,
-    "J07_HIP_ROLL_R":0.0,
-    "J08_HIP_YAW_R":0.0,
-    "J09_KNEE_PITCH_R":0.669,
-    "J10_ANKLE_PITCH_R":-0.363,
-    "J11_ANKLE_ROLL_R":0.0,
-    "J12_WAIST_YAW":0.0,
-    "J13_SHOULDER_PITCH_L":0.0,
-    "J14_SHOULDER_ROLL_L":0.0,
-    "J15_SHOULDER_YAW_L":0.0,
-    "J16_ELBOW_PITCH_L":0.0,
-    "J17_ELBOW_YAW_L":0.0,
-    "J18_SHOULDER_PITCH_R":0.0,
-    "J19_SHOULDER_ROLL_R":0.0,
-    "J20_SHOULDER_YAW_R":0.0,
-    "J21_ELBOW_PITCH_R":0.0,
-    "J22_ELBOW_YAW_R":0.0,
-    "J23_HEAD_YAW":0.0
+    "J00_HIP_PITCH_L": -0.312,
+    "J01_HIP_ROLL_L": 0.0,
+    "J02_HIP_YAW_L": 0.0,
+    "J03_KNEE_PITCH_L": 0.669,
+    "J04_ANKLE_PITCH_L": -0.363,
+    "J05_ANKLE_ROLL_L": 0.0,
+    "J06_HIP_PITCH_R": -0.24,
+    "J07_HIP_ROLL_R": 0.0,
+    "J08_HIP_YAW_R": 0.0,
+    "J09_KNEE_PITCH_R": 0.669,
+    "J10_ANKLE_PITCH_R": -0.363,
+    "J11_ANKLE_ROLL_R": 0.0,
+    "J12_WAIST_YAW": 0.0,
+    "J13_SHOULDER_PITCH_L": 0.0,
+    "J14_SHOULDER_ROLL_L": 0.0,
+    "J15_SHOULDER_YAW_L": 0.0,
+    "J16_ELBOW_PITCH_L": 0.0,
+    "J17_ELBOW_YAW_L": 0.0,
+    "J18_SHOULDER_PITCH_R": 0.0,
+    "J19_SHOULDER_ROLL_R": 0.0,
+    "J20_SHOULDER_YAW_R": 0.0,
+    "J21_ELBOW_PITCH_R": 0.0,
+    "J22_ELBOW_YAW_R": 0.0,
+    "J23_HEAD_YAW": 0.0,
   },
   joint_vel={".*": 0.0},
 )
@@ -215,22 +215,18 @@ KNEES_BENT_KEYFRAME = EntityCfg.InitialStateCfg(
 #   friction={r"^(left|right)_foot[1-7]_collision$": (0.6,)},
 # )
 FULL_COLLISION = CollisionCfg(
-    # 白名单：匹配所有以collision_开头的碰撞几何（精准贴合XML的class命名）
-    geom_names_expr=(r".*",),
-    # geom_names_expr=[r"collision_.*"],
-    # 碰撞维度：脚底/脚趾3维精准计算（行走核心），其他所有碰撞部位1维简化
-    condim={
-        r"^collision_(left|right)_foot(_toe)?$": 3,  # 匹配左脚/右脚/左脚趾/右脚趾
-        r"^collision_.*": 1                          # 其他collision_xxx全部兜底
-    },
-    # 碰撞优先级：脚底/脚趾设为最高优先级1（优先计算，避免穿模）
-    priority={
-        r"^collision_(left|right)_foot(_toe)?$": 1
-    },
-    # 摩擦系数：脚底/脚趾设0.6防滑，其他用框架默认值
-    friction={
-        r"^collision_(left|right)_foot(_toe)?$": (0.6,)
-    },
+  # 白名单：匹配所有以collision_开头的碰撞几何（精准贴合XML的class命名）
+  geom_names_expr=(r".*",),
+  # geom_names_expr=[r"collision_.*"],
+  # 碰撞维度：脚底/脚趾3维精准计算（行走核心），其他所有碰撞部位1维简化
+  condim={
+    r"^collision_(left|right)_foot(_toe)?$": 3,  # 匹配左脚/右脚/左脚趾/右脚趾
+    r"^collision_.*": 1,  # 其他collision_xxx全部兜底
+  },
+  # 碰撞优先级：脚底/脚趾设为最高优先级1（优先计算，避免穿模）
+  priority={r"^collision_(left|right)_foot(_toe)?$": 1},
+  # 摩擦系数：脚底/脚趾设0.6防滑，其他用框架默认值
+  friction={r"^collision_(left|right)_foot(_toe)?$": (0.6,)},
 )
 
 FULL_COLLISION_WITHOUT_SELF = CollisionCfg(
@@ -267,10 +263,11 @@ PM01_ARTICULATION = EntityArticulationInfoCfg(
     PM01_ACTUATOR_FEET,
     PM01_ACTUATOR_ARMS,
     PM01_ACTUATOR_HEAD,
-    PM01_ACTUATOR_WAIST
+    PM01_ACTUATOR_WAIST,
   ),
   soft_joint_pos_limit_factor=0.9,
 )
+
 
 def get_pm01_robot_cfg() -> EntityCfg:
   """Get a fresh G1 robot configuration instance.
@@ -284,6 +281,7 @@ def get_pm01_robot_cfg() -> EntityCfg:
     spec_fn=get_spec,
     articulation=PM01_ARTICULATION,
   )
+
 
 PM01_ACTION_SCALE: dict[str, float] = {}
 for a in PM01_ARTICULATION.actuators:
@@ -320,7 +318,7 @@ PM01_JOINTS = [
   "J20_SHOULDER_YAW_R",
   "J21_ELBOW_PITCH_R",
   "J22_ELBOW_YAW_R",
-  "J23_HEAD_YAW"
+  "J23_HEAD_YAW",
 ]
 
 if __name__ == "__main__":
