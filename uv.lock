@@ -41,6 +41,10 @@ conflicts = [[
 ]]
 
 [manifest]
+members = [
+    "mjlab",
+    "rsl-rl-lib",
+]
 constraints = [
     { name = "gitpython", specifier = ">=3.1.49" },
     { name = "lxml", specifier = ">=6.1.0" },
@@ -1720,7 +1724,7 @@ requires-dist = [
     { name = "mujoco-warp", git = "https://github.com/google-deepmind/mujoco_warp?rev=88b55fc2696960b927bc12584994bb8412b36558" },
     { name = "onnxscript", specifier = ">=0.5.4" },
     { name = "prettytable" },
-    { name = "rsl-rl-lib", specifier = "==5.2.0" },
+    { name = "rsl-rl-lib", editable = "third_party/rsl_rl" },
     { name = "tensorboard", specifier = ">=2.20.0" },
     { name = "tensordict" },
     { name = "torch", specifier = ">=2.7.0" },
@@ -3254,7 +3258,7 @@ wheels = [
 [[package]]
 name = "rsl-rl-lib"
 version = "5.2.0"
-source = { registry = "https://pypi.org/simple" }
+source = { editable = "third_party/rsl_rl" }
 dependencies = [
     { name = "gitpython" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-5-mjlab-cpu' and extra == 'extra-5-mjlab-cu128')" },
@@ -3268,9 +3272,16 @@ dependencies = [
     { name = "torchvision", version = "0.24.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin' or extra != 'extra-5-mjlab-cpu' or (extra == 'extra-5-mjlab-cpu' and extra == 'extra-5-mjlab-cu128')" },
     { name = "torchvision", version = "0.25.0", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform != 'darwin' and extra == 'extra-5-mjlab-cpu') or (extra == 'extra-5-mjlab-cpu' and extra == 'extra-5-mjlab-cu128')" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d7/a8/fb9aae0573a83dd510e228085f5e6ff9076a91f2bff6699270f07d31854c/rsl_rl_lib-5.2.0.tar.gz", hash = "sha256:cbb4eee96af9574495208381115d45d68ad1c0403710a2bc6512a2ee5bf57124", size = 60558, upload-time = "2026-04-23T12:40:54.259Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/7e/3a/3e8f39049cc5a8994bfdb2dd09d727f90a2781b9755adf59e49fa509500e/rsl_rl_lib-5.2.0-py3-none-any.whl", hash = "sha256:fc767059f329a184527dd10766c3382354f6deca4b049f23febc8140c3dc6029", size = 86451, upload-time = "2026-04-23T12:40:52.762Z" },
+
+[package.metadata]
+requires-dist = [
+    { name = "gitpython" },
+    { name = "numpy", specifier = ">=1.16.4" },
+    { name = "onnx" },
+    { name = "onnxscript", specifier = ">=0.5.4" },
+    { name = "tensordict", specifier = ">=0.7.0" },
+    { name = "torch", specifier = ">=2.6.0" },
+    { name = "torchvision", specifier = ">=0.5.0" },
 ]
 
 [[package]]

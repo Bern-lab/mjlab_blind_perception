@@ -375,21 +375,91 @@ class PPOTeacherKL(PPO):
         self,
         batch: RolloutStorage.Batch,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        """Compute auxiliary BCE losses exposed by the slow-latent actor."""
+        """Compute auxiliary BCE losses exposed by the slow-latent actor.
+
+        Debug note:
+          This function is the only place where the slow-latent event/stair/future
+          auxiliary heads enter the PPO update.  The one-shot debug print below is
+          intentionally broad: it checks whether the actor exposes aux outputs,
+          whether the current mini-batch produced logits, whether latent labels are
+          present in rollout storage, and whether shapes match.
+        """
+        logs: dict[str, float] = self._compute_slow_latent_diagnostic_logs()
+
         get_aux_outputs = getattr(self.actor, "get_aux_outputs", None)
-        if get_aux_outputs is None:
-            return torch.zeros((), device=self.device), {}
-        aux_outputs = get_aux_outputs()
-        if not aux_outputs:
-            return torch.zeros((), device=self.device), {}
+        get_diagnostics = getattr(self.actor, "get_slow_latent_diagnostics", None)
+
+        aux_outputs = get_aux_outputs() if get_aux_outputs is not None else {}
+        diagnostics = get_diagnostics() if get_diagnostics is not None else {}
 
         event_coef = float(getattr(self.actor, "aux_event_coef", 0.0))
         stair_coef = float(getattr(self.actor, "aux_stair_coef", 0.0))
         future_coef = float(getattr(self.actor, "aux_future_collision_coef", 0.0))
+
+        observations = batch.observations
+        obs_keys = []
+        latent_labels_shape = None
+        if observations is not None:
+            try:
+                obs_keys = list(observations.keys())
+            except Exception:
+                obs_keys = ["<failed_to_list_observation_keys>"]
+            if "latent_labels" in observations:
+                latent_labels_shape = tuple(observations["latent_labels"].shape)
+
+        if not hasattr(self, "_printed_slow_latent_debug"):
+            def _shape_dict(obj: dict | None) -> dict[str, tuple[int, ...] | str] | None:
+                if not obj:
+                    return obj
+                out: dict[str, tuple[int, ...] | str] = {}
+                for key, value in obj.items():
+                    out[key] = tuple(value.shape) if hasattr(value, "shape") else type(value).__name__
+                return out
+
+            print(
+                "\n[DBG slow latent aux]",
+                "\n  actor_type=", type(self.actor),
+                "\n  has_get_aux_outputs=", get_aux_outputs is not None,
+                "\n  has_get_slow_latent_diagnostics=", get_diagnostics is not None,
+                "\n  aux_output_shapes=", _shape_dict(aux_outputs),
+                "\n  diagnostic_shapes=", _shape_dict(diagnostics),
+                "\n  aux_coefs=",
+                {
+                    "event": event_coef,
+                    "stair": stair_coef,
+                    "future": future_coef,
+                },
+                "\n  batch_has_observations=", observations is not None,
+                "\n  observation_keys=", obs_keys,
+                "\n  latent_labels_shape=", latent_labels_shape,
+                "\n  masks_shape=", tuple(batch.masks.shape) if batch.masks is not None else None,
+                "\n  hidden_state_shapes=",
+                [
+                    tuple(h.shape) if hasattr(h, "shape") else type(h).__name__
+                    for h in (batch.hidden_states[0] if batch.hidden_states is not None else [])
+                ],
+                "\n",
+                flush=True,
+            )
+            self._printed_slow_latent_debug = True
+
+        if get_aux_outputs is None:
+            logs["slow_latent_debug_missing_get_aux_outputs"] = 1.0
+            return torch.zeros((), device=self.device), logs
+
+        if not aux_outputs:
+            logs["slow_latent_debug_empty_aux_outputs"] = 1.0
+            return torch.zeros((), device=self.device), logs
+
         if event_coef == 0.0 and stair_coef == 0.0 and future_coef == 0.0:
-            return torch.zeros((), device=self.device), {}
+            logs["slow_latent_debug_all_aux_coef_zero"] = 1.0
+            return torch.zeros((), device=self.device), logs
+
         if batch.observations is None or "latent_labels" not in batch.observations:
-            raise RuntimeError("Slow-latent auxiliary losses require a 'latent_labels' observation group.")
+            raise RuntimeError(
+                "Slow-latent auxiliary losses require a 'latent_labels' observation group. "
+                f"Available observation keys: {obs_keys}"
+            )
 
         labels = batch.observations["latent_labels"]
         if labels.shape[-1] < 2:
