@@ -248,9 +248,7 @@ def test_blind_rough_variants_share_toe_riser_contact_penalty() -> None:
 
   # Target-navigation TeacherKL variant replaces it with step-boundary
   # volume penalties but keeps the contact sensor for the critic.
-  cfg = load_env_cfg(
-    "Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1"
-  )
+  cfg = load_env_cfg("Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1")
   assert "toe_riser_contact_memory_penalty" not in cfg.rewards
   assert "foot_step_lip_volume_penalty" in cfg.rewards
   assert "toe_step_riser_slab_penalty" in cfg.rewards

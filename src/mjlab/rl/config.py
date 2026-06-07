@@ -61,6 +61,65 @@ class RslRlSlowLatentModelCfg(RslRlModelCfg):
 
 
 @dataclass
+class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
+  """Config for the gated stair-focused slow latent model with auxiliary heads.
+
+  Same architecture as RslRlSlowLatentModelCfg but with:
+    - Gated update (fast/write/hold) controlled by an internal state machine
+    - Three auxiliary heads: event_head, stair_state_head, future_collision_head
+    - Separate latent observation group (deployable proprioceptive features only)
+  """
+
+  use_gated_latent: bool = True
+  """Enable gated latent update with state machine."""
+  use_stair_latent_obs: bool = True
+  """Use stair-focused deployable latent_obs instead of full actor_obs."""
+
+  # ---- Gate parameters ----
+  alpha_fast: float = 0.3
+  """EMA rate in NORMAL mode (fast update, fast forget)."""
+  alpha_write: float = 0.8
+  """EMA rate in STAIR_WRITE mode (rapid memory acquisition)."""
+  alpha_hold: float = 0.02
+  """EMA rate in STAIR_MEMORY mode (slow forgetting)."""
+  write_steps: int = 2
+  """Number of steps to stay in STAIR_WRITE mode."""
+  min_stair_steps: int = 50
+  """Minimum steps in STAIR_MEMORY before exit is allowed."""
+  exit_steps: int = 100
+  """Consecutive no-event steps required to exit STAIR_MEMORY."""
+  cooldown_steps: int = 15
+  """Cooldown steps after exiting STAIR_MEMORY before re-triggering."""
+
+  # ---- Prediction thresholds ----
+  event_on_threshold: float = 0.6
+  """p_event threshold to trigger STAIR_WRITE."""
+  event_off_threshold: float = 0.4
+  """p_event threshold for no-event counting."""
+  stair_off_threshold: float = 0.4
+  """p_stair threshold to allow exit from STAIR_MEMORY."""
+
+  # ---- Auxiliary loss ----
+  aux_future_collision_coef: float = 0.05
+  """Weight for future toe-riser collision BCE loss."""
+  aux_event_coef: float = 0.03
+  """Weight for current toe-riser event BCE loss."""
+  aux_stair_coef: float = 0.0
+  """Weight for stair state BCE loss (0.0 = disabled in v1)."""
+  future_collision_horizon: int = 20
+  """Future window (steps) for the collision prediction label."""
+
+  # ---- MLP encoder ----
+  mlp_encoder_dims: tuple[int, ...] = (128, 128)
+  """Hidden dimensions of the pre-LSTM MLP encoder for latent_obs."""
+
+  # Override parent defaults
+  latent_dim: int = 16
+  latent_hidden_dim: int = 128
+  rnn_hidden_dim: int = 128
+
+
+@dataclass
 class RslRlPpoAlgorithmCfg:
   """Config for the PPO algorithm."""
 

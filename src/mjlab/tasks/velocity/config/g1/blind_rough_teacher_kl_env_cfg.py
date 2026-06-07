@@ -192,7 +192,7 @@ def _configure_teacherkl_target_navigation(
 
   twist_cmd = TeacherTargetHeadingVelocityCommandCfg(
     entity_name="robot",
-    resampling_time_range=(10.0, 13.0),
+    resampling_time_range=(13.0, 15.0),
     heading_command=True,
     heading_control_stiffness=0.5,
     rel_target_envs=0.8,
@@ -207,9 +207,9 @@ def _configure_teacherkl_target_navigation(
     zero_lateral_velocity=True,
     debug_vis=True,
     ranges=TeacherTargetHeadingVelocityCommandCfg.Ranges(
-      lin_vel_x=(-0.5, 0.8),
+      lin_vel_x=(0.0, 1.0),
       lin_vel_y=(0.0, 0.0),
-      ang_vel_z=(-0.5, 0.5),
+      ang_vel_z=(-0.8, 0.8),
       heading=(-math.pi, math.pi),
     ),
   )
@@ -274,6 +274,13 @@ def _configure_teacherkl_target_navigation(
       ),
     },
   )
+
+  # Randomize step width per terrain tile within [0.30, 0.35].
+  terrain_gen = cfg.scene.terrain.terrain_generator
+  for name in ("high_stairs", "high_stairs_inv"):
+    sub = terrain_gen.sub_terrains.get(name)
+    if sub is not None and hasattr(sub, "step_width_range"):
+      sub.step_width_range = (0.30, 0.35)  # pyright: ignore[reportAttributeAccessIssue]
 
 
 def _reset_teacher_term_temporal_state(term: ObservationTermCfg) -> None:
