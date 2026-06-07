@@ -1,11 +1,11 @@
 """RL configuration for Unitree G1 velocity task."""
 
 from mjlab.rl import (
+  RslRlGatedStairLatentModelCfg,
   RslRlModelCfg,
   RslRlOnPolicyRunnerCfg,
   RslRlPpoAlgorithmCfg,
   RslRlPpoTeacherKLAlgorithmCfg,
-  RslRlSlowLatentModelCfg,
   RslRlTeacherKLCfg,
   RslRlTeacherKLRunnerCfg,
 )
@@ -59,10 +59,27 @@ def _unitree_g1_depth_policy_model_cfg() -> RslRlModelCfg:
   )
 
 
-def _unitree_g1_slow_latent_policy_model_cfg(
-  latent_alpha: float = 0.1,
-) -> RslRlSlowLatentModelCfg:
-  return RslRlSlowLatentModelCfg(
+def _unitree_g1_gated_stair_latent_policy_model_cfg(
+  latent_dim: int = 16,
+  latent_hidden_dim: int = 128,
+  mlp_encoder_dims: tuple[int, ...] = (128, 128),
+  alpha_fast: float = 0.3,
+  alpha_write: float = 0.8,
+  alpha_hold: float = 0.02,
+  write_steps: int = 2,
+  min_stair_steps: int = 50,
+  exit_steps: int = 100,
+  cooldown_steps: int = 15,
+  event_on_threshold: float = 0.6,
+  event_off_threshold: float = 0.4,
+  stair_off_threshold: float = 0.4,
+  aux_event_coef: float = 0.03,
+  aux_stair_coef: float = 0.02,
+  aux_future_collision_coef: float = 0.05,
+  future_collision_horizon: int = 20,
+  latent_obs_set: str = "latent",
+) -> RslRlGatedStairLatentModelCfg:
+  return RslRlGatedStairLatentModelCfg(
     hidden_dims=(512, 256, 128),
     activation="elu",
     obs_normalization=True,
@@ -71,12 +88,26 @@ def _unitree_g1_slow_latent_policy_model_cfg(
       "init_std": 1.0,
       "std_type": "scalar",
     },
-    latent_dim=16,
-    latent_hidden_dim=256,
-    latent_alpha=latent_alpha,
-    encoder_type="lstm",
+    latent_dim=latent_dim,
+    latent_hidden_dim=latent_hidden_dim,
+    mlp_encoder_dims=mlp_encoder_dims,
+    alpha_fast=alpha_fast,
+    alpha_write=alpha_write,
+    alpha_hold=alpha_hold,
+    write_steps=write_steps,
+    min_stair_steps=min_stair_steps,
+    exit_steps=exit_steps,
+    cooldown_steps=cooldown_steps,
+    event_on_threshold=event_on_threshold,
+    event_off_threshold=event_off_threshold,
+    stair_off_threshold=stair_off_threshold,
+    aux_event_coef=aux_event_coef,
+    aux_stair_coef=aux_stair_coef,
+    aux_future_collision_coef=aux_future_collision_coef,
+    future_collision_horizon=future_collision_horizon,
+    latent_obs_set=latent_obs_set,
     rnn_type="lstm",
-    rnn_hidden_dim=256,
+    rnn_hidden_dim=latent_hidden_dim,
     rnn_num_layers=1,
   )
 
@@ -206,12 +237,54 @@ def unitree_g1_blind_rough_target_navigation_teacherkl_runner_cfg() -> (
 
 
 def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
-  latent_alpha: float = 0.1,
   num_steps_per_env: int = 64,
+  latent_dim: int = 16,
+  latent_hidden_dim: int = 128,
+  mlp_encoder_dims: tuple[int, ...] = (128, 128),
+  alpha_fast: float = 0.3,
+  alpha_write: float = 0.8,
+  alpha_hold: float = 0.02,
+  write_steps: int = 2,
+  min_stair_steps: int = 50,
+  exit_steps: int = 100,
+  cooldown_steps: int = 15,
+  event_on_threshold: float = 0.6,
+  event_off_threshold: float = 0.4,
+  stair_off_threshold: float = 0.4,
+  aux_event_coef: float = 0.03,
+  aux_stair_coef: float = 0.02,
+  aux_future_collision_coef: float = 0.05,
+  future_collision_horizon: int = 20,
+  latent_obs_set: str = "latent",
 ) -> RslRlTeacherKLRunnerCfg:
-  """Create Teacher-KL config with LSTM slow-latent student actor."""
+  """Create Teacher-KL config with gated stair slow-latent student actor."""
   cfg = unitree_g1_blind_rough_target_navigation_teacherkl_runner_cfg()
-  cfg.actor = _unitree_g1_slow_latent_policy_model_cfg(latent_alpha=latent_alpha)
+  cfg.actor = _unitree_g1_gated_stair_latent_policy_model_cfg(
+    latent_dim=latent_dim,
+    latent_hidden_dim=latent_hidden_dim,
+    mlp_encoder_dims=mlp_encoder_dims,
+    alpha_fast=alpha_fast,
+    alpha_write=alpha_write,
+    alpha_hold=alpha_hold,
+    write_steps=write_steps,
+    min_stair_steps=min_stair_steps,
+    exit_steps=exit_steps,
+    cooldown_steps=cooldown_steps,
+    event_on_threshold=event_on_threshold,
+    event_off_threshold=event_off_threshold,
+    stair_off_threshold=stair_off_threshold,
+    aux_event_coef=aux_event_coef,
+    aux_stair_coef=aux_stair_coef,
+    aux_future_collision_coef=aux_future_collision_coef,
+    future_collision_horizon=future_collision_horizon,
+    latent_obs_set=latent_obs_set,
+  )
+  cfg.obs_groups = {
+    "actor": ("actor",),
+    "latent": (latent_obs_set,),
+    "critic": ("critic",),
+    "teacher": ("teacher", "camera"),
+  }
   cfg.num_steps_per_env = num_steps_per_env
   cfg.experiment_name = "g1_blind_rough_target_navigation_slow_latent_teacherkl"
   return cfg

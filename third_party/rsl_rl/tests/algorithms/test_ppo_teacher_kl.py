@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import torch
 from tensordict import TensorDict
+from typing import Any, cast
+
+import pytest
 
 from rsl_rl.algorithms.ppo_teacher_kl import PPOTeacherKL
 from rsl_rl.models import MLPModel
@@ -72,6 +75,36 @@ def test_mean_huber_guidance_ignores_std_mismatch() -> None:
     assert logs["teacher_kl"].item() > 0.0
 
 
+def test_slow_latent_diagnostics_are_logged() -> None:
+    """Slow-latent diagnostics should surface in the PPO loss dictionary."""
+    alg = _build_teacher_kl({"enabled": False})
+
+    def _diagnostics() -> dict[str, torch.Tensor]:
+        return {
+            "event_prob": torch.tensor([[0.2], [0.8]]),
+            "stair_prob": torch.tensor([[0.3], [0.7]]),
+            "future_prob": torch.tensor([[0.4], [0.6]]),
+            "z_norm": torch.tensor([[1.0], [3.0]]),
+            "gate_mode": torch.tensor([[0.0], [1.0], [2.0], [2.0]]),
+            "alpha": torch.tensor([[0.3], [0.8], [0.02]]),
+        }
+
+    cast(Any, alg.actor).get_slow_latent_diagnostics = _diagnostics
+
+    logs = alg._compute_slow_latent_diagnostic_logs()
+
+    assert logs["slow_latent_event_prob_mean"] == pytest.approx(0.5)
+    assert logs["slow_latent_stair_prob_mean"] == pytest.approx(0.5)
+    assert logs["slow_latent_future_prob_mean"] == pytest.approx(0.5)
+    assert logs["slow_latent_z_norm_mean"] == pytest.approx(2.0)
+    assert logs["slow_latent_z_norm_max"] == pytest.approx(3.0)
+    assert logs["slow_latent_mode_normal_count"] == pytest.approx(1.0)
+    assert logs["slow_latent_mode_write_count"] == pytest.approx(1.0)
+    assert logs["slow_latent_mode_memory_count"] == pytest.approx(2.0)
+    assert logs["slow_latent_alpha_min"] == pytest.approx(0.02)
+    assert logs["slow_latent_alpha_max"] == pytest.approx(0.8)
+
+
 def test_mean_huber_guidance_applies_loss_cap() -> None:
     """The update loss should respect max_teacher_loss for mean guidance."""
     alg = _build_teacher_kl({
@@ -97,7 +130,7 @@ def test_disabled_guidance_runs_without_teacher() -> None:
     alg = _build_teacher_kl({"enabled": False})
 
     loss, logs = alg._compute_additional_loss(
-        batch=None,  # type: ignore[arg-type]
+        batch=cast(Any, None),
         original_batch_size=0,
         distribution_params=(),
     )
@@ -179,7 +212,7 @@ def test_construct_disabled_guidance_skips_teacher_loading() -> None:
         "torch_compile_mode": None,
     }
 
-    alg = PPOTeacherKL.construct_algorithm(obs, _DummyEnv(), cfg, "cpu")
+    alg = PPOTeacherKL.construct_algorithm(obs, cast(Any, _DummyEnv()), cfg, "cpu")
 
     assert alg.teacher_guidance_enabled is False
     assert alg.teacher is None

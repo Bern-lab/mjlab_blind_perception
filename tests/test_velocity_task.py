@@ -1,9 +1,16 @@
 """Tests specific to velocity tasks."""
 
+from typing import cast
+
 import pytest
 
 from mjlab.asset_zoo.robots import G1_ACTION_SCALE, GO1_ACTION_SCALE
 from mjlab.envs.mdp.actions import JointPositionActionCfg
+from mjlab.rl.config import (
+  RslRlGatedStairLatentModelCfg,
+  RslRlPpoTeacherKLAlgorithmCfg,
+  RslRlTeacherKLRunnerCfg,
+)
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg
 from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from mjlab.tasks.velocity.mdp.teacher_target_heading_command import (
@@ -226,6 +233,32 @@ def test_teacherkl_target_navigation_switch() -> None:
   assert "toe_terrain_contact" in target_cfg.observations["critic"].terms
 
 
+def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
+  task_id = (
+    "Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1"
+  )
+  env_cfg = load_env_cfg(task_id)
+  rl_cfg = cast(RslRlTeacherKLRunnerCfg, load_rl_cfg(task_id))
+
+  assert "latent" in env_cfg.observations
+  assert "stair_latent" in env_cfg.observations["latent"].terms
+  assert "latent_labels" in env_cfg.observations
+  assert set(env_cfg.observations["latent_labels"].terms) == {
+    "toe_riser_event",
+    "stair_state",
+  }
+  assert "reset_stair_latent_cache" in env_cfg.events
+  assert rl_cfg.obs_groups["actor"] == ("actor",)
+  assert rl_cfg.obs_groups["latent"] == ("latent",)
+  actor_cfg = cast(RslRlGatedStairLatentModelCfg, rl_cfg.actor)
+  assert actor_cfg.latent_dim == 16
+  assert actor_cfg.latent_hidden_dim == 128
+  assert actor_cfg.mlp_encoder_dims == (128, 128)
+  assert actor_cfg.aux_event_coef == 0.03
+  assert actor_cfg.aux_stair_coef == 0.02
+  assert actor_cfg.aux_future_collision_coef == 0.05
+
+
 def test_blind_rough_variants_share_toe_riser_contact_penalty() -> None:
   """Blind-rough variants should use the shared toe-riser contact penalty config."""
   # Base blind-rough task keeps the old contact-memory penalty.
@@ -262,13 +295,18 @@ def test_blind_rough_variants_share_toe_riser_contact_penalty() -> None:
 
 def test_teacherkl_uses_delayed_mean_huber_guidance() -> None:
   """Teacher-KL variants should use delayed weak action-mean guidance."""
-  velocity_cfg = load_rl_cfg("Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1")
-  target_cfg = load_rl_cfg(
-    "Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1"
+  velocity_cfg = cast(
+    RslRlTeacherKLRunnerCfg,
+    load_rl_cfg("Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1"),
+  )
+  target_cfg = cast(
+    RslRlTeacherKLRunnerCfg,
+    load_rl_cfg("Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1"),
   )
 
   for cfg in (velocity_cfg, target_cfg):
-    teacher_cfg = cfg.algorithm.teacher_kl_cfg
+    algorithm_cfg = cast(RslRlPpoTeacherKLAlgorithmCfg, cfg.algorithm)
+    teacher_cfg = algorithm_cfg.teacher_kl_cfg
     assert cfg.obs_groups["teacher"] == ("teacher", "camera")
     assert teacher_cfg.enabled is True
     assert teacher_cfg.imitation_only is False

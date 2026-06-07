@@ -384,10 +384,12 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_env_cfg(
   play: bool = False,
   actor_history_length: int = 5,  # 历史帧
 ) -> ManagerBasedRlEnvCfg:
-  """Target-navigation blind task for the slow-latent student actor."""
-  cfg = unitree_g1_blind_rough_teacherkl_env_cfg(
-    play=play,
-    use_target_navigation=True,
+  """Compatibility wrapper for the dedicated slow-latent task config."""
+  from .blind_rough_slow_latent_env_cfg import (
+    unitree_g1_blind_rough_target_navigation_slow_latent_env_cfg as _make_cfg,
   )
-  cfg.observations["actor"].history_length = actor_history_length
-  return cfg
+
+  return _make_cfg(
+    play=play,
+    actor_history_length=actor_history_length,
+  )

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
@@ -21,7 +21,6 @@ def phase(env: ManagerBasedRlEnv, period: float, command_name: str) -> torch.Ten
   phase[:, 0] = torch.sin(global_phase * torch.pi * 2.0)
   phase[:, 1] = torch.cos(global_phase * torch.pi * 2.0)
 
-  command = env.command_manager.get_command(command_name)
   stand_mask = (
     torch.linalg.norm(env.command_manager.get_command(command_name), dim=1) < 0.1
   )  # (command[:, :3], dim=1)
@@ -112,10 +111,14 @@ For deployment, these positions should be computed via FK from joint encoders.
 
 # Body-frame toe/heel offsets relative to ankle_roll_link origin
 _TOE_OFFSET_BODY: torch.Tensor = torch.tensor([0.12, 0.0, -0.037], dtype=torch.float32)
-_HEEL_OFFSET_BODY: torch.Tensor = torch.tensor([-0.05, 0.0, -0.037], dtype=torch.float32)
+_HEEL_OFFSET_BODY: torch.Tensor = torch.tensor(
+  [-0.05, 0.0, -0.037], dtype=torch.float32
+)
 
 
-def _get_leg_joint_info(env: ManagerBasedRlEnv) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _get_leg_joint_info(
+  env: ManagerBasedRlEnv,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
   """Return (leg_joint_indices, leg_action_indices, default_joint_pos_leg).
 
   The indices are resolved from the environment's joint and action order.
@@ -129,8 +132,20 @@ def _get_leg_joint_info(env: ManagerBasedRlEnv) -> tuple[torch.Tensor, torch.Ten
     )
 
   robot = env.scene["robot"]
-  all_joint_names = robot.data.joint_names
-  all_action_names = env.action_manager.action_names
+  all_joint_names = robot.joint_names
+  action_manager = cast(Any, env.action_manager)
+
+  # The G1 velocity task uses one 29-D joint_pos action term.
+  # ActionManager does not expose per-dimension action_names. For this joint_pos
+  # action, the action vector follows the robot actuated joint order, i.e.
+  # robot.joint_names.
+  if getattr(action_manager, "total_action_dim", None) != len(robot.joint_names):
+    raise RuntimeError(
+      "Cannot infer leg action indices: expected a single joint_pos action whose "
+      f"dimension equals len(robot.joint_names)={len(robot.joint_names)}, but got "
+      f"total_action_dim={getattr(action_manager, 'total_action_dim', None)}."
+    )
+  all_action_names = list(robot.joint_names)
 
   # Build joint index lookup
   joint_name_to_idx = {name: i for i, name in enumerate(all_joint_names)}
@@ -148,7 +163,7 @@ def _get_leg_joint_info(env: ManagerBasedRlEnv) -> tuple[torch.Tensor, torch.Ten
   )
 
   default_joint_pos = robot.data.default_joint_pos
-  default_joint_pos_leg = default_joint_pos[leg_joint_indices]
+  default_joint_pos_leg = default_joint_pos[:, leg_joint_indices]
 
   env.extras["leg_joint_indices"] = leg_joint_indices
   env.extras["leg_action_indices"] = leg_action_indices
@@ -163,7 +178,7 @@ def _get_foot_link_indices(env: ManagerBasedRlEnv) -> tuple[int, int]:
     return env.extras["left_foot_link_idx"], env.extras["right_foot_link_idx"]
 
   robot = env.scene["robot"]
-  all_body_names = robot.data.body_names
+  all_body_names = robot.body_names
   name_to_idx = {name: i for i, name in enumerate(all_body_names)}
   left_idx = name_to_idx[_G1_FOOT_LINK_NAMES[0]]
   right_idx = name_to_idx[_G1_FOOT_LINK_NAMES[1]]
@@ -192,6 +207,7 @@ def _body_frame_foot_positions(
   # World-frame link positions and quaternions
   body_link_pos_w = robot.data.body_link_pos_w  # [num_envs, num_bodies, 3]
   body_link_quat_w = robot.data.body_link_quat_w  # [num_envs, num_bodies, 4]
+  root_pos_w = robot.data.root_link_pos_w  # [num_envs, 3]
   root_quat_w = robot.data.root_link_quat_w  # [num_envs, 4]
 
   _toe = _TOE_OFFSET_BODY.to(env.device)
@@ -202,11 +218,13 @@ def _body_frame_foot_positions(
     link_quat_w = body_link_quat_w[:, link_idx, :]  # [B, 4]
     # Rotate offset into world frame
     from mjlab.utils.lab_api.math import quat_apply
+
     offset_w = quat_apply(link_quat_w, offset.expand(env.num_envs, -1))
     point_w = link_pos_w + offset_w
     # Transform to body frame
     from mjlab.utils.lab_api.math import quat_apply_inverse
-    point_body = quat_apply_inverse(root_quat_w, point_w)
+
+    point_body = quat_apply_inverse(root_quat_w, point_w - root_pos_w)
     return point_body
 
   left_toe = _link_pos_body(left_idx, _toe)
@@ -264,6 +282,7 @@ def _clear_foot_velocity_cache(env: ManagerBasedRlEnv, env_ids: torch.Tensor) ->
 # Toe-riser event label (from simulation contact sensor)
 # ======================================================================
 
+
 def toe_riser_event_label(
   env: ManagerBasedRlEnv,
   sensor_name: str = "toe_terrain_contact",
@@ -308,7 +327,7 @@ def toe_riser_event_label(
   is_strong = force_mag > force_threshold
 
   hit_per_slot = (is_horizontal & is_strong).any(dim=-1)  # [B]
-  return hit_per_slot.float()
+  return hit_per_slot.float().unsqueeze(-1)
 
 
 def stair_state_label(
@@ -335,14 +354,18 @@ def stair_state_label(
   stair:
     ``[num_envs]`` binary tensor.
   """
-  # Heuristic: terrain_level >= min_terrain_level
-  terrain_level = env.terrain_levels
-  return (terrain_level >= min_terrain_level).float()
+  del sensor_name
+  terrain = env.scene.terrain
+  if terrain is None or getattr(terrain, "terrain_levels", None) is None:
+    return torch.zeros(env.num_envs, 1, device=env.device)
+  levels = terrain.terrain_levels
+  return (levels >= min_terrain_level).float().unsqueeze(-1)
 
 
 # ======================================================================
 # Stair latent observation (deployable proprioceptive features)
 # ======================================================================
+
 
 def stair_latent_obs(
   env: ManagerBasedRlEnv,
@@ -398,16 +421,23 @@ def stair_latent_obs(
   robot = env.scene[asset_cfg.name]
   num_envs = env.num_envs
   device = env.device
+  cache_valid = env.extras.get("stair_latent_cache_valid")
+  if cache_valid is None:
+    cache_valid = torch.zeros(num_envs, dtype=torch.bool, device=device)
+    env.extras["stair_latent_cache_valid"] = cache_valid
+  valid = cache_valid.unsqueeze(-1)
 
   # ---- IMU / perturbation ----
-  projected_gravity = robot.data.projected_gravity  # [B, 3]
+  projected_gravity = robot.data.projected_gravity_b  # [B, 3]
   base_ang_vel = robot.data.root_link_ang_vel_b  # [B, 3]
 
   # base_ang_vel_delta
-  if "prev_base_ang_vel" in env.extras:
-    base_ang_vel_delta = base_ang_vel - env.extras["prev_base_ang_vel"]
-  else:
+  if "prev_base_ang_vel" not in env.extras:
     base_ang_vel_delta = torch.zeros_like(base_ang_vel)
+  else:
+    base_ang_vel_delta = torch.where(
+      valid, base_ang_vel - env.extras["prev_base_ang_vel"], 0.0
+    )
   env.extras["prev_base_ang_vel"] = base_ang_vel.clone()
 
   # ---- Foot FK positions (body frame) ----
@@ -418,7 +448,9 @@ def stair_latent_obs(
   # ---- Foot relative geometry ----
   toe_delta = left_toe_pos - right_toe_pos  # [B, 3]
   heel_delta = left_heel_pos - right_heel_pos  # [B, 3]
-  toe_horizontal_dist = torch.sqrt(toe_delta[:, 0] ** 2 + toe_delta[:, 1] ** 2).unsqueeze(-1)
+  toe_horizontal_dist = torch.sqrt(
+    toe_delta[:, 0] ** 2 + toe_delta[:, 1] ** 2
+  ).unsqueeze(-1)
   toe_vertical_dist = toe_delta[:, 2:3]
   heel_vertical_dist = heel_delta[:, 2:3]
 
@@ -426,29 +458,38 @@ def stair_latent_obs(
   left_toe_vel, right_toe_vel = _body_frame_foot_velocities(env)
 
   # toe velocity deltas
-  if "prev_left_toe_vel" in env.extras:
-    left_toe_vel_delta = left_toe_vel - env.extras["prev_left_toe_vel"]
-    right_toe_vel_delta = right_toe_vel - env.extras["prev_right_toe_vel"]
-  else:
+  if "prev_left_toe_vel" not in env.extras:
     left_toe_vel_delta = torch.zeros_like(left_toe_vel)
     right_toe_vel_delta = torch.zeros_like(right_toe_vel)
+  else:
+    left_toe_vel_delta = torch.where(
+      valid, left_toe_vel - env.extras["prev_left_toe_vel"], 0.0
+    )
+    right_toe_vel_delta = torch.where(
+      valid, right_toe_vel - env.extras["prev_right_toe_vel"], 0.0
+    )
   env.extras["prev_left_toe_vel"] = left_toe_vel.clone()
   env.extras["prev_right_toe_vel"] = right_toe_vel.clone()
 
   # ---- Leg action-response residuals ----
-  leg_joint_indices, leg_action_indices, default_joint_pos_leg = _get_leg_joint_info(env)
+  leg_joint_indices, leg_action_indices, default_joint_pos_leg = _get_leg_joint_info(
+    env
+  )
 
-  # previous_action (full action from last step)
+  # previous_action (full action from last step).
+  # Actions are stored in ActionManager, not robot.data.
+  current_action = env.action_manager.action
   if "prev_action" in env.extras:
     prev_action = env.extras["prev_action"]
   else:
-    prev_action = torch.zeros(num_envs, env.num_actions, device=device)
+    prev_action = torch.zeros_like(current_action)
 
   previous_action_leg = prev_action[:, leg_action_indices]
 
   # target_joint_pos_leg = default_joint_pos_leg + action_scale * previous_action_leg
   # action_scale is per-joint; approximate with G1_ACTION_SCALE
   from mjlab.asset_zoo.robots import G1_ACTION_SCALE
+
   action_scale_leg = torch.tensor(
     [G1_ACTION_SCALE.get(name, 0.25) for name in _G1_LEG_JOINT_NAMES],
     dtype=torch.float32,
@@ -463,18 +504,24 @@ def stair_latent_obs(
   current_joint_vel = robot.data.joint_vel[:, leg_joint_indices]  # [B, 12]
 
   # leg joint velocity delta
-  if "prev_leg_joint_vel" in env.extras:
-    leg_joint_vel_delta = current_joint_vel - env.extras["prev_leg_joint_vel"]
-  else:
+  if "prev_leg_joint_vel" not in env.extras:
     leg_joint_vel_delta = torch.zeros_like(current_joint_vel)
+  else:
+    leg_joint_vel_delta = torch.where(
+      valid, current_joint_vel - env.extras["prev_leg_joint_vel"], 0.0
+    )
   env.extras["prev_leg_joint_vel"] = current_joint_vel.clone()
 
-  # Update prev_action cache
-  env.extras["prev_action"] = robot.data.last_action.clone()
+  # Update prev_action cache.
+  env.extras["prev_action"] = current_action.clone()
+  env.extras["stair_latent_cache_valid"][:] = True
 
   # ---- Command context ----
   command = env.command_manager.get_command("twist")
-  command_lin_x = command[:, 0:1]  # [B, 1]
+  if command is None:
+    command_lin_x = torch.zeros(num_envs, 1, device=device)
+  else:
+    command_lin_x = command[:, 0:1]  # [B, 1]
 
   # ---- Assemble ----
   parts: list[torch.Tensor] = [
@@ -508,12 +555,22 @@ def stair_latent_obs_dim() -> int:
   """Return the expected dimension of stair_latent_obs."""
   n_leg = len(_G1_LEG_JOINT_NAMES)  # 12
   return (
-    3 + 3 + 3  # gravity, ang_vel, ang_vel_delta (9)
-    + 3 + 3 + 3 + 3  # foot positions (12)
-    + 3 + 3  # toe/heel deltas (6)
-    + 1 + 1 + 1  # distances (3)
-    + 3 + 3  # toe velocities (6)
-    + 3 + 3  # toe vel deltas (6)
+    3
+    + 3
+    + 3  # gravity, ang_vel, ang_vel_delta (9)
+    + 3
+    + 3
+    + 3
+    + 3  # foot positions (12)
+    + 3
+    + 3  # toe/heel deltas (6)
+    + 1
+    + 1
+    + 1  # distances (3)
+    + 3
+    + 3  # toe velocities (6)
+    + 3
+    + 3  # toe vel deltas (6)
     + n_leg  # prev_action_leg (12)
     + n_leg  # tracking error (12)
     + n_leg  # joint_vel (12)
@@ -537,6 +594,8 @@ def reset_stair_latent_cache(
     "prev_leg_joint_vel",
     "prev_action",
   ]
+  if "stair_latent_cache_valid" in env.extras:
+    env.extras["stair_latent_cache_valid"][env_ids] = False
   for key in cache_keys:
     if key in env.extras:
       env.extras[key][env_ids] = 0.0

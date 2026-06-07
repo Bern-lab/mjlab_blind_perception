@@ -74,6 +74,8 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """Enable gated latent update with state machine."""
   use_stair_latent_obs: bool = True
   """Use stair-focused deployable latent_obs instead of full actor_obs."""
+  latent_obs_set: str = "latent"
+  """Observation set used by the latent encoder."""
 
   # ---- Gate parameters ----
   alpha_fast: float = 0.3

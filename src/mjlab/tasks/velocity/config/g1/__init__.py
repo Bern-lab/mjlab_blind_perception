@@ -4,8 +4,10 @@ from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
 from .blind_rough_lstm_teacher_kl_env_cfg import (
   unitree_g1_blind_rough_lstm_teacherkl_env_cfg,
 )
-from .blind_rough_teacher_kl_env_cfg import (
+from .blind_rough_slow_latent_env_cfg import (
   unitree_g1_blind_rough_target_navigation_slow_latent_env_cfg,
+)
+from .blind_rough_teacher_kl_env_cfg import (
   unitree_g1_blind_rough_teacherkl_env_cfg,
 )
 from .env_cfgs import (

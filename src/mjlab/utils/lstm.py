@@ -107,23 +107,64 @@ def get_recurrent_policy_metadata(policy: Any) -> dict[str, list | str | float]:
     policy, "latent_dim", None
   )
   if slow_latent_dim is not None:
+    has_gate_state = hasattr(policy, "alpha_fast") and hasattr(policy, "alpha_hold")
     metadata.update(
       {
         "policy_has_slow_latent": "true",
         "policy_slow_latent_dim": str(slow_latent_dim),
         "policy_slow_latent_alpha": str(
-          getattr(policy, "latent_alpha", getattr(policy, "slow_alpha", ""))
+          getattr(
+            policy,
+            "latent_alpha",
+            getattr(policy, "alpha_hold", getattr(policy, "slow_alpha", "")),
+          )
         ),
         "policy_recurrent_state_step_rule": (
-          "feed h_out/c_out/z_out back as next h_in/c_in/z_in; "
-          "zero h/c/z on reset; zero z only for slow-latent ablations"
+          (
+            "feed h_out/c_out/z_out/gate_state_out back as next "
+            "h_in/c_in/z_in/gate_state_in; zero all state on reset"
+          )
+          if has_gate_state
+          else (
+            "feed h_out/c_out/z_out back as next h_in/c_in/z_in; "
+            "zero h/c/z on reset; zero z only for slow-latent ablations"
+          )
         ),
       }
     )
   else:
     metadata["policy_has_slow_latent"] = "false"
 
-  if rnn_type == "lstm" and slow_latent_dim is not None:
+  if (
+    rnn_type == "lstm"
+    and slow_latent_dim is not None
+    and hasattr(policy, "latent_obs_dim")
+  ):
+    metadata.update(
+      {
+        "policy_onnx_input_names": [
+          "actor_obs",
+          "latent_obs",
+          "h_in",
+          "c_in",
+          "z_in",
+          "gate_state_in",
+        ],
+        "policy_onnx_output_names": [
+          "actions",
+          "h_out",
+          "c_out",
+          "z_out",
+          "gate_state_out",
+          "event_prob",
+          "stair_prob",
+          "future_collision_prob",
+        ],
+        "policy_recurrent_state_names": ["h", "c", "z", "gate_state"],
+        "policy_latent_obs_dim": str(getattr(policy, "latent_obs_dim", "")),
+      }
+    )
+  elif rnn_type == "lstm" and slow_latent_dim is not None:
     metadata.update(
       {
         "policy_onnx_input_names": ["obs", "h_in", "c_in", "z_in"],

@@ -11,7 +11,7 @@ import math
 import torch
 import torch.nn.functional as functional
 from tensordict import TensorDict
-from typing import Any
+from typing import Any, cast
 
 from rsl_rl.algorithms.ppo import PPO
 from rsl_rl.env import VecEnv
@@ -222,7 +222,8 @@ class PPOTeacherKL(PPO):
         value = value.detach()
         if self.is_multi_gpu:
             value = value.clone()
-            torch.distributed.all_reduce(value, op=torch.distributed.ReduceOp.SUM)
+            distributed = cast(Any, torch.distributed)
+            distributed.all_reduce(value, op=distributed.ReduceOp.SUM)
             value /= self.gpu_world_size
         return value
 
@@ -307,9 +308,32 @@ class PPOTeacherKL(PPO):
         original_batch_size: int,
         distribution_params: tuple[torch.Tensor, ...],
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        """Compute the frozen-teacher guidance loss."""
-        if not self.teacher_guidance_enabled:
-            return torch.zeros((), device=self.device), {
+        """Compute frozen-teacher guidance and optional actor auxiliary losses."""
+        if self.teacher_guidance_enabled:
+            if self.teacher is None or not self.teacher_loaded:
+                raise RuntimeError("Teacher KL loss requires a loaded teacher model.")
+            if batch.observations is None:
+                raise RuntimeError("Teacher KL loss requires observations in the rollout batch.")
+
+            teacher_kl_lambda = self.get_teacher_kl_lambda()
+            if teacher_kl_lambda == 0.0 and not self.teacher_kl_cfg.get("log_kl_when_lambda_zero", True):
+                teacher_loss = torch.zeros((), device=self.device)
+                log_dict = {
+                    "teacher_loss": 0.0,
+                    "teacher_loss_for_update": 0.0,
+                    "teacher_lambda": 0.0,
+                    "teacher_kl_lambda": 0.0,
+                }
+            else:
+                teacher_loss, log_dict = self._compute_teacher_guidance_loss(
+                    batch,
+                    original_batch_size,
+                    distribution_params,
+                    loss_weight=teacher_kl_lambda,
+                )
+        else:
+            teacher_loss = torch.zeros((), device=self.device)
+            log_dict = {
                 "teacher_loss": 0.0,
                 "teacher_loss_for_update": 0.0,
                 "teacher_lambda": 0.0,
@@ -317,26 +341,159 @@ class PPOTeacherKL(PPO):
                 "teacher_guidance_enabled": 0.0,
             }
 
-        if self.teacher is None or not self.teacher_loaded:
-            raise RuntimeError("Teacher KL loss requires a loaded teacher model.")
-        if batch.observations is None:
-            raise RuntimeError("Teacher KL loss requires observations in the rollout batch.")
+        aux_loss, aux_logs = self._compute_slow_latent_aux_loss(batch)
+        log_dict.update(aux_logs)
+        return teacher_loss + aux_loss, log_dict
 
-        teacher_kl_lambda = self.get_teacher_kl_lambda()
-        if teacher_kl_lambda == 0.0 and not self.teacher_kl_cfg.get("log_kl_when_lambda_zero", True):
-            return torch.zeros((), device=self.device), {
-                "teacher_loss": 0.0,
-                "teacher_loss_for_update": 0.0,
-                "teacher_lambda": 0.0,
-                "teacher_kl_lambda": 0.0,
-            }
+    def _compute_future_collision_labels(
+        self,
+        event_labels: torch.Tensor,
+        masks: torch.Tensor | None,
+        horizon: int,
+    ) -> torch.Tensor:
+        """Compute max(event[t+1:t+K+1]) within padded recurrent trajectories."""
+        if horizon <= 0:
+            return torch.zeros_like(event_labels)
+        if event_labels.dim() < 3:
+            return torch.zeros_like(event_labels)
 
-        return self._compute_teacher_guidance_loss(
-            batch,
-            original_batch_size,
-            distribution_params,
-            loss_weight=teacher_kl_lambda,
+        valid_events = event_labels
+        if masks is not None:
+            valid_events = valid_events * masks.unsqueeze(-1).to(valid_events.dtype)
+
+        future = torch.zeros_like(valid_events)
+        seq_len = valid_events.shape[0]
+        for offset in range(1, min(horizon, seq_len - 1) + 1):
+            shifted = torch.zeros_like(valid_events)
+            shifted[:-offset] = valid_events[offset:]
+            future = torch.maximum(future, shifted)
+        if masks is not None:
+            future = future * masks.unsqueeze(-1).to(future.dtype)
+        return future
+
+    def _compute_slow_latent_aux_loss(
+        self,
+        batch: RolloutStorage.Batch,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        """Compute auxiliary BCE losses exposed by the slow-latent actor."""
+        get_aux_outputs = getattr(self.actor, "get_aux_outputs", None)
+        if get_aux_outputs is None:
+            return torch.zeros((), device=self.device), {}
+        aux_outputs = get_aux_outputs()
+        if not aux_outputs:
+            return torch.zeros((), device=self.device), {}
+
+        event_coef = float(getattr(self.actor, "aux_event_coef", 0.0))
+        stair_coef = float(getattr(self.actor, "aux_stair_coef", 0.0))
+        future_coef = float(getattr(self.actor, "aux_future_collision_coef", 0.0))
+        if event_coef == 0.0 and stair_coef == 0.0 and future_coef == 0.0:
+            return torch.zeros((), device=self.device), {}
+        if batch.observations is None or "latent_labels" not in batch.observations:
+            raise RuntimeError("Slow-latent auxiliary losses require a 'latent_labels' observation group.")
+
+        labels = batch.observations["latent_labels"]
+        if labels.shape[-1] < 2:
+            raise RuntimeError("Slow-latent 'latent_labels' must contain event and stair labels.")
+        event_labels_padded = labels[..., 0:1].float()
+        stair_labels_padded = labels[..., 1:2].float()
+        future_horizon = int(getattr(self.actor, "future_collision_horizon", 20))
+        future_labels_padded = self._compute_future_collision_labels(
+            event_labels_padded,
+            batch.masks,
+            future_horizon,
         )
+
+        if batch.masks is not None:
+            event_labels = cast(torch.Tensor, unpad_trajectories(event_labels_padded, batch.masks))
+            stair_labels = cast(torch.Tensor, unpad_trajectories(stair_labels_padded, batch.masks))
+            future_labels = cast(torch.Tensor, unpad_trajectories(future_labels_padded, batch.masks))
+        else:
+            event_labels = event_labels_padded
+            stair_labels = stair_labels_padded
+            future_labels = future_labels_padded
+
+        total_loss = torch.zeros((), device=self.device)
+        logs: dict[str, float] = {}
+        if event_coef != 0.0 and "event_logit" in aux_outputs:
+            event_loss_raw = functional.binary_cross_entropy_with_logits(
+                aux_outputs["event_logit"],
+                event_labels,
+            )
+            event_loss = event_coef * event_loss_raw
+            total_loss = total_loss + event_loss
+            logs["slow_latent_event_bce"] = self._distributed_mean_scalar(event_loss_raw).item()
+            logs["slow_latent_event_loss"] = self._distributed_mean_scalar(event_loss).item()
+        if stair_coef != 0.0 and "stair_logit" in aux_outputs:
+            stair_loss_raw = functional.binary_cross_entropy_with_logits(
+                aux_outputs["stair_logit"],
+                stair_labels,
+            )
+            stair_loss = stair_coef * stair_loss_raw
+            total_loss = total_loss + stair_loss
+            logs["slow_latent_stair_bce"] = self._distributed_mean_scalar(stair_loss_raw).item()
+            logs["slow_latent_stair_loss"] = self._distributed_mean_scalar(stair_loss).item()
+        if future_coef != 0.0 and "future_collision_logit" in aux_outputs:
+            future_loss_raw = functional.binary_cross_entropy_with_logits(
+                aux_outputs["future_collision_logit"],
+                future_labels,
+            )
+            future_loss = future_coef * future_loss_raw
+            total_loss = total_loss + future_loss
+            logs["slow_latent_future_bce"] = self._distributed_mean_scalar(future_loss_raw).item()
+            logs["slow_latent_future_loss"] = self._distributed_mean_scalar(future_loss).item()
+        logs["slow_latent_aux_loss"] = self._distributed_mean_scalar(total_loss).item()
+        logs.update(self._compute_slow_latent_diagnostic_logs())
+        return total_loss, logs
+
+    def _compute_slow_latent_diagnostic_logs(self) -> dict[str, float]:
+        """Summarize slow-latent rollout/update diagnostics for training logs."""
+        get_diagnostics = getattr(self.actor, "get_slow_latent_diagnostics", None)
+        if get_diagnostics is None:
+            return {}
+        diagnostics = get_diagnostics()
+        if not diagnostics:
+            return {}
+
+        logs: dict[str, float] = {}
+
+        def add_mean(name: str, tensor: torch.Tensor | None) -> None:
+            if tensor is None or tensor.numel() == 0:
+                return
+            value = tensor.float().mean()
+            logs[name] = self._distributed_mean_scalar(value).item()
+
+        add_mean("slow_latent_event_prob_mean", diagnostics.get("event_prob"))
+        add_mean("slow_latent_stair_prob_mean", diagnostics.get("stair_prob"))
+        add_mean("slow_latent_future_prob_mean", diagnostics.get("future_prob"))
+        add_mean("slow_latent_z_norm_mean", diagnostics.get("z_norm"))
+
+        z_norm = diagnostics.get("z_norm")
+        if z_norm is not None and z_norm.numel() > 0:
+            logs["slow_latent_z_norm_max"] = self._distributed_mean_scalar(z_norm.float().max()).item()
+
+        alpha = diagnostics.get("alpha")
+        if alpha is not None and alpha.numel() > 0:
+            alpha = alpha.float()
+            logs["slow_latent_alpha_mean"] = self._distributed_mean_scalar(alpha.mean()).item()
+            logs["slow_latent_alpha_std"] = self._distributed_mean_scalar(alpha.std(unbiased=False)).item()
+            logs["slow_latent_alpha_min"] = self._distributed_mean_scalar(alpha.min()).item()
+            logs["slow_latent_alpha_max"] = self._distributed_mean_scalar(alpha.max()).item()
+
+        mode = diagnostics.get("gate_mode")
+        if mode is not None and mode.numel() > 0:
+            mode = mode.float()
+            total = float(mode.numel())
+            mode_specs = {
+                "normal": 0.0,
+                "write": 1.0,
+                "memory": 2.0,
+            }
+            for name, value in mode_specs.items():
+                count = (mode == value).float().sum()
+                logs[f"slow_latent_mode_{name}_count"] = self._distributed_mean_scalar(count).item()
+                logs[f"slow_latent_mode_{name}_ratio"] = self._distributed_mean_scalar(count / total).item()
+
+        return logs
 
     def _compute_teacher_distribution_params(
         self,
@@ -348,7 +505,7 @@ class PPOTeacherKL(PPO):
             raise RuntimeError("Teacher guidance loss requires a loaded teacher model.")
 
         if masks is not None:
-            observations = unpad_trajectories(observations, masks)
+            observations = cast(TensorDict, unpad_trajectories(observations, masks))
 
         batch_shape = tuple(observations.batch_size)
         num_samples = math.prod(batch_shape) if batch_shape else 1
@@ -388,7 +545,7 @@ class PPOTeacherKL(PPO):
             raise RuntimeError("Teacher guidance loss requires observations in the rollout batch.")
 
         observations = batch.observations
-        teacher_observations = observations[:original_batch_size]
+        teacher_observations = cast(TensorDict, observations[:original_batch_size])
         teacher_masks = batch.masks[:original_batch_size] if batch.masks is not None else None
 
         with torch.no_grad():
@@ -560,7 +717,7 @@ class PPOTeacherKL(PPO):
         if teacher_guidance_enabled:
             teacher_class_name = teacher_cfg.pop("class_name", None)
             teacher_class: type[MLPModel] | None = (
-                resolve_callable(teacher_class_name) if teacher_class_name else actor_class
+                cast(type[MLPModel], resolve_callable(teacher_class_name)) if teacher_class_name else actor_class
             )
         else:
             teacher_class = None
@@ -583,7 +740,7 @@ class PPOTeacherKL(PPO):
         actor: MLPModel = actor_class(obs, obs_groups, "actor", env.num_actions, **actor_cfg).to(device)
         print(f"Actor Model: {actor}")
         if algorithm_cfg.pop("share_cnn_encoders", None):  # Share CNN encoders between actor and critic
-            critic_cfg["cnns"] = actor.cnns  # type: ignore
+            critic_cfg["cnns"] = actor.cnns
         critic: MLPModel = critic_class(obs, obs_groups, "critic", 1, **critic_cfg).to(device)
         print(f"Critic Model: {critic}")
         teacher: MLPModel | None = None
