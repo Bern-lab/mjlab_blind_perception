@@ -390,6 +390,7 @@ class foot_step_lip_volume_penalty(_StepBoundaryFootVolume):
       )
       fallback_ratio = torch.zeros((), device=env.device)
     else:
+      assert fallback is not None
       selected_boundaries = self._gather_by_foot(boundaries, selected_idx)
       selected_valid = self._gather_mask_by_foot(base_valid, selected_idx)
       min_dist = self._lip_min_dist(
@@ -431,6 +432,283 @@ class foot_step_lip_volume_penalty(_StepBoundaryFootVolume):
 class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
   """Penalize toe points entering the low-side danger slab of a riser."""
 
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    super().__init__(cfg, env)
+    asset_cfg = cfg.params.get("asset_cfg", _DEFAULT_FOOT_BODY_CFG)
+    num_feet = len(asset_cfg.body_ids) if isinstance(asset_cfg.body_ids, list) else 2
+    self._probe_hit_count = torch.zeros(
+      env.num_envs, device=env.device, dtype=torch.float32
+    )
+    self._probe_hit_cooldown = torch.zeros(
+      (env.num_envs, num_feet), device=env.device, dtype=torch.float32
+    )
+    self._last_probe_progress = torch.full(
+      (env.num_envs,), -1.0e6, device=env.device, dtype=torch.float32
+    )
+    self._root_z_baseline = torch.zeros(
+      env.num_envs, device=env.device, dtype=torch.float32
+    )
+    self._max_root_z = torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+    self._ascent_active = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+    self._needs_root_z_init = torch.ones(
+      env.num_envs, device=env.device, dtype=torch.bool
+    )
+
+  def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+    if env_ids is None:
+      env_ids = slice(None)
+    self._probe_hit_count[env_ids] = 0.0
+    self._probe_hit_cooldown[env_ids] = 0.0
+    self._last_probe_progress[env_ids] = -1.0e6
+    self._root_z_baseline[env_ids] = 0.0
+    self._max_root_z[env_ids] = 0.0
+    self._ascent_active[env_ids] = False
+    self._needs_root_z_init[env_ids] = True
+
+  def _ascent_gate(
+    self,
+    env: ManagerBasedRlEnv,
+    asset: Entity,
+    level_active: torch.Tensor,
+    interaction_observed: torch.Tensor,
+    min_ascent_height: float,
+    ascent_velocity_threshold: float,
+  ) -> torch.Tensor:
+    root_z = asset.data.root_link_pos_w[:, 2]
+    needs_init = self._needs_root_z_init
+    self._root_z_baseline = torch.where(needs_init, root_z, self._root_z_baseline)
+    self._max_root_z = torch.where(needs_init, root_z, self._max_root_z)
+    self._needs_root_z_init[:] = False
+
+    self._max_root_z = torch.maximum(self._max_root_z, root_z)
+    root_z_gain = self._max_root_z - self._root_z_baseline
+    root_vz = asset.data.root_link_lin_vel_w[:, 2]
+    ascent_observed = (root_z_gain >= min_ascent_height) | (
+      root_vz > ascent_velocity_threshold
+    )
+    ascent_observed |= interaction_observed
+
+    self._ascent_active |= level_active & ascent_observed
+    active_gate = level_active & self._ascent_active
+    inactive = ~active_gate
+    if bool(torch.any(inactive).item()):
+      self._probe_hit_count[inactive] = 0.0
+      self._probe_hit_cooldown[inactive] = 0.0
+      self._last_probe_progress[inactive] = -1.0e6
+    self._probe_hit_cooldown = torch.clamp(
+      self._probe_hit_cooldown - env.step_dt, min=0.0
+    )
+    return active_gate
+
+  def _contact_probe_terms(
+    self,
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    asset: Entity,
+    asset_cfg: SceneEntityCfg,
+    active_gate: torch.Tensor,
+    probe_phase: torch.Tensor,
+    toe_x_min: float,
+    vertical_normal_z_max: float,
+    forward_velocity_threshold: float,
+    force_threshold: float,
+    force_scale: float,
+    contact_penalty_scale: float,
+    contact_time_scale: float,
+    probe_contact_reward: float,
+    probe_min_progress: float,
+    probe_max_safe_force: float | None,
+    probe_cooldown_time: float,
+  ) -> tuple[torch.Tensor, torch.Tensor]:
+    sensor = env.scene[sensor_name]
+    assert isinstance(sensor, ContactSensor), (
+      f"toe_step_riser_slab_penalty requires a ContactSensor for "
+      f"contact_sensor_name='{sensor_name}', got {type(sensor).__name__}"
+    )
+    data = sensor.data
+    assert data.found is not None
+    assert data.force is not None
+    assert data.normal is not None
+    assert data.pos is not None
+
+    num_envs = env.num_envs
+    num_feet = self._probe_hit_cooldown.shape[1]
+    num_contacts = data.found.shape[1]
+    assert num_contacts % num_feet == 0, (
+      f"Contact sensor '{sensor_name}' has {num_contacts} contact slots, which is "
+      f"not divisible by {num_feet} feet"
+    )
+    num_slots = num_contacts // num_feet
+
+    found = data.found.view(num_envs, num_feet, num_slots) > 0
+    force_w = data.force.view(num_envs, num_feet, num_slots, 3)
+    normal_w = data.normal.view(num_envs, num_feet, num_slots, 3)
+    contact_pos_w = data.pos.view(num_envs, num_feet, num_slots, 3)
+
+    foot_pos_w = asset.data.body_link_pos_w[:, asset_cfg.body_ids, :]
+    foot_quat_w = asset.data.body_link_quat_w[:, asset_cfg.body_ids, :]
+    foot_vel_w = asset.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]
+
+    expanded_quat = foot_quat_w[:, :, None, :].expand(num_envs, num_feet, num_slots, 4)
+    contact_pos_b = quat_apply_inverse(
+      expanded_quat,
+      contact_pos_w - foot_pos_w[:, :, None, :],
+    )
+    is_toe_contact = contact_pos_b[..., 0] >= toe_x_min
+
+    local_forward = torch.tensor(
+      (1.0, 0.0, 0.0), device=env.device, dtype=torch.float32
+    )
+    local_forward = local_forward.view(1, 1, 3).expand(num_envs, num_feet, 3)
+    foot_forward_w = quat_apply(foot_quat_w, local_forward)
+    foot_forward_xy = foot_forward_w[..., :2]
+    foot_forward_xy = foot_forward_xy / torch.clamp(
+      torch.norm(foot_forward_xy, dim=-1, keepdim=True), min=1.0e-6
+    )
+
+    foot_forward_vel = torch.sum(foot_vel_w[..., :2] * foot_forward_xy, dim=-1)
+    is_forward_sweep = foot_forward_vel[:, :, None] > forward_velocity_threshold
+    is_vertical_face = torch.abs(normal_w[..., 2]) < vertical_normal_z_max
+    force_dot_forward = torch.sum(
+      force_w[..., :2] * foot_forward_xy[:, :, None, :], dim=-1
+    )
+    blocking_force = torch.relu(-force_dot_forward)
+    hit_strength = torch.clamp(
+      (blocking_force - force_threshold) / force_scale,
+      min=0.0,
+      max=1.0,
+    )
+
+    toe_riser_hit = (
+      found
+      & is_toe_contact
+      & is_vertical_face
+      & is_forward_sweep
+      & (hit_strength > 0.0)
+    )
+    hit_by_foot = torch.any(toe_riser_hit, dim=-1)
+    current_hit_by_foot = hit_by_foot & active_gate[:, None]
+    new_hit_by_foot = current_hit_by_foot & (self._probe_hit_cooldown <= 0.0)
+
+    if bool(torch.any(new_hit_by_foot).item()):
+      self._probe_hit_cooldown = torch.where(
+        new_hit_by_foot,
+        torch.full_like(self._probe_hit_cooldown, probe_cooldown_time),
+        self._probe_hit_cooldown,
+      )
+
+    current_hit_env = torch.any(current_hit_by_foot, dim=-1)
+    new_hit_env = torch.any(new_hit_by_foot, dim=-1)
+    per_foot_strength = torch.max(
+      torch.where(toe_riser_hit, hit_strength, torch.zeros_like(hit_strength)),
+      dim=-1,
+    ).values
+    current_strength = torch.max(
+      torch.where(
+        current_hit_by_foot,
+        per_foot_strength,
+        torch.zeros_like(per_foot_strength),
+      ),
+      dim=-1,
+    ).values
+
+    per_foot_blocking_force = torch.max(
+      torch.where(toe_riser_hit, blocking_force, torch.zeros_like(blocking_force)),
+      dim=-1,
+    ).values
+    env_blocking_force = torch.max(
+      torch.where(
+        current_hit_by_foot,
+        per_foot_blocking_force,
+        torch.zeros_like(per_foot_blocking_force),
+      ),
+      dim=-1,
+    ).values
+
+    contact_progress = torch.sum(
+      contact_pos_w[..., :2] * foot_forward_xy[:, :, None, :], dim=-1
+    )
+    per_foot_progress = torch.max(
+      torch.where(
+        toe_riser_hit,
+        contact_progress,
+        torch.full_like(contact_progress, -1.0e6),
+      ),
+      dim=-1,
+    ).values
+    env_progress = torch.max(
+      torch.where(
+        new_hit_by_foot,
+        per_foot_progress,
+        torch.full_like(per_foot_progress, -1.0e6),
+      ),
+      dim=-1,
+    ).values
+
+    first_probe = self._probe_hit_count <= 0.0
+    progress_ok = first_probe | (
+      env_progress > self._last_probe_progress + probe_min_progress
+    )
+    safe_force = torch.ones_like(new_hit_env)
+    if probe_max_safe_force is not None:
+      safe_force = env_blocking_force <= probe_max_safe_force
+    useful_probe = new_hit_env & probe_phase & progress_ok & safe_force
+    bad_new_probe = new_hit_env & probe_phase & ~useful_probe
+
+    if bool(torch.any(new_hit_env).item()):
+      self._probe_hit_count += new_hit_env.float()
+    if bool(torch.any(useful_probe).item()):
+      self._last_probe_progress = torch.where(
+        useful_probe,
+        env_progress,
+        self._last_probe_progress,
+      )
+
+    contact_time = data.current_contact_time
+    if contact_time is None:
+      contact_time = current_hit_by_foot.float() * env.step_dt
+    elif contact_time.shape[1] != num_feet:
+      if contact_time.shape[1] % num_feet != 0:
+        raise RuntimeError(
+          f"Contact sensor '{sensor_name}' contact times cannot be grouped by foot: "
+          f"{contact_time.shape[1]} entries for {num_feet} feet"
+        )
+      contact_time = contact_time.view(num_envs, num_feet, -1).max(dim=-1).values
+
+    env_contact_time = torch.max(
+      torch.where(current_hit_by_foot, contact_time, torch.zeros_like(contact_time)),
+      dim=-1,
+    ).values
+    time_scale = max(contact_time_scale, 1.0e-6)
+    contact_time_weight = torch.clamp(env_contact_time / time_scale, min=0.0, max=1.0)
+
+    contact_penalty_mask = (current_hit_env & ~probe_phase) | bad_new_probe
+    contact_penalty = (
+      contact_penalty_mask.float()
+      * current_strength
+      * (1.0 + contact_time_weight)
+      * contact_penalty_scale
+    )
+    probe_reward = useful_probe.float() * probe_contact_reward
+
+    env.extras["log"]["Metrics/toe_riser_slab_true_contact_ratio"] = (
+      current_hit_env.float().mean()
+    )
+    env.extras["log"]["Metrics/toe_riser_slab_new_contact_ratio"] = (
+      new_hit_env.float().mean()
+    )
+    env.extras["log"]["Metrics/toe_riser_slab_contact_penalty_mean"] = (
+      contact_penalty.mean()
+    )
+    env.extras["log"]["Metrics/toe_riser_slab_probe_reward_mean"] = probe_reward.mean()
+    env.extras["log"]["Metrics/toe_riser_slab_probe_count_mean"] = (
+      self._probe_hit_count.mean()
+    )
+    env.extras["log"]["Metrics/toe_riser_slab_contact_time_mean"] = (
+      env_contact_time.mean()
+    )
+    return contact_penalty, probe_reward
+
   def __call__(
     self,
     env: ManagerBasedRlEnv,
@@ -443,6 +721,21 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     nearest_boundaries: int | None = None,
     log_only: bool = False,
     min_terrain_level: int | None = None,
+    contact_sensor_name: str | None = None,
+    contact_penalty_scale: float = 0.0,
+    contact_time_scale: float = 0.20,
+    contact_force_threshold: float = 15.0,
+    contact_force_scale: float = 60.0,
+    contact_vertical_normal_z_max: float = 0.4,
+    contact_forward_velocity_threshold: float = 0.05,
+    probe_contact_count: int = 0,
+    probe_slab_reward_scale: float = 0.0,
+    probe_contact_reward: float = 0.0,
+    probe_min_progress: float = 0.08,
+    probe_max_safe_force: float | None = None,
+    probe_cooldown_time: float = 0.20,
+    min_ascent_height: float = 0.03,
+    ascent_velocity_threshold: float = 0.03,
     asset_cfg: SceneEntityCfg = _DEFAULT_FOOT_BODY_CFG,
     **_: object,
   ) -> torch.Tensor:
@@ -494,6 +787,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       )
       fallback_ratio = torch.zeros((), device=env.device)
     else:
+      assert fallback is not None
       selected_boundaries = self._gather_by_foot(boundaries, selected_idx)
       selected_valid = self._gather_mask_by_foot(base_valid, selected_idx)
       point_penalty, active, impact_speed_per_point = self._riser_slab_point_penalty(
@@ -532,6 +826,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         )
 
     penalty = torch.sum(point_penalty, dim=(1, 2))
+    raw_penalty = penalty
 
     active_count = active.float().sum().clamp_min(1.0)
     impact_speed_mean = torch.sum(impact_speed_per_point * active.float())
@@ -543,7 +838,50 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
 
     if log_only:
       return torch.zeros_like(penalty)
-    return penalty
+
+    if contact_sensor_name is not None:
+      asset: Entity = env.scene[asset_cfg.name]
+      active_gate = self._ascent_gate(
+        env,
+        asset,
+        level_active,
+        torch.any(active, dim=(1, 2)),
+        min_ascent_height,
+        ascent_velocity_threshold,
+      )
+      probe_phase = active_gate & (self._probe_hit_count < float(probe_contact_count))
+      if probe_contact_count > 0 and probe_slab_reward_scale > 0.0:
+        raw_penalty = torch.where(
+          probe_phase,
+          -probe_slab_reward_scale * penalty,
+          raw_penalty,
+        )
+      contact_penalty, probe_reward = self._contact_probe_terms(
+        env,
+        contact_sensor_name,
+        asset,
+        asset_cfg,
+        active_gate,
+        probe_phase,
+        toe_x_min,
+        contact_vertical_normal_z_max,
+        contact_forward_velocity_threshold,
+        contact_force_threshold,
+        contact_force_scale,
+        contact_penalty_scale,
+        contact_time_scale,
+        probe_contact_reward,
+        probe_min_progress,
+        probe_max_safe_force,
+        probe_cooldown_time,
+      )
+      raw_penalty = raw_penalty + contact_penalty - probe_reward
+      env.extras["log"]["Metrics/toe_riser_slab_probe_active_ratio"] = (
+        probe_phase.float().mean()
+      )
+      env.extras["log"]["Metrics/toe_riser_slab_raw_mean"] = raw_penalty.mean()
+
+    return raw_penalty
 
 
 class toe_step_riser_approach_penalty(toe_step_riser_slab_penalty):
@@ -788,7 +1126,11 @@ def feet_clearance(
       raise ValueError("feet_clearance requires both min_height and max_height.")
     if min_height > max_height:
       raise ValueError("feet_clearance min_height must be <= max_height.")
-    delta = torch.relu(min_height - foot_height) + torch.relu(foot_height - max_height)
+    min_height_tensor = foot_height.new_tensor(min_height)
+    max_height_tensor = foot_height.new_tensor(max_height)
+    delta = torch.relu(min_height_tensor - foot_height) + torch.relu(
+      foot_height - max_height_tensor
+    )
   else:
     if target_height is None:
       raise ValueError("feet_clearance requires target_height or min/max height.")

@@ -1,5 +1,6 @@
 """Configuration for scene entities used by manager terms."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
@@ -180,19 +181,21 @@ class SceneEntityCfg:
     elif isinstance(ids, list):
       self._resolve_ids_to_names(ids, entity_all_names, config.names_attr)
 
-  def _normalize_to_list(self, value: str | int | list | None) -> list | None:
+  def _normalize_to_list(
+    self, value: str | int | Sequence[str] | Sequence[int] | None
+  ) -> list | None:
     """Convert single values to lists for uniform processing."""
     if value is None:
       return None
     if isinstance(value, (str, int)):
       return [value]
-    return value
+    return list(value)
 
   def _validate_consistency(
     self,
     names: list[str],
     ids: list[int],
-    entity_all_names: list[str],
+    entity_all_names: Sequence[str],
     find_method,
     kind_label: str,
   ) -> None:
@@ -214,22 +217,23 @@ class SceneEntityCfg:
   def _resolve_names_to_ids(
     self,
     names: list[str],
-    entity_all_names: list[str],
+    entity_all_names: Sequence[str],
     entity_count: int,
     find_method,
     ids_attr: str,
   ) -> None:
     """Resolve names to IDs, optimizing to slice(None) when all are selected."""
     found_ids, _ = find_method(names, preserve_order=self.preserve_order)
+    all_names = list(entity_all_names)
 
     # Optimize to slice(None) if all components are selected in order.
-    if len(found_ids) == entity_count and names == entity_all_names:
+    if len(found_ids) == entity_count and names == all_names:
       setattr(self, ids_attr, slice(None))
     else:
       setattr(self, ids_attr, found_ids)
 
   def _resolve_ids_to_names(
-    self, ids: list[int], entity_all_names: list[str], names_attr: str
+    self, ids: list[int], entity_all_names: Sequence[str], names_attr: str
   ) -> None:
     """Resolve IDs to their corresponding names."""
     resolved_names = [entity_all_names[i] for i in ids]

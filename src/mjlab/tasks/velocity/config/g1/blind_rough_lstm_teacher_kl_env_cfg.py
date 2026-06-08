@@ -19,6 +19,7 @@ from .blind_rough_teacher_kl_env_cfg import (
   _add_teacher_depth_camera,
   _configure_teacherkl_target_navigation,
   _make_teacher_terms,
+  configure_blind_teacherkl_play_visualization,
 )
 from .blind_rough_toe_contact_cfg import (
   configure_g1_toe_riser_contact_memory_penalty,
@@ -145,7 +146,7 @@ def _configure_lstm_teacherkl_play_env(cfg: ManagerBasedRlEnvCfg) -> None:
     ),
     **cfg.events,
   }
-  cfg.viewer.show_depth_camera_visualizers = False
+  configure_blind_teacherkl_play_visualization(cfg)
 
 
 def unitree_g1_blind_rough_lstm_teacherkl_env_cfg(

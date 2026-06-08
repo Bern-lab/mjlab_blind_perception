@@ -320,6 +320,9 @@ class NativeMujocoViewer(BaseViewer):
   def _update_depth_camera_visualizers(
     self, visualizer: MujocoNativeDebugVisualizer
   ) -> None:
+    if not self.cfg.show_depth_camera_visualizers:
+      return
+
     sim_data = self.env.unwrapped.sim.data
     for sensor in self.env.unwrapped.scene.sensors.values():
       if not isinstance(sensor, CameraSensor) or "depth" not in sensor.cfg.data_types:

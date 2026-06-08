@@ -387,9 +387,17 @@ class ContactSensor(Sensor[ContactData]):
     elapsed_time = current_time - self._air_time_state.last_time
     elapsed_time = elapsed_time.unsqueeze(-1)
 
-    is_contact = contact_data.found > 0
-
     state = self._air_time_state
+    is_contact = contact_data.found > 0
+    n_primary = state.current_contact_time.shape[1]
+    if is_contact.shape[1] != n_primary:
+      if is_contact.shape[1] % n_primary != 0:
+        raise RuntimeError(
+          f"Sensor '{self.cfg.name}' contact slots cannot be grouped by primary: "
+          f"{is_contact.shape[1]} slots for {n_primary} primaries"
+        )
+      is_contact = is_contact.view(is_contact.shape[0], n_primary, -1).any(dim=-1)
+
     is_first_contact = (state.current_air_time > 0) & is_contact
     is_first_detached = (state.current_contact_time > 0) & ~is_contact
 

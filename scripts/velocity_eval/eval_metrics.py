@@ -79,7 +79,7 @@ class StairEventDetector:
       preserve_order=True,
     )
     self.foot_asset_cfg.resolve(env.scene)
-    num_feet = len(self.foot_asset_cfg.body_ids)
+    num_feet = len(self._foot_body_ids())
 
     self._contact_sensor = self._get_contact_sensor(env)
     self.event_source = (
@@ -166,6 +166,12 @@ class StairEventDetector:
       return sensor
     return None
 
+  def _foot_body_ids(self) -> list[int]:
+    body_ids = self.foot_asset_cfg.body_ids
+    if not isinstance(body_ids, list):
+      raise RuntimeError("StairEventDetector foot body IDs were not resolved.")
+    return body_ids
+
   def compute_events(self, env: ManagerBasedRlEnv) -> dict[str, torch.Tensor]:
     """Return per-env binary event indicators for this step."""
     if self._contact_sensor is not None:
@@ -180,6 +186,26 @@ class StairEventDetector:
       "heel_riser_collision": (heel > 0.0).float(),
       "foot_lip_collision": (lip > 0.0).float(),
     }
+
+  def get_last_true_contact_positions(
+    self, kind: str = "toe"
+  ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return ``(env_ids, positions_w)`` for latest true riser contact events."""
+    device = self._prev_toe_contact.device
+    empty_env_ids = torch.empty(0, device=device, dtype=torch.long)
+    empty_positions = torch.empty(0, 3, device=device)
+    if self._last_true_contact_slots is None or self._last_true_contact_pos_w is None:
+      return empty_env_ids, empty_positions
+
+    active_slots = self._last_true_contact_slots.get(kind)
+    if active_slots is None:
+      return empty_env_ids, empty_positions
+    indices = active_slots.nonzero(as_tuple=False)
+    if indices.numel() == 0:
+      return empty_env_ids, empty_positions
+    return indices[:, 0].to(dtype=torch.long), self._last_true_contact_pos_w[
+      active_slots
+    ]
 
   def _compute_true_riser_contact_events(
     self,
@@ -213,7 +239,8 @@ class StairEventDetector:
 
     asset = env.scene[self.foot_asset_cfg.name]
     num_envs = env.num_envs
-    num_feet = len(self.foot_asset_cfg.body_ids)
+    foot_body_ids = self._foot_body_ids()
+    num_feet = len(foot_body_ids)
     num_contacts = data.found.shape[1]
     if num_contacts % num_feet != 0:
       raise RuntimeError(
@@ -227,8 +254,8 @@ class StairEventDetector:
     normal_w = data.normal.view(num_envs, num_feet, num_slots, 3)
     contact_pos_w = data.pos.view(num_envs, num_feet, num_slots, 3)
 
-    foot_pos_w = asset.data.body_link_pos_w[:, self.foot_asset_cfg.body_ids, :]
-    foot_quat_w = asset.data.body_link_quat_w[:, self.foot_asset_cfg.body_ids, :]
+    foot_pos_w = asset.data.body_link_pos_w[:, foot_body_ids, :]
+    foot_quat_w = asset.data.body_link_quat_w[:, foot_body_ids, :]
     expanded_quat = foot_quat_w[:, :, None, :].expand(num_envs, num_feet, num_slots, 4)
     contact_pos_b = quat_apply_inverse(
       expanded_quat,
@@ -464,6 +491,7 @@ class StairEventDetector:
     terrain_height_m: float,
     max_levels: int,
   ) -> torch.Tensor:
+    assert self._toe is not None
     points_w, point_vel_w = self._toe._foot_points_w(env, self.foot_asset_cfg)
     toe_mask = self._toe._local_x >= self.params.toe_x_min
     toe_points = points_w[:, :, toe_mask, :]
@@ -488,6 +516,7 @@ class StairEventDetector:
     terrain_height_m: float,
     max_levels: int,
   ) -> torch.Tensor:
+    assert self._heel is not None
     points_w, _ = self._heel._foot_points_w(env, self.foot_asset_cfg)
     heel_mask = self._heel._local_x <= self.params.heel_x_max
     heel_points = points_w[:, :, heel_mask, :]
@@ -512,6 +541,7 @@ class StairEventDetector:
     terrain_height_m: float,
     max_levels: int,
   ) -> torch.Tensor:
+    assert self._lip is not None
     points_w, _ = self._lip._foot_points_w(env, self.foot_asset_cfg)
     num_envs, num_feet = points_w.shape[:2]
     expanded_boundaries = boundaries[:, None, :, :].expand(num_envs, num_feet, -1, -1)

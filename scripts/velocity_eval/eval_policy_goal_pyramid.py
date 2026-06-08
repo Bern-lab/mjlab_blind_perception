@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
+import numpy as np
 import torch
 import tyro
 from scripts.velocity_eval.eval_metrics import (
@@ -67,6 +68,9 @@ class GoalPyramidEvalConfig:
   disable_actuator_delay: bool = True
   play: bool = False
   viewer: Literal["auto", "native", "viser"] = "auto"
+  show_toe_riser_contact_markers: bool = True
+  toe_riser_contact_marker_radius: float = 0.035
+  toe_riser_contact_marker_max_points_per_env: int = 256
 
   stair_levels: int = 10
   stair_height: float = 0.15
@@ -97,6 +101,59 @@ class SpawnInfo:
   goal_xy_w: torch.Tensor
   top_z_w: torch.Tensor
   nominal_root_height: torch.Tensor
+
+
+class GoalPyramidToeRiserContactMarkers:
+  """Persist toe-riser contact markers for the currently active play episode."""
+
+  def __init__(
+    self,
+    env: ManagerBasedRlEnv,
+    detector: StairEventDetector,
+    *,
+    radius: float,
+    max_points_per_env: int,
+  ) -> None:
+    self._detector = detector
+    self._radius = radius
+    self._max_points_per_env = max(0, max_points_per_env)
+    self._points_by_env: list[list[np.ndarray]] = [[] for _ in range(env.num_envs)]
+
+  def reset(self, env_ids: torch.Tensor | None = None) -> None:
+    if env_ids is None:
+      for points in self._points_by_env:
+        points.clear()
+      return
+    for env_id in env_ids.detach().cpu().tolist():
+      self._points_by_env[int(env_id)].clear()
+
+  def update(self, env: ManagerBasedRlEnv) -> None:
+    if self._max_points_per_env <= 0 or self._detector.event_source != "true_contact":
+      return
+    self._detector.compute_events(env)
+    env_ids, positions_w = self._detector.get_last_true_contact_positions("toe")
+    if env_ids.numel() == 0:
+      return
+
+    for env_id, position in zip(
+      env_ids.detach().cpu().tolist(),
+      positions_w.detach().cpu().numpy(),
+      strict=True,
+    ):
+      points = self._points_by_env[int(env_id)]
+      points.append(np.asarray(position, dtype=np.float32).copy())
+      if len(points) > self._max_points_per_env:
+        del points[: len(points) - self._max_points_per_env]
+
+  def debug_vis(self, visualizer) -> None:
+    for env_idx in visualizer.get_env_indices(len(self._points_by_env)):
+      for position in self._points_by_env[int(env_idx)]:
+        visualizer.add_sphere(
+          center=position,
+          radius=self._radius,
+          color=(1.0, 0.0, 0.0, 1.0),
+          label="toe_riser_contact",
+        )
 
 
 def _make_goal_terrain(cfg: GoalPyramidEvalConfig) -> EvalTerrainSpec:
@@ -332,6 +389,11 @@ def _fresh_obs_with_history(env: ManagerBasedRlEnv) -> TensorDict:
   return TensorDict(obs_dict, batch_size=[env.num_envs])
 
 
+def _refresh_goal_respawn_observations(env: ManagerBasedRlEnv) -> None:
+  """Prime observation history after goal-play teleports envs to new starts."""
+  env.obs_buf = env.observation_manager.compute(update_history=True)
+
+
 def _empty_batch_tensors(
   num_envs: int, max_levels: int, device: str
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
@@ -517,12 +579,14 @@ class GoalPyramidPlayMixin:
     *args,
     goal_cfg: GoalPyramidEvalConfig,
     spawn: SpawnInfo,
+    toe_riser_contact_markers: GoalPyramidToeRiserContactMarkers | None = None,
     **kwargs,
   ) -> None:
     super().__init__(*args, **kwargs)
     self._goal_cfg = goal_cfg
     self._goal_spawn = spawn
     self._goal_respawn_counter = 0
+    self._toe_riser_contact_markers = toe_riser_contact_markers
 
   def _respawn_goal_envs(self, env_ids: torch.Tensor) -> None:
     if env_ids.numel() == 0:
@@ -538,9 +602,12 @@ class GoalPyramidPlayMixin:
       env_ids=env_ids,
       spawn=self._goal_spawn,
     )
+    if self._toe_riser_contact_markers is not None:
+      self._toe_riser_contact_markers.reset(env_ids)
     env.observation_manager.reset(env_ids)
     active = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
     _update_goal_command(env, self._goal_cfg, self._goal_spawn, active)
+    _refresh_goal_respawn_observations(env)
 
     dones = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     dones[env_ids] = True
@@ -557,6 +624,9 @@ class GoalPyramidPlayMixin:
         obs = viewer.env.get_observations()
         actions = viewer.policy(obs)
         step_result = viewer.env.step(actions)
+
+      if self._toe_riser_contact_markers is not None:
+        self._toe_riser_contact_markers.update(env)
 
       built_in_dones = extract_dones(step_result)
       if built_in_dones is None:
@@ -602,12 +672,15 @@ class GoalPyramidPlayMixin:
       self._goal_cfg,
       seed=self._goal_cfg.seed + 7919 * self._goal_respawn_counter,
     )
+    if self._toe_riser_contact_markers is not None:
+      self._toe_riser_contact_markers.reset()
     active = torch.ones(
       viewer.env.unwrapped.num_envs,
       dtype=torch.bool,
       device=viewer.env.unwrapped.device,
     )
     _update_goal_command(viewer.env.unwrapped, self._goal_cfg, self._goal_spawn, active)
+    _refresh_goal_respawn_observations(viewer.env.unwrapped)
     self._step_count = 0
     self._sim_budget = 0.0
     self._last_error = None
@@ -667,6 +740,17 @@ def run_goal_pyramid_play(task_id: str, cfg: GoalPyramidEvalConfig) -> None:
     active = torch.ones(cfg.num_envs, dtype=torch.bool, device=wrapped.unwrapped.device)
     _update_goal_command(wrapped.unwrapped, cfg, spawn, active)
     _fresh_obs_with_history(wrapped.unwrapped)
+    toe_riser_contact_markers = None
+    if cfg.show_toe_riser_contact_markers:
+      toe_riser_contact_markers = GoalPyramidToeRiserContactMarkers(
+        wrapped.unwrapped,
+        StairEventDetector(wrapped.unwrapped),
+        radius=cfg.toe_riser_contact_marker_radius,
+        max_points_per_env=cfg.toe_riser_contact_marker_max_points_per_env,
+      )
+      wrapped.unwrapped.manager_visualizers[
+        "goal_pyramid_toe_riser_contact_markers"
+      ] = toe_riser_contact_markers
 
     if cfg.viewer == "auto":
       has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
@@ -684,6 +768,7 @@ def run_goal_pyramid_play(task_id: str, cfg: GoalPyramidEvalConfig) -> None:
         policy,
         goal_cfg=cfg,
         spawn=spawn,
+        toe_riser_contact_markers=toe_riser_contact_markers,
       ).run()
     elif resolved_viewer == "viser":
       GoalPyramidViserViewer(
@@ -691,6 +776,7 @@ def run_goal_pyramid_play(task_id: str, cfg: GoalPyramidEvalConfig) -> None:
         policy,
         goal_cfg=cfg,
         spawn=spawn,
+        toe_riser_contact_markers=toe_riser_contact_markers,
       ).run()
     else:
       raise RuntimeError(f"Unsupported viewer backend: {resolved_viewer}")

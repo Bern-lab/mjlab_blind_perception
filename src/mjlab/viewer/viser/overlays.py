@@ -137,20 +137,24 @@ class ViserCameraOverlays:
   mj_model: mujoco.MjModel
   camera_viewers: list[ViserCameraViewer] | None = None
 
-  @property
-  def has_cameras(self) -> bool:
-    """Whether the environment has any camera sensors."""
-    return any(
-      isinstance(s, CameraSensor) for s in self.env.unwrapped.scene.sensors.values()
-    )
-
-  def setup_controls(self) -> None:
-    """Create camera feed controls under the active GUI folder."""
-    camera_sensors = [
+  def _visible_camera_sensors(self) -> list[CameraSensor]:
+    sensors = [
       sensor
       for sensor in self.env.unwrapped.scene.sensors.values()
       if isinstance(sensor, CameraSensor)
     ]
+    if self.env.unwrapped.cfg.viewer.show_depth_camera_visualizers:
+      return sensors
+    return [sensor for sensor in sensors if "depth" not in sensor.cfg.data_types]
+
+  @property
+  def has_cameras(self) -> bool:
+    """Whether the environment has any camera sensors."""
+    return bool(self._visible_camera_sensors())
+
+  def setup_controls(self) -> None:
+    """Create camera feed controls under the active GUI folder."""
+    camera_sensors = self._visible_camera_sensors()
     if not camera_sensors:
       self.camera_viewers = []
       return

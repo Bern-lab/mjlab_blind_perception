@@ -35,6 +35,7 @@ def add_g1_toe_terrain_contact_sensor(cfg: ManagerBasedRlEnvCfg) -> None:
     fields=("found", "force", "pos", "normal", "tangent"),
     reduce="maxforce",
     num_slots=4,
+    track_air_time=True,
     global_frame=True,
   )
   cfg.scene.sensors = (cfg.scene.sensors or ()) + (toe_contact_cfg,)

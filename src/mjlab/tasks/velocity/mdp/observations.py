@@ -7,6 +7,7 @@ import torch
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import CameraSensor, ContactSensor
 from mjlab.sensor.terrain_height_sensor import TerrainHeightSensor
+from mjlab.utils.lab_api.math import quat_apply, quat_apply_inverse
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
@@ -103,17 +104,24 @@ _G1_FOOT_LINK_NAMES: tuple[str, str] = (
   "right_ankle_roll_link",
 )
 """
-G1 foot link names used for FK toe/heel position estimation.
-Note: G1 XML does not have dedicated toe/heel links.  We approximate
-toe/heel positions by applying body-frame offsets to the ankle-roll link.
-For deployment, these positions should be computed via FK from joint encoders.
+G1 ankle-roll link names used as a fallback for FK toe/heel point estimation.
+The preferred path reads named toe/heel sites from the MJCF.  For deployment,
+these positions should be computed by FK from joint encoders.
 """
 
-# Body-frame toe/heel offsets relative to ankle_roll_link origin
-_TOE_OFFSET_BODY: torch.Tensor = torch.tensor([0.12, 0.0, -0.037], dtype=torch.float32)
-_HEEL_OFFSET_BODY: torch.Tensor = torch.tensor(
-  [-0.05, 0.0, -0.037], dtype=torch.float32
+_G1_TOE_HEEL_SITE_NAMES: tuple[str, str, str, str] = (
+  "left_toe",
+  "right_toe",
+  "left_heel",
+  "right_heel",
 )
+"""G1 MJCF sites used for toe/heel kinematic latent features."""
+
+# Fallback body-frame toe/heel offsets relative to ankle_roll_link origin.
+# These are the lateral centers of the official Unitree G1 rev1.0 foot
+# collision spheres: toe [0.12, +/-0.03, -0.03], heel [-0.05, +/-0.025, -0.03].
+_TOE_OFFSET_BODY: torch.Tensor = torch.tensor([0.12, 0.0, -0.03], dtype=torch.float32)
+_HEEL_OFFSET_BODY: torch.Tensor = torch.tensor([-0.05, 0.0, -0.03], dtype=torch.float32)
 
 
 def _get_leg_joint_info(
@@ -188,10 +196,33 @@ def _get_foot_link_indices(env: ManagerBasedRlEnv) -> tuple[int, int]:
   return left_idx, right_idx
 
 
+def _get_toe_heel_site_indices(
+  env: ManagerBasedRlEnv,
+) -> tuple[int, int, int, int] | None:
+  """Return toe/heel site indices if the robot MJCF exposes them."""
+  if "toe_heel_site_indices" in env.extras:
+    return env.extras["toe_heel_site_indices"]
+
+  robot = env.scene["robot"]
+  name_to_idx = {name: i for i, name in enumerate(robot.site_names)}
+  if not all(name in name_to_idx for name in _G1_TOE_HEEL_SITE_NAMES):
+    env.extras["toe_heel_site_indices"] = None
+    return None
+
+  indices = (
+    name_to_idx[_G1_TOE_HEEL_SITE_NAMES[0]],
+    name_to_idx[_G1_TOE_HEEL_SITE_NAMES[1]],
+    name_to_idx[_G1_TOE_HEEL_SITE_NAMES[2]],
+    name_to_idx[_G1_TOE_HEEL_SITE_NAMES[3]],
+  )
+  env.extras["toe_heel_site_indices"] = indices
+  return indices
+
+
 def _body_frame_foot_positions(
   env: ManagerBasedRlEnv,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-  """Compute body-frame toe and heel positions via FK + offset.
+  """Compute body-frame toe and heel positions from MJCF sites or FK offsets.
 
   Returns:
     left_toe_pos_body:  [num_envs, 3]
@@ -202,13 +233,26 @@ def _body_frame_foot_positions(
   All positions are in the robot's body frame (gravity-aligned).
   """
   robot = env.scene["robot"]
-  left_idx, right_idx = _get_foot_link_indices(env)
-
-  # World-frame link positions and quaternions
-  body_link_pos_w = robot.data.body_link_pos_w  # [num_envs, num_bodies, 3]
-  body_link_quat_w = robot.data.body_link_quat_w  # [num_envs, num_bodies, 4]
   root_pos_w = robot.data.root_link_pos_w  # [num_envs, 3]
   root_quat_w = robot.data.root_link_quat_w  # [num_envs, 4]
+
+  def _world_to_body(point_w: torch.Tensor) -> torch.Tensor:
+    return quat_apply_inverse(root_quat_w, point_w - root_pos_w)
+
+  site_indices = _get_toe_heel_site_indices(env)
+  if site_indices is not None:
+    left_toe_idx, right_toe_idx, left_heel_idx, right_heel_idx = site_indices
+    site_pos_w = robot.data.site_pos_w
+    return (
+      _world_to_body(site_pos_w[:, left_toe_idx, :]),
+      _world_to_body(site_pos_w[:, right_toe_idx, :]),
+      _world_to_body(site_pos_w[:, left_heel_idx, :]),
+      _world_to_body(site_pos_w[:, right_heel_idx, :]),
+    )
+
+  left_idx, right_idx = _get_foot_link_indices(env)
+  body_link_pos_w = robot.data.body_link_pos_w  # [num_envs, num_bodies, 3]
+  body_link_quat_w = robot.data.body_link_quat_w  # [num_envs, num_bodies, 4]
 
   _toe = _TOE_OFFSET_BODY.to(env.device)
   _heel = _HEEL_OFFSET_BODY.to(env.device)
@@ -216,16 +260,9 @@ def _body_frame_foot_positions(
   def _link_pos_body(link_idx: int, offset: torch.Tensor) -> torch.Tensor:
     link_pos_w = body_link_pos_w[:, link_idx, :]  # [B, 3]
     link_quat_w = body_link_quat_w[:, link_idx, :]  # [B, 4]
-    # Rotate offset into world frame
-    from mjlab.utils.lab_api.math import quat_apply
-
     offset_w = quat_apply(link_quat_w, offset.expand(env.num_envs, -1))
     point_w = link_pos_w + offset_w
-    # Transform to body frame
-    from mjlab.utils.lab_api.math import quat_apply_inverse
-
-    point_body = quat_apply_inverse(root_quat_w, point_w - root_pos_w)
-    return point_body
+    return _world_to_body(point_w)
 
   left_toe = _link_pos_body(left_idx, _toe)
   right_toe = _link_pos_body(right_idx, _toe)

@@ -7,7 +7,7 @@ from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
-from mjlab.sensor import CameraSensorCfg
+from mjlab.sensor import CameraSensorCfg, RayCastSensorCfg
 from mjlab.tasks.velocity import mdp
 from mjlab.tasks.velocity.mdp.teacher_target_heading_command import (
   TeacherTargetHeadingVelocityCommandCfg,
@@ -279,8 +279,11 @@ def _configure_teacherkl_target_navigation(
   terrain_gen = cfg.scene.terrain.terrain_generator
   for name in ("high_stairs", "high_stairs_inv"):
     sub = terrain_gen.sub_terrains.get(name)
-    if sub is not None and hasattr(sub, "step_width_range"):
-      sub.step_width_range = (0.30, 0.35)  # pyright: ignore[reportAttributeAccessIssue]
+    if isinstance(
+      sub,
+      BoxPyramidStairsTerrainCfg | BoxInvertedPyramidStairsTerrainCfg,
+    ):
+      sub.step_width_range = (0.30, 0.35)
 
 
 def _reset_teacher_term_temporal_state(term: ObservationTermCfg) -> None:
@@ -344,6 +347,14 @@ def _add_teacher_depth_camera(cfg: ManagerBasedRlEnvCfg) -> None:
   )
 
 
+def configure_blind_teacherkl_play_visualization(cfg: ManagerBasedRlEnvCfg) -> None:
+  """Hide exteroceptive debug views for blind teacher-student play runs."""
+  cfg.viewer.show_depth_camera_visualizers = False
+  for sensor in cfg.scene.sensors or ():
+    if isinstance(sensor, RayCastSensorCfg):
+      sensor.debug_vis = False
+
+
 def unitree_g1_blind_rough_teacherkl_env_cfg(
   play: bool = False,
   use_target_navigation: bool = False,
@@ -376,6 +387,8 @@ def unitree_g1_blind_rough_teacherkl_env_cfg(
     twist_cmd.ranges.lin_vel_x = (0.5, 1.0)
     twist_cmd.ranges.lin_vel_y = (0.0, 0.0)
     twist_cmd.ranges.ang_vel_z = (-0.5, 0.5)
+  if play:
+    configure_blind_teacherkl_play_visualization(cfg)
 
   return cfg
 

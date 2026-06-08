@@ -9,10 +9,12 @@ from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
+from mjlab.sensor import RayCastSensorCfg
 from mjlab.tasks.velocity import mdp
 from mjlab.tasks.velocity.mdp.teacher_target_heading_command import (
   TeacherTargetHeadingVelocityCommandCfg,
 )
+from mjlab.terrains import StepDangerVisualizationCfg
 
 from .blind_rough_teacher_kl_env_cfg import unitree_g1_blind_rough_teacherkl_env_cfg
 from .blind_rough_toe_contact_cfg import TOE_TERRAIN_CONTACT_SENSOR, g1_foot_body_cfg
@@ -22,7 +24,7 @@ from .blind_rough_toe_contact_cfg import TOE_TERRAIN_CONTACT_SENSOR, g1_foot_bod
 class G1SlowLatentTargetCommandParams:
   """Target-heading command parameters exposed for slow-latent experiments."""
 
-  resampling_time_range: tuple[float, float] = (30.0, 30.0)
+  resampling_time_range: tuple[float, float] = (60.0, 60.0)
   heading_control_stiffness: float = 0.5
   rel_target_envs: float = 0.8
   rel_random_heading_envs: float = 0.0
@@ -69,6 +71,20 @@ class G1SlowLatentRewardParams:
   surface_tol: float = 0.005
   nearest_boundaries: int = 4
   min_terrain_level: int = 3
+  toe_contact_penalty_scale: float = 0.5
+  toe_contact_time_scale: float = 0.20
+  toe_contact_force_threshold: float = 15.0
+  toe_contact_force_scale: float = 60.0
+  toe_contact_vertical_normal_z_max: float = 0.4
+  toe_contact_forward_velocity_threshold: float = 0.05
+  toe_probe_contact_count: int = 2
+  toe_probe_slab_reward_scale: float = 0.35
+  toe_probe_contact_reward: float = 0.08
+  toe_probe_min_progress: float = 0.08
+  toe_probe_max_safe_force: float | None = 45.0
+  toe_probe_cooldown_time: float = 0.20
+  toe_probe_min_ascent_height: float = 0.03
+  toe_probe_ascent_velocity_threshold: float = 0.03
 
 
 @dataclass(frozen=True)
@@ -81,20 +97,55 @@ class G1SlowLatentLabelParams:
 
 
 @dataclass(frozen=True)
+class G1SlowLatentPlayVisualizationParams:
+  """Play-only visualization knobs for the slow-latent main experiment."""
+
+  show_depth_camera_visualizers: bool = False
+  """Show depth camera frustums, ground projections, and Viser camera feeds."""
+  show_raycast_debug_visualizers: bool = False
+  """Show terrain_scan / foot_height_scan raycast debug markers on the ground."""
+  show_step_danger_zones: bool = True
+  """Show non-colliding MuJoCo geoms for step lip/riser danger zones."""
+  danger_lip_radius: float | None = None
+  """Lip tube radius. None reuses rewards.foot_lip_edge_radius."""
+  danger_slab_depth: float | None = None
+  """Riser slab depth toward the low side. None reuses rewards.toe_slab_depth."""
+  danger_slab_u_margin: float | None = None
+  """Extra slab margin along the step edge. None reuses rewards.toe_slab_u_margin."""
+  danger_slab_v_margin: float | None = None
+  """Extra slab vertical/normal margin. None reuses rewards.toe_slab_v_margin."""
+  danger_geom_group: int = 4
+  """MuJoCo geom group used for danger-zone visual geoms."""
+
+
+@dataclass(frozen=True)
 class G1SlowLatentEnvParams:
   """Top-level knobs for the slow-latent environment config."""
 
   actor_history_length: int = 5
+  """History length for the deployable blind actor observation group."""
   latent_group_name: str = "latent"
+  """Observation group consumed by the slow-latent encoder."""
   latent_obs_term_name: str = "stair_latent"
+  """Observation term name for stair-focused latent encoder features."""
   label_group_name: str = "latent_labels"
+  """Observation group used by auxiliary slow-latent losses during training."""
   enable_latent_labels: bool = True
+  """Enable simulation-only labels for event/stair auxiliary losses."""
   enable_latent_obs_corruption: bool = False
+  """Apply observation corruption to latent encoder inputs."""
   target_command: G1SlowLatentTargetCommandParams = field(
     default_factory=G1SlowLatentTargetCommandParams
   )
+  """Target-heading command distribution and play overrides."""
   rewards: G1SlowLatentRewardParams = field(default_factory=G1SlowLatentRewardParams)
+  """Target progress and step-boundary danger reward parameters."""
   labels: G1SlowLatentLabelParams = field(default_factory=G1SlowLatentLabelParams)
+  """Auxiliary label thresholds for slow-latent training."""
+  play_visualization: G1SlowLatentPlayVisualizationParams = field(
+    default_factory=G1SlowLatentPlayVisualizationParams
+  )
+  """Play-only viewer/debug visualization settings."""
 
 
 def _configure_target_command(
@@ -135,10 +186,12 @@ def _configure_target_command(
 def _configure_step_boundary_rewards(
   cfg: ManagerBasedRlEnvCfg, params: G1SlowLatentRewardParams
 ) -> None:
-  foot_asset_cfg = SceneEntityCfg(
-    "robot",
-    body_names=("left_ankle_roll_link", "right_ankle_roll_link"),
-  )
+  def foot_asset_cfg() -> SceneEntityCfg:
+    return SceneEntityCfg(
+      "robot",
+      body_names=("left_ankle_roll_link", "right_ankle_roll_link"),
+    )
+
   cfg.rewards["target_progress"].weight = params.target_progress_weight
   cfg.rewards["target_progress"].params["min_distance"] = (
     params.target_progress_min_distance
@@ -155,7 +208,7 @@ def _configure_step_boundary_rewards(
       "nearest_boundaries": params.nearest_boundaries,
       "contact_sensor_name": "feet_ground_contact",
       "min_terrain_level": params.min_terrain_level,
-      "asset_cfg": foot_asset_cfg,
+      "asset_cfg": foot_asset_cfg(),
     },
   )
   cfg.rewards["toe_step_riser_slab_penalty"] = RewardTermCfg(
@@ -171,7 +224,24 @@ def _configure_step_boundary_rewards(
       "surface_tol": params.surface_tol,
       "nearest_boundaries": params.nearest_boundaries,
       "min_terrain_level": params.min_terrain_level,
-      "asset_cfg": foot_asset_cfg,
+      "contact_sensor_name": TOE_TERRAIN_CONTACT_SENSOR,
+      "contact_penalty_scale": params.toe_contact_penalty_scale,
+      "contact_time_scale": params.toe_contact_time_scale,
+      "contact_force_threshold": params.toe_contact_force_threshold,
+      "contact_force_scale": params.toe_contact_force_scale,
+      "contact_vertical_normal_z_max": params.toe_contact_vertical_normal_z_max,
+      "contact_forward_velocity_threshold": (
+        params.toe_contact_forward_velocity_threshold
+      ),
+      "probe_contact_count": params.toe_probe_contact_count,
+      "probe_slab_reward_scale": params.toe_probe_slab_reward_scale,
+      "probe_contact_reward": params.toe_probe_contact_reward,
+      "probe_min_progress": params.toe_probe_min_progress,
+      "probe_max_safe_force": params.toe_probe_max_safe_force,
+      "probe_cooldown_time": params.toe_probe_cooldown_time,
+      "min_ascent_height": params.toe_probe_min_ascent_height,
+      "ascent_velocity_threshold": params.toe_probe_ascent_velocity_threshold,
+      "asset_cfg": foot_asset_cfg(),
     },
   )
 
@@ -225,6 +295,48 @@ def _configure_latent_observations(
   )
 
 
+def _configure_slow_latent_play_visualization(
+  cfg: ManagerBasedRlEnvCfg,
+  params: G1SlowLatentPlayVisualizationParams,
+  rewards: G1SlowLatentRewardParams,
+) -> None:
+  cfg.viewer.show_depth_camera_visualizers = params.show_depth_camera_visualizers
+
+  for sensor in cfg.scene.sensors or ():
+    if isinstance(sensor, RayCastSensorCfg):
+      sensor.debug_vis = params.show_raycast_debug_visualizers
+
+  if cfg.scene.terrain is None or cfg.scene.terrain.terrain_generator is None:
+    return
+
+  cfg.scene.terrain.terrain_generator.step_danger_visualization = (
+    StepDangerVisualizationCfg(
+      enabled=params.show_step_danger_zones,
+      lip_radius=(
+        rewards.foot_lip_edge_radius
+        if params.danger_lip_radius is None
+        else params.danger_lip_radius
+      ),
+      slab_depth=(
+        rewards.toe_slab_depth
+        if params.danger_slab_depth is None
+        else params.danger_slab_depth
+      ),
+      slab_u_margin=(
+        rewards.toe_slab_u_margin
+        if params.danger_slab_u_margin is None
+        else params.danger_slab_u_margin
+      ),
+      slab_v_margin=(
+        rewards.toe_slab_v_margin
+        if params.danger_slab_v_margin is None
+        else params.danger_slab_v_margin
+      ),
+      geom_group=params.danger_geom_group,
+    )
+  )
+
+
 def unitree_g1_blind_rough_target_navigation_slow_latent_env_cfg(
   play: bool = False,
   params: G1SlowLatentEnvParams | None = None,
@@ -243,6 +355,7 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_env_cfg(
       target_command=params.target_command,
       rewards=params.rewards,
       labels=params.labels,
+      play_visualization=params.play_visualization,
     )
 
   cfg = unitree_g1_blind_rough_teacherkl_env_cfg(
@@ -253,4 +366,8 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_env_cfg(
   _configure_target_command(cfg, params.target_command, play)
   _configure_step_boundary_rewards(cfg, params.rewards)
   _configure_latent_observations(cfg, params)
+  if play:
+    _configure_slow_latent_play_visualization(
+      cfg, params.play_visualization, params.rewards
+    )
   return cfg

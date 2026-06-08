@@ -43,10 +43,17 @@ Added
   alongside RGB and depth, and a multi-cube goal-conditioned lifting task
   (``Mjlab-Multi-Cube-Seg-Yam``) that uses it (:issue:`862`).
   Contribution by @pthangeda.
+- Added live toe-riser contact markers to goal-pyramid velocity play
+  evaluation, drawing red dots at newly detected G1 toe/stair-riser
+  collision points for the current episode.
 
 Changed
 ^^^^^^^
 
+- Slow-latent G1 stair navigation now shapes ``toe_step_riser_slab_penalty``
+  with toe-riser contact duration: early probing contacts can be rewarded,
+  while later true toe/riser collisions add contact-time-scaled penalty on
+  top of the existing danger-zone penalty.
 - Actuator delay is now configured inline on any ``ActuatorCfg`` subclass
   (e.g. ``BuiltinPositionActuatorCfg(..., delay_min_lag=2, delay_max_lag=5)``)
   instead of wrapping with ``DelayedActuatorCfg``. ``DelayedActuator``,

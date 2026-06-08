@@ -2,15 +2,27 @@
 
 import pytest
 
+import mjlab.tasks  # noqa: F401
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg
 from mjlab.tasks.registry import list_tasks, load_env_cfg
+
+MAIN_BRANCH_TASK_IDS = (
+  "Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1",
+  "Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1",
+  "Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1",
+)
 
 
 @pytest.fixture(scope="module")
 def all_task_ids() -> list[str]:
   """Get all registered task IDs."""
   return list_tasks()
+
+
+def test_only_main_branch_tasks_registered(all_task_ids: list[str]) -> None:
+  """This branch intentionally exposes only the three main TeacherKL tasks."""
+  assert all_task_ids == sorted(MAIN_BRANCH_TASK_IDS)
 
 
 def test_all_tasks_loadable(all_task_ids: list[str]) -> None:
@@ -152,18 +164,14 @@ def test_step_boundary_rewards_scoped_to_target_stair_tasks(
     "foot_step_lip_volume_penalty",
     "toe_step_riser_slab_penalty",
   }
-  target_task = "Mjlab-Velocity-TargetHeading-Rough-Teacher-Unitree-G1"
   target_navigation_task = (
     "Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1"
   )
-  lstm_teacherkl_task = "Mjlab-Velocity-Blind-Rough-LSTM-TeacherKL-Unitree-G1"
   slow_latent_task = (
     "Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1"
   )
   allowed_tasks = {
-    target_task,
     target_navigation_task,
-    lstm_teacherkl_task,
     slow_latent_task,
   }
   for task_id in all_task_ids:
@@ -181,10 +189,6 @@ def test_step_boundary_rewards_scoped_to_target_stair_tasks(
       assert (
         cfg.rewards["toe_step_riser_slab_penalty"].params["nearest_boundaries"] == 4
       )
-      expected_slab_depth = 0.04 if task_id == target_task else 0.10
-      assert (
-        cfg.rewards["toe_step_riser_slab_penalty"].params["slab_depth"]
-        == expected_slab_depth
-      )
+      assert cfg.rewards["toe_step_riser_slab_penalty"].params["slab_depth"] == 0.10
     else:
       assert not present, f"{task_id} unexpectedly enables {sorted(present)}"

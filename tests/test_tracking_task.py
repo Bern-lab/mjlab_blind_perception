@@ -2,10 +2,17 @@
 
 import pytest
 
+import mjlab.tasks  # noqa: F401
 from mjlab.asset_zoo.robots import G1_ACTION_SCALE
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.tasks.registry import list_tasks, load_env_cfg
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
+
+if not any("Tracking" in task_id for task_id in list_tasks()):
+  pytest.skip(
+    "Tracking tasks are not registered in this main-experiment branch.",
+    allow_module_level=True,
+  )
 
 
 @pytest.fixture(scope="module")

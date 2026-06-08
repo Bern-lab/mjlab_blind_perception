@@ -1,5 +1,7 @@
 """RL configuration for Unitree G1 velocity task."""
 
+from dataclasses import dataclass, field
+
 from mjlab.rl import (
   RslRlGatedStairLatentModelCfg,
   RslRlModelCfg,
@@ -31,6 +33,76 @@ _DEPTH_CNN_CFG = {
 _DEPTH_MODEL_CLS = "mjlab.rl.spatial_softmax:SpatialSoftmaxCNNModel"
 
 
+@dataclass(frozen=True)
+class G1SlowLatentPolicyModelParams:
+  """Actor architecture, gated latent memory, and auxiliary-loss knobs."""
+
+  hidden_dims: tuple[int, ...] = (512, 256, 128)
+  """MLP actor hidden dimensions after concatenating actor_obs and z_memory."""
+  activation: str = "elu"
+  """Activation used by the actor MLP and latent encoder MLP."""
+  obs_normalization: bool = True
+  """Normalize actor and latent observations with empirical normalizers."""
+  action_std_init: float = 1.0
+  """Initial Gaussian action standard deviation."""
+  action_std_type: str = "scalar"
+  """Distribution std parameterization passed to RSL-RL."""
+  latent_dim: int = 16
+  """Dimension of the persistent slow latent memory z_t."""
+  latent_hidden_dim: int = 128
+  """LSTM hidden size for the latent encoder and recurrent rollout storage."""
+  mlp_encoder_dims: tuple[int, ...] = (128, 128)
+  """Pre-LSTM MLP encoder dimensions for stair_latent observations."""
+  alpha_fast: float = 0.3
+  """EMA update rate in normal fast-update mode."""
+  alpha_write: float = 0.8
+  """EMA update rate while writing stair evidence into memory."""
+  alpha_hold: float = 0.01#原本0.02
+  """EMA update rate while holding stair memory."""
+  write_steps: int = 2
+  """Number of steps spent in write mode after an event trigger."""
+  min_stair_steps: int = 50
+  """Minimum memory-hold steps before exit is allowed."""
+  exit_steps: int = 100
+  """Consecutive no-event steps required to leave stair-memory mode."""
+  cooldown_steps: int = 15
+  """Cooldown steps after exiting memory before another trigger is accepted."""
+  event_on_threshold: float = 0.6
+  """Event probability threshold that triggers stair-memory writing."""
+  event_off_threshold: float = 0.4
+  """Event probability threshold counted as no-event during exit logic."""
+  stair_off_threshold: float = 0.4
+  """Stair-state probability threshold below which exit is allowed."""
+  aux_event_coef: float = 0.03
+  """BCE loss weight for current toe-riser event prediction."""
+  aux_stair_coef: float = 0.02
+  """BCE loss weight for current stair-state prediction."""
+  aux_future_collision_coef: float = 0.05
+  """BCE loss weight for future toe-riser collision prediction."""
+  future_collision_horizon: int = 20
+  """Future window length, in policy steps, for collision labels."""
+  latent_obs_set: str = "latent"
+  """Observation set name consumed by the latent encoder."""
+
+
+@dataclass(frozen=True)
+class G1SlowLatentRunnerParams:
+  """Top-level RSL-RL settings for the slow-latent main experiment."""
+
+  num_steps_per_env: int = 64
+  """Rollout length per environment before PPO update."""
+  save_interval: int = 1000
+  """Checkpoint interval in training iterations."""
+  max_iterations: int = 40_001
+  """Maximum PPO training iterations."""
+  experiment_name: str = "g1_blind_rough_target_navigation_slow_latent_teacherkl"
+  """Log directory experiment name."""
+  model: G1SlowLatentPolicyModelParams = field(
+    default_factory=G1SlowLatentPolicyModelParams
+  )
+  """Slow-latent actor/model parameters."""
+
+
 def _unitree_g1_policy_model_cfg() -> RslRlModelCfg:
   return RslRlModelCfg(
     hidden_dims=(512, 256, 128),
@@ -60,6 +132,11 @@ def _unitree_g1_depth_policy_model_cfg() -> RslRlModelCfg:
 
 
 def _unitree_g1_gated_stair_latent_policy_model_cfg(
+  hidden_dims: tuple[int, ...] = (512, 256, 128),
+  activation: str = "elu",
+  obs_normalization: bool = True,
+  action_std_init: float = 1.0,
+  action_std_type: str = "scalar",
   latent_dim: int = 16,
   latent_hidden_dim: int = 128,
   mlp_encoder_dims: tuple[int, ...] = (128, 128),
@@ -80,13 +157,13 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
   latent_obs_set: str = "latent",
 ) -> RslRlGatedStairLatentModelCfg:
   return RslRlGatedStairLatentModelCfg(
-    hidden_dims=(512, 256, 128),
-    activation="elu",
-    obs_normalization=True,
+    hidden_dims=hidden_dims,
+    activation=activation,
+    obs_normalization=obs_normalization,
     distribution_cfg={
       "class_name": "GaussianDistribution",
-      "init_std": 1.0,
-      "std_type": "scalar",
+      "init_std": action_std_init,
+      "std_type": action_std_type,
     },
     latent_dim=latent_dim,
     latent_hidden_dim=latent_hidden_dim,
@@ -200,9 +277,9 @@ def unitree_g1_blind_rough_teacherkl_runner_cfg() -> RslRlTeacherKLRunnerCfg:
         imitation_loss_coef=1.0,
         checkpoint_path=G1_TEACHER_KL_CHECKPOINT,
         loss_type="mean_huber",
-        lambda_start=0.05,
+        lambda_start=0.03,
         lambda_end=0.0,
-        warmup_iters=0,
+        warmup_iters=1000,
         constant_iters=0,
         anneal_iters=10000,
         schedule="cosine",
@@ -256,10 +333,55 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
   aux_future_collision_coef: float = 0.05,
   future_collision_horizon: int = 20,
   latent_obs_set: str = "latent",
+  params: G1SlowLatentRunnerParams | None = None,
 ) -> RslRlTeacherKLRunnerCfg:
   """Create Teacher-KL config with gated stair slow-latent student actor."""
+  experiment_name = "g1_blind_rough_target_navigation_slow_latent_teacherkl"
+  save_interval: int | None = None
+  max_iterations: int | None = None
+  hidden_dims = (512, 256, 128)
+  activation = "elu"
+  obs_normalization = True
+  action_std_init = 1.0
+  action_std_type = "scalar"
+
+  if params is not None:
+    model_params = params.model
+    num_steps_per_env = params.num_steps_per_env
+    save_interval = params.save_interval
+    max_iterations = params.max_iterations
+    experiment_name = params.experiment_name
+    hidden_dims = model_params.hidden_dims
+    activation = model_params.activation
+    obs_normalization = model_params.obs_normalization
+    action_std_init = model_params.action_std_init
+    action_std_type = model_params.action_std_type
+    latent_dim = model_params.latent_dim
+    latent_hidden_dim = model_params.latent_hidden_dim
+    mlp_encoder_dims = model_params.mlp_encoder_dims
+    alpha_fast = model_params.alpha_fast
+    alpha_write = model_params.alpha_write
+    alpha_hold = model_params.alpha_hold
+    write_steps = model_params.write_steps
+    min_stair_steps = model_params.min_stair_steps
+    exit_steps = model_params.exit_steps
+    cooldown_steps = model_params.cooldown_steps
+    event_on_threshold = model_params.event_on_threshold
+    event_off_threshold = model_params.event_off_threshold
+    stair_off_threshold = model_params.stair_off_threshold
+    aux_event_coef = model_params.aux_event_coef
+    aux_stair_coef = model_params.aux_stair_coef
+    aux_future_collision_coef = model_params.aux_future_collision_coef
+    future_collision_horizon = model_params.future_collision_horizon
+    latent_obs_set = model_params.latent_obs_set
+
   cfg = unitree_g1_blind_rough_target_navigation_teacherkl_runner_cfg()
   cfg.actor = _unitree_g1_gated_stair_latent_policy_model_cfg(
+    hidden_dims=hidden_dims,
+    activation=activation,
+    obs_normalization=obs_normalization,
+    action_std_init=action_std_init,
+    action_std_type=action_std_type,
     latent_dim=latent_dim,
     latent_hidden_dim=latent_hidden_dim,
     mlp_encoder_dims=mlp_encoder_dims,
@@ -286,7 +408,11 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
     "teacher": ("teacher", "camera"),
   }
   cfg.num_steps_per_env = num_steps_per_env
-  cfg.experiment_name = "g1_blind_rough_target_navigation_slow_latent_teacherkl"
+  if save_interval is not None:
+    cfg.save_interval = save_interval
+  if max_iterations is not None:
+    cfg.max_iterations = max_iterations
+  cfg.experiment_name = experiment_name
   return cfg
 
 

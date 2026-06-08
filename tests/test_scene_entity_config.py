@@ -96,6 +96,29 @@ def test_names_to_ids_sets_slice_when_all(fake_scene, fake_entity, field_names):
 
 
 @pytest.mark.parametrize(
+  "field_names",
+  [
+    ("joint_names", "joint_ids"),
+    ("body_names", "body_ids"),
+    ("geom_names", "geom_ids"),
+    ("site_names", "site_ids"),
+  ],
+)
+def test_tuple_names_resolve_idempotently(fake_scene, field_names):
+  """Tuple names should normalize once and remain valid on repeated resolve."""
+  names_attr, ids_attr = field_names
+
+  cfg = SceneEntityCfg(name="robot")
+  setattr(cfg, names_attr, ("a", "c"))
+
+  cfg.resolve(fake_scene)
+  cfg.resolve(fake_scene)
+
+  assert getattr(cfg, names_attr) == ["a", "c"]
+  assert getattr(cfg, ids_attr) == [0, 2]
+
+
+@pytest.mark.parametrize(
   "field_names,ids",
   [
     (("joint_names", "joint_ids"), [0, 2]),

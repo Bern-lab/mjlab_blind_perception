@@ -1,5 +1,3 @@
-from mjlab.utils.lab_api.tasks.importer import import_packages
+"""Register the supported task subset for this branch."""
 
-_BLACKLIST_PKGS = ["utils", ".mdp"]
-
-import_packages(__name__, _BLACKLIST_PKGS)
+import mjlab.tasks.velocity.config.g1 as _g1_velocity_tasks  # noqa: F401

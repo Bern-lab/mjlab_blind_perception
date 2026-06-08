@@ -591,6 +591,42 @@ def test_air_time_tracking(device):
   assert torch.any(data3.found > 0)
 
 
+def test_air_time_tracking_groups_multi_slot_contacts(device):
+  """Air-time state stays per-primary when contact data has multiple slots."""
+  feet_sensor_cfg = ContactSensorCfg(
+    name="feet_contact",
+    primary=ContactMatch(
+      mode="geom",
+      pattern=("left_foot_geom", "right_foot_geom"),
+      entity="biped",
+    ),
+    secondary=None,
+    fields=("found",),
+    num_slots=2,
+    track_air_time=True,
+  )
+
+  scene, sim = create_scene_with_sensor(BIPED_XML, "biped", feet_sensor_cfg, device)
+  biped_entity = scene["biped"]
+
+  root_state = torch.zeros((2, 13), device=sim.device)
+  root_state[:, 2] = 0.24
+  root_state[:, 3] = 1.0
+  biped_entity.write_root_state_to_sim(root_state)
+
+  for _ in range(30):
+    sim.step()
+    scene.update(dt=sim.cfg.mujoco.timestep)
+
+  sensor = scene["feet_contact"]
+  data = sensor.data
+  assert data.found is not None
+  assert data.current_contact_time is not None
+  assert data.found.shape[1] == 4
+  assert data.current_contact_time.shape[1] == 2
+  assert torch.any(data.current_contact_time > 0)
+
+
 ##
 # Multi-sensor integration tests.
 ##
