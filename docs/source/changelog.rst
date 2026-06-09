@@ -61,7 +61,10 @@ Changed
   contacts on those two layers are neutral, while later riser contacts keep
   the contact-time-scaled penalty. After the first layer is contacted, a
   progress-shaped attraction reward encourages toe motion toward the second
-  layer riser until that second-layer contact occurs.
+  layer riser until that second-layer contact occurs. The reward now logs
+  the slab, true-contact, probe, attraction, and final raw subterms
+  separately, and the slow-latent foot-lip penalty ignores the first two
+  stair layers.
 - Actuator delay is now configured inline on any ``ActuatorCfg`` subclass
   (e.g. ``BuiltinPositionActuatorCfg(..., delay_min_lag=2, delay_max_lag=5)``)
   instead of wrapping with ``DelayedActuatorCfg``. ``DelayedActuator``,

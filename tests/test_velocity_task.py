@@ -328,6 +328,10 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   toe_reward_params = env_cfg.rewards["toe_step_riser_slab_penalty"].params
   toe_asset_cfg = toe_reward_params["asset_cfg"]
   assert foot_asset_cfg is not toe_asset_cfg
+  assert (
+    env_cfg.rewards["foot_step_lip_volume_penalty"].params["ignore_boundary_layers"]
+    == 2
+  )
   assert toe_reward_params["contact_sensor_name"] == "toe_terrain_contact"
   assert toe_reward_params["contact_penalty_scale"] == 0.5
   assert toe_reward_params["probe_contact_count"] == 2
@@ -397,6 +401,7 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
       self_collision_force_threshold=12.0,
       action_acc_l2_weight=-0.07,
       foot_lip_edge_radius=0.08,
+      foot_lip_ignore_boundary_layers=1,
       toe_slab_depth=0.12,
       toe_contact_penalty_scale=0.7,
       toe_probe_contact_count=3,
@@ -432,6 +437,10 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
   assert env_cfg.rewards["self_collisions"].params["force_threshold"] == 12.0
   assert env_cfg.rewards["action_acc_l2"].weight == -0.07
   assert env_cfg.rewards["foot_step_lip_volume_penalty"].params["edge_radius"] == 0.08
+  assert (
+    env_cfg.rewards["foot_step_lip_volume_penalty"].params["ignore_boundary_layers"]
+    == 1
+  )
   assert env_cfg.rewards["toe_step_riser_slab_penalty"].params["slab_depth"] == 0.12
   toe_params = env_cfg.rewards["toe_step_riser_slab_penalty"].params
   assert toe_params["contact_penalty_scale"] == 0.7

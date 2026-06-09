@@ -95,6 +95,44 @@ def _terrain_level_active(
   return levels >= min_terrain_level
 
 
+def _step_boundary_layers(
+  boundaries: torch.Tensor,
+  valid_boundaries: torch.Tensor,
+  max_layers: int,
+) -> torch.Tensor:
+  layers = torch.zeros(
+    valid_boundaries.shape,
+    device=boundaries.device,
+    dtype=torch.long,
+  )
+  if max_layers <= 0:
+    return layers
+
+  z_low = boundaries[..., 9]
+  z_high = boundaries[..., 10]
+  step_heights = torch.abs(z_high - z_low)
+  valid = valid_boundaries & (step_heights > 1.0e-6)
+  if not bool(torch.any(valid).item()):
+    return layers
+
+  masked_heights = torch.where(
+    valid,
+    step_heights,
+    torch.full_like(step_heights, torch.inf),
+  )
+  env_step_height = torch.min(masked_heights, dim=-1).values
+  env_step_height = torch.where(
+    torch.isfinite(env_step_height),
+    env_step_height.clamp_min(1.0e-6),
+    torch.ones_like(env_step_height),
+  )
+  distance_from_base = torch.minimum(torch.abs(z_low), torch.abs(z_high))
+  candidate_layers = torch.round(distance_from_base / env_step_height[:, None])
+  candidate_layers = candidate_layers.long() + 1
+  valid_layers = valid & (candidate_layers <= max_layers)
+  return torch.where(valid_layers, candidate_layers, layers)
+
+
 class _StepBoundaryFootVolume:
   def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
     params = cfg.params
@@ -373,6 +411,7 @@ class foot_step_lip_volume_penalty(_StepBoundaryFootVolume):
     edge_radius: float = 0.05,
     edge_height_band: float | None = 0.06,
     nearest_boundaries: int | None = None,
+    ignore_boundary_layers: int = 0,
     log_only: bool = False,
     min_terrain_level: int | None = None,
     asset_cfg: SceneEntityCfg = _DEFAULT_FOOT_BODY_CFG,
@@ -387,6 +426,15 @@ class foot_step_lip_volume_penalty(_StepBoundaryFootVolume):
 
     level_active = _terrain_level_active(env, min_terrain_level)
     base_valid = valid_boundaries & level_active[:, None]
+    valid_before_layer_ignore = base_valid
+    ignored_layers = _step_boundary_layers(
+      boundaries,
+      base_valid,
+      max(0, int(ignore_boundary_layers)),
+    )
+    ignored_boundaries = ignored_layers > 0
+    if ignore_boundary_layers > 0:
+      base_valid = base_valid & ~ignored_boundaries
 
     p0 = boundaries[:, :, 0:3]
     p1 = boundaries[:, :, 3:6]
@@ -438,6 +486,11 @@ class foot_step_lip_volume_penalty(_StepBoundaryFootVolume):
     )
     env.extras["log"]["Metrics/step_lip_min_dist_mean"] = min_dist_mean
     env.extras["log"]["Metrics/step_lip_nearest_fallback_ratio"] = fallback_ratio
+    ignored_count = (valid_before_layer_ignore & ignored_boundaries).float().sum()
+    valid_count = valid_before_layer_ignore.float().sum().clamp_min(1.0)
+    env.extras["log"]["Metrics/step_lip_ignored_layer_ratio"] = (
+      ignored_count / valid_count
+    )
 
     if log_only:
       return torch.zeros_like(penalty)
@@ -505,37 +558,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     valid_boundaries: torch.Tensor,
     max_probe_layers: int,
   ) -> torch.Tensor:
-    layers = torch.zeros(
-      valid_boundaries.shape,
-      device=boundaries.device,
-      dtype=torch.long,
-    )
-    if max_probe_layers <= 0:
-      return layers
-
-    z_low = boundaries[..., 9]
-    z_high = boundaries[..., 10]
-    step_heights = torch.abs(z_high - z_low)
-    valid = valid_boundaries & (step_heights > 1.0e-6)
-    if not bool(torch.any(valid).item()):
-      return layers
-
-    masked_heights = torch.where(
-      valid,
-      step_heights,
-      torch.full_like(step_heights, torch.inf),
-    )
-    env_step_height = torch.min(masked_heights, dim=-1).values
-    env_step_height = torch.where(
-      torch.isfinite(env_step_height),
-      env_step_height.clamp_min(1.0e-6),
-      torch.ones_like(env_step_height),
-    )
-    distance_from_base = torch.minimum(torch.abs(z_low), torch.abs(z_high))
-    candidate_layers = torch.round(distance_from_base / env_step_height[:, None])
-    candidate_layers = candidate_layers.long() + 1
-    valid_layers = valid & (candidate_layers <= max_probe_layers)
-    return torch.where(valid_layers, candidate_layers, layers)
+    return _step_boundary_layers(boundaries, valid_boundaries, max_probe_layers)
 
   def _ascent_gate(
     self,
@@ -812,6 +835,22 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     env.extras["log"]["Metrics/toe_riser_slab_probe_count_mean"] = (
       probe_count_by_env.mean()
     )
+    if max_probe_layers >= 1:
+      env.extras["log"]["Metrics/toe_riser_slab_probe_layer1_hit_ratio"] = (
+        self._probe_layer_hit[:, 0].float().mean()
+      )
+    else:
+      env.extras["log"]["Metrics/toe_riser_slab_probe_layer1_hit_ratio"] = torch.zeros(
+        (), device=env.device
+      )
+    if max_probe_layers >= 2:
+      env.extras["log"]["Metrics/toe_riser_slab_probe_layer2_hit_ratio"] = (
+        self._probe_layer_hit[:, 1].float().mean()
+      )
+    else:
+      env.extras["log"]["Metrics/toe_riser_slab_probe_layer2_hit_ratio"] = torch.zeros(
+        (), device=env.device
+      )
     env.extras["log"]["Metrics/toe_riser_slab_contact_time_mean"] = (
       env_contact_time.mean()
     )
@@ -831,7 +870,12 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     surface_tol: float,
   ) -> torch.Tensor:
     reward = torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+    zero = torch.zeros((), device=env.device)
+    log = env.extras["log"]
     if reward_scale <= 0.0 or self._probe_layer_hit.shape[1] < 2:
+      log["Metrics/toe_riser_slab_second_layer_attraction_mean"] = zero
+      log["Metrics/toe_riser_slab_second_layer_attraction_phase"] = zero
+      log["Metrics/toe_riser_slab_second_layer_progress_mean"] = zero
       return reward
 
     first_layer_hit = self._probe_layer_hit[:, 0]
@@ -839,6 +883,9 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     attraction_phase = active_gate & first_layer_hit & ~second_layer_hit
     if not bool(torch.any(attraction_phase).item()):
       self._second_layer_attraction_progress[:] = 0.0
+      log["Metrics/toe_riser_slab_second_layer_attraction_mean"] = zero
+      log["Metrics/toe_riser_slab_second_layer_attraction_phase"] = zero
+      log["Metrics/toe_riser_slab_second_layer_progress_mean"] = zero
       return reward
 
     second_layer_valid = probe_boundary_layers == 2
@@ -848,6 +895,11 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         self._second_layer_attraction_progress,
         torch.zeros_like(self._second_layer_attraction_progress),
       )
+      log["Metrics/toe_riser_slab_second_layer_attraction_mean"] = zero
+      log["Metrics/toe_riser_slab_second_layer_attraction_phase"] = (
+        attraction_phase.float().mean()
+      )
+      log["Metrics/toe_riser_slab_second_layer_progress_mean"] = zero
       return reward
 
     num_envs, num_feet = toe_points.shape[:2]
@@ -902,15 +954,11 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       torch.zeros_like(self._second_layer_attraction_progress),
     )
     reward = progress_delta * reward_scale
-    env.extras["log"]["Metrics/toe_riser_slab_second_layer_attraction_mean"] = (
-      reward.mean()
-    )
-    env.extras["log"]["Metrics/toe_riser_slab_second_layer_attraction_phase"] = (
+    log["Metrics/toe_riser_slab_second_layer_attraction_mean"] = reward.mean()
+    log["Metrics/toe_riser_slab_second_layer_attraction_phase"] = (
       attraction_phase.float().mean()
     )
-    env.extras["log"]["Metrics/toe_riser_slab_second_layer_progress_mean"] = (
-      env_progress.mean()
-    )
+    log["Metrics/toe_riser_slab_second_layer_progress_mean"] = env_progress.mean()
     return reward
 
   def __call__(
@@ -1065,12 +1113,18 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         point_layers = torch.where(fallback_mask, full_layers, point_layers)
 
     penalty = torch.sum(point_penalty, dim=(1, 2))
-    raw_penalty = penalty
+    protected_penalty = torch.zeros_like(penalty)
+    effective_point_penalty = penalty
+    contact_penalty = torch.zeros_like(penalty)
+    probe_reward = torch.zeros_like(penalty)
+    attraction_reward = torch.zeros_like(penalty)
+    raw_penalty = effective_point_penalty
 
     active_count = active.float().sum().clamp_min(1.0)
     impact_speed_mean = torch.sum(impact_speed_per_point * active.float())
     impact_speed_mean = impact_speed_mean / active_count
     env.extras["log"]["Metrics/toe_riser_slab_penalty_mean"] = penalty.mean()
+    env.extras["log"]["Metrics/toe_riser_slab_point_penalty_mean"] = penalty.mean()
     env.extras["log"]["Metrics/toe_riser_slab_active_ratio"] = active.float().mean()
     env.extras["log"]["Metrics/toe_riser_slab_impact_speed_mean"] = impact_speed_mean
     env.extras["log"]["Metrics/toe_riser_slab_nearest_fallback_ratio"] = fallback_ratio
@@ -1101,7 +1155,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
           ),
           dim=(1, 2),
         )
-        raw_penalty = raw_penalty - protected_penalty
+      effective_point_penalty = penalty - protected_penalty
       contact_penalty, probe_reward = self._contact_probe_terms(
         env,
         contact_sensor_name,
@@ -1133,14 +1187,43 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         second_layer_attraction_v_margin,
         surface_tol,
       )
-      raw_penalty = raw_penalty + contact_penalty - probe_reward - attraction_reward
+      raw_penalty = (
+        effective_point_penalty + contact_penalty - probe_reward - attraction_reward
+      )
       env.extras["log"]["Metrics/toe_riser_slab_probe_active_ratio"] = (
         probe_phase.float().mean()
       )
       env.extras["log"]["Metrics/toe_riser_slab_probe_slab_neutral_ratio"] = (
         protected_probe_points.float().mean()
       )
-      env.extras["log"]["Metrics/toe_riser_slab_raw_mean"] = raw_penalty.mean()
+    else:
+      zero = torch.zeros((), device=env.device)
+      env.extras["log"]["Metrics/toe_riser_slab_contact_penalty_mean"] = zero
+      env.extras["log"]["Metrics/toe_riser_slab_probe_reward_mean"] = zero
+      env.extras["log"]["Metrics/toe_riser_slab_probe_count_mean"] = zero
+      env.extras["log"]["Metrics/toe_riser_slab_probe_layer1_hit_ratio"] = zero
+      env.extras["log"]["Metrics/toe_riser_slab_probe_layer2_hit_ratio"] = zero
+      env.extras["log"]["Metrics/toe_riser_slab_contact_time_mean"] = zero
+      env.extras["log"]["Metrics/toe_riser_slab_second_layer_attraction_mean"] = zero
+      env.extras["log"]["Metrics/toe_riser_slab_second_layer_attraction_phase"] = zero
+      env.extras["log"]["Metrics/toe_riser_slab_second_layer_progress_mean"] = zero
+      env.extras["log"]["Metrics/toe_riser_slab_probe_active_ratio"] = zero
+      env.extras["log"]["Metrics/toe_riser_slab_probe_slab_neutral_ratio"] = zero
+
+    env.extras["log"]["Metrics/toe_riser_slab_protected_point_penalty_mean"] = (
+      protected_penalty.mean()
+    )
+    env.extras["log"]["Metrics/toe_riser_slab_effective_point_penalty_mean"] = (
+      effective_point_penalty.mean()
+    )
+    env.extras["log"]["Metrics/toe_riser_slab_contact_penalty_mean"] = (
+      contact_penalty.mean()
+    )
+    env.extras["log"]["Metrics/toe_riser_slab_probe_reward_mean"] = probe_reward.mean()
+    env.extras["log"]["Metrics/toe_riser_slab_second_layer_attraction_mean"] = (
+      attraction_reward.mean()
+    )
+    env.extras["log"]["Metrics/toe_riser_slab_raw_mean"] = raw_penalty.mean()
 
     return raw_penalty
 

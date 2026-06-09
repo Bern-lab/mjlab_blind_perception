@@ -156,6 +156,7 @@ class G1SlowLatentRewardParams:
   foot_lip_edge_radius: float = 0.07
   foot_lip_edge_height_band: float = 0.06
   foot_lip_support_speed_floor: float = 0.08
+  foot_lip_ignore_boundary_layers: int = 2
   toe_slab_weight: float = -4.2
   toe_slab_depth: float = 0.10
   toe_slab_u_margin: float = 0.02
@@ -446,6 +447,7 @@ def _configure_slow_latent_rewards(
       "edge_radius": params.foot_lip_edge_radius,
       "edge_height_band": params.foot_lip_edge_height_band,
       "support_speed_floor": params.foot_lip_support_speed_floor,
+      "ignore_boundary_layers": params.foot_lip_ignore_boundary_layers,
       "nearest_boundaries": params.nearest_boundaries,
       "contact_sensor_name": "feet_ground_contact",
       "min_terrain_level": params.min_terrain_level,
