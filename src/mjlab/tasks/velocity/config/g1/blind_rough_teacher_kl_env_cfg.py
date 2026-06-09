@@ -29,6 +29,8 @@ from .blind_rough_toe_contact_cfg import (
 )
 from .env_cfgs import (
   UniformVelocityCommandCfg,
+  configure_g1_high_stairs_play_randomization,
+  configure_g1_high_stairs_play_terrain_generator,
   unitree_g1_rough_env_cfg,
 )
 
@@ -78,20 +80,7 @@ def _add_target_flat_patch_sampling(
 def _teacherkl_play_terrain_cfg():
   # 5.9: high-stairs terrain; previous: rough terrain
   terrain_cfg = deepcopy(BLIND_HIGH_STAIRS_TERRAINS_CFG)
-  terrain_cfg.curriculum = False
-  terrain_cfg.num_rows = 5
-  terrain_cfg.num_cols = 5
-  terrain_cfg.border_width = 10.0
-
-  for terrain_name in ("high_stairs", "high_stairs_inv"):
-    sub_terrain = terrain_cfg.sub_terrains[terrain_name]
-    assert isinstance(
-      sub_terrain,
-      BoxPyramidStairsTerrainCfg | BoxInvertedPyramidStairsTerrainCfg,
-    )
-    sub_terrain.step_height_range = (0.14, 0.14)
-
-  return terrain_cfg
+  return configure_g1_high_stairs_play_terrain_generator(terrain_cfg)
 
 
 def _configure_teacherkl_student_env(cfg: ManagerBasedRlEnvCfg, play: bool) -> None:
@@ -275,7 +264,7 @@ def _configure_teacherkl_target_navigation(
     },
   )
 
-  # Randomize step width per terrain tile within [0.30, 0.35].
+  # Randomize step width per terrain tile within [0.25, 0.35].
   terrain_gen = cfg.scene.terrain.terrain_generator
   for name in ("high_stairs", "high_stairs_inv"):
     sub = terrain_gen.sub_terrains.get(name)
@@ -283,7 +272,7 @@ def _configure_teacherkl_target_navigation(
       sub,
       BoxPyramidStairsTerrainCfg | BoxInvertedPyramidStairsTerrainCfg,
     ):
-      sub.step_width_range = (0.30, 0.35)
+      sub.step_width_range = (0.25, 0.35)
 
 
 def _reset_teacher_term_temporal_state(term: ObservationTermCfg) -> None:
@@ -388,6 +377,7 @@ def unitree_g1_blind_rough_teacherkl_env_cfg(
     twist_cmd.ranges.lin_vel_y = (0.0, 0.0)
     twist_cmd.ranges.ang_vel_z = (-0.5, 0.5)
   if play:
+    configure_g1_high_stairs_play_randomization(cfg)
     configure_blind_teacherkl_play_visualization(cfg)
 
   return cfg

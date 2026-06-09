@@ -3,16 +3,10 @@
 from copy import deepcopy
 
 from mjlab.envs import ManagerBasedRlEnvCfg
-from mjlab.envs import mdp as envs_mdp
-from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.tasks.velocity import mdp
 from mjlab.terrains.config import BLIND_HIGH_STAIRS_TERRAINS_CFG
-from mjlab.terrains.primitive_terrains import (
-  BoxInvertedPyramidStairsTerrainCfg,
-  BoxPyramidStairsTerrainCfg,
-)
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
 from .blind_rough_teacher_kl_env_cfg import (
@@ -26,26 +20,15 @@ from .blind_rough_toe_contact_cfg import (
 )
 from .env_cfgs import (
   UniformVelocityCommandCfg,
+  configure_g1_high_stairs_play_randomization,
+  configure_g1_high_stairs_play_terrain_generator,
   unitree_g1_rough_env_cfg,
 )
 
 
 def _lstm_teacherkl_play_terrain_cfg():
   terrain_cfg = deepcopy(BLIND_HIGH_STAIRS_TERRAINS_CFG)
-  terrain_cfg.curriculum = False
-  terrain_cfg.num_rows = 5
-  terrain_cfg.num_cols = 5
-  terrain_cfg.border_width = 10.0
-
-  for terrain_name in ("high_stairs", "high_stairs_inv"):
-    sub_terrain = terrain_cfg.sub_terrains[terrain_name]
-    assert isinstance(
-      sub_terrain,
-      BoxPyramidStairsTerrainCfg | BoxInvertedPyramidStairsTerrainCfg,
-    )
-    sub_terrain.step_height_range = (0.14, 0.14)
-
-  return terrain_cfg
+  return configure_g1_high_stairs_play_terrain_generator(terrain_cfg)
 
 
 def _configure_lstm_teacherkl_student_env(
@@ -138,14 +121,7 @@ def _configure_lstm_teacherkl_play_env(cfg: ManagerBasedRlEnvCfg) -> None:
   cfg.curriculum = {}
 
   cfg.events.pop("randomize_terrain", None)
-  cfg.events = {
-    "randomize_terrain": EventTermCfg(
-      func=envs_mdp.randomize_terrain,
-      mode="reset",
-      params={},
-    ),
-    **cfg.events,
-  }
+  configure_g1_high_stairs_play_randomization(cfg)
   configure_blind_teacherkl_play_visualization(cfg)
 
 

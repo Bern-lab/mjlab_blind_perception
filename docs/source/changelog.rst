@@ -50,10 +50,18 @@ Added
 Changed
 ^^^^^^^
 
-- Slow-latent G1 stair navigation now shapes ``toe_step_riser_slab_penalty``
-  with toe-riser contact duration: early probing contacts can be rewarded,
-  while later true toe/riser collisions add contact-time-scaled penalty on
-  top of the existing danger-zone penalty.
+- G1 high-stair curriculum tasks now enable mixed terrain replay after
+  reaching high levels, sampling low/mid/high stair rows at a 20/30/50 ratio.
+- G1 high-stair terrains now randomize stair step depth per tile from
+  25 cm to 35 cm across curriculum difficulty rows.
+- G1 high-stair play terrain randomization now uses the same low/mid/high
+  level ratio as mixed replay while preserving randomized stair depth.
+- Slow-latent G1 stair navigation now rewards the first true toe/riser
+  contact once on each of the first and second stair layers. Repeated
+  contacts on those two layers are neutral, while later riser contacts keep
+  the contact-time-scaled penalty. After the first layer is contacted, a
+  progress-shaped attraction reward encourages toe motion toward the second
+  layer riser until that second-layer contact occurs.
 - Actuator delay is now configured inline on any ``ActuatorCfg`` subclass
   (e.g. ``BuiltinPositionActuatorCfg(..., delay_min_lag=2, delay_max_lag=5)``)
   instead of wrapping with ``DelayedActuatorCfg``. ``DelayedActuator``,

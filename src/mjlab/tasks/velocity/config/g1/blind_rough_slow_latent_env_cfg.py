@@ -18,6 +18,12 @@ from mjlab.terrains import StepDangerVisualizationCfg
 
 from .blind_rough_teacher_kl_env_cfg import unitree_g1_blind_rough_teacherkl_env_cfg
 from .blind_rough_toe_contact_cfg import TOE_TERRAIN_CONTACT_SENSOR, g1_foot_body_cfg
+from .env_cfgs import (
+  G1_HIGH_STAIRS_MIXED_REPLAY_LEVEL_RANGES,
+  G1_HIGH_STAIRS_MIXED_REPLAY_START_LEVEL,
+  G1_HIGH_STAIRS_MIXED_REPLAY_WEIGHTS,
+  configure_g1_high_stairs_mixed_replay,
+)
 
 
 @dataclass(frozen=True)
@@ -52,11 +58,100 @@ class G1SlowLatentTargetCommandParams:
 
 @dataclass(frozen=True)
 class G1SlowLatentRewardParams:
-  """Step-boundary danger-zone reward parameters for the slow-latent task."""
+  """All reward weights and key parameters for the slow-latent task."""
 
+  # Velocity and posture tracking.
+  track_linear_velocity_weight: float = 2.0
+  track_linear_velocity_std: float = 0.5
+  track_angular_velocity_weight: float = 2.0
+  track_angular_velocity_std: float = 0.7071067811865476
+  upright_weight: float = 1.0
+  upright_std: float = 0.4472135954999579
+  pose_weight: float = 1.0
+  pose_walking_threshold: float = 0.05
+  pose_running_threshold: float = 1.5
+  pose_std_standing: dict[str, float] = field(
+    default_factory=lambda: {
+      ".*": 0.05,
+    }
+  )
+  pose_std_walking: dict[str, float] = field(
+    default_factory=lambda: {
+      r".*hip_pitch.*": 0.4,
+      r".*hip_roll.*": 0.15,
+      r".*hip_yaw.*": 0.15,
+      r".*knee.*": 0.45,
+      r".*ankle_pitch.*": 0.20,
+      r".*ankle_roll.*": 0.1,
+      r".*waist_yaw.*": 0.2,
+      r".*waist_roll.*": 0.08,
+      r".*waist_pitch.*": 0.1,
+      r".*shoulder_pitch.*": 0.15,
+      r".*shoulder_roll.*": 0.15,
+      r".*shoulder_yaw.*": 0.1,
+      r".*elbow.*": 0.15,
+      r".*wrist.*": 0.3,
+    }
+  )
+  pose_std_running: dict[str, float] = field(
+    default_factory=lambda: {
+      r".*hip_pitch.*": 0.5,
+      r".*hip_roll.*": 0.2,
+      r".*hip_yaw.*": 0.2,
+      r".*knee.*": 0.6,
+      r".*ankle_pitch.*": 0.35,
+      r".*ankle_roll.*": 0.15,
+      r".*waist_yaw.*": 0.3,
+      r".*waist_roll.*": 0.08,
+      r".*waist_pitch.*": 0.2,
+      r".*shoulder_pitch.*": 0.5,
+      r".*shoulder_roll.*": 0.2,
+      r".*shoulder_yaw.*": 0.15,
+      r".*elbow.*": 0.35,
+      r".*wrist.*": 0.3,
+    }
+  )
+
+  # Foot placement, gait, and stance-shape rewards.
+  foot_clearance_weight: float = -2.0
+  foot_clearance_min_height: float = 0.10
+  foot_clearance_max_height: float = 0.25
+  foot_clearance_command_threshold: float = 0.0
+  foot_swing_height_weight: float = -0.25
+  foot_swing_target_height: float = 0.10
+  foot_swing_command_threshold: float = 0.01
+  foot_slip_weight: float = -0.2
+  foot_slip_command_threshold: float = 0.05
+  soft_landing_weight: float = -2.0e-5
+  soft_landing_command_threshold: float = 0.05
+  idle_penalty_weight: float = -2.0
+  idle_command_threshold: float = 0.2
+  idle_velocity_threshold: float = 0.1
+  foot_gait_weight: float = 0.5
+  foot_gait_period: float = 0.6
+  foot_gait_offset: tuple[float, float] = (0.0, 0.5)
+  foot_gait_threshold: float = 0.56
+  foot_gait_command_threshold: float = 0.1
+  base_height_above_support_weight: float = -0.5
+  base_height_above_support_min_height: float = 0.74
+  base_height_above_support_error_scale: float = 10.0
+
+  # Safety and smoothness regularizers.
+  body_ang_vel_weight: float = -0.08
+  angular_momentum_weight: float = -0.03
+  joint_pos_limits_weight: float = -1.0
+  action_rate_l2_weight: float = -0.15
+  self_collisions_weight: float = -1.0
+  self_collision_force_threshold: float = 10.0
+  joint_acc_l2_weight: float = -2.5e-7
+  action_acc_l2_weight: float = -0.05
+
+  # Target-navigation rewards.
   target_progress_weight: float = 0.8
   target_progress_min_distance: float = 0.05
   target_reached_bonus_weight: float = 0.4
+
+  # Step-boundary danger-zone rewards.
   foot_lip_weight: float = -3.2
   foot_lip_edge_radius: float = 0.07
   foot_lip_edge_height_band: float = 0.06
@@ -78,11 +173,16 @@ class G1SlowLatentRewardParams:
   toe_contact_vertical_normal_z_max: float = 0.4
   toe_contact_forward_velocity_threshold: float = 0.05
   toe_probe_contact_count: int = 2
-  toe_probe_slab_reward_scale: float = 0.35
+  # Kept for older configs; layer probing now rewards first contact only.
+  toe_probe_slab_reward_scale: float = 0.0
   toe_probe_contact_reward: float = 0.08
-  toe_probe_min_progress: float = 0.08
-  toe_probe_max_safe_force: float | None = 45.0
+  toe_probe_min_progress: float = 0.0
+  toe_probe_max_safe_force: float | None = None
   toe_probe_cooldown_time: float = 0.20
+  toe_second_layer_attraction_reward: float = 0.06
+  toe_second_layer_attraction_distance: float = 0.35
+  toe_second_layer_attraction_u_margin: float = 0.04
+  toe_second_layer_attraction_v_margin: float = 0.08
   toe_probe_min_ascent_height: float = 0.03
   toe_probe_ascent_velocity_threshold: float = 0.03
 
@@ -119,6 +219,18 @@ class G1SlowLatentPlayVisualizationParams:
 
 
 @dataclass(frozen=True)
+class G1SlowLatentTerrainReplayParams:
+  """Mixed stair-level replay parameters for late curriculum training."""
+
+  start_level: int | None = G1_HIGH_STAIRS_MIXED_REPLAY_START_LEVEL
+  """First terrain level that permanently activates mixed replay for an env."""
+  level_ranges: tuple[tuple[int, int], ...] = G1_HIGH_STAIRS_MIXED_REPLAY_LEVEL_RANGES
+  """Inclusive low/mid/high terrain-level buckets sampled during replay."""
+  weights: tuple[float, ...] = G1_HIGH_STAIRS_MIXED_REPLAY_WEIGHTS
+  """Replay bucket weights, e.g. low/mid/high = 0.2/0.3/0.5."""
+
+
+@dataclass(frozen=True)
 class G1SlowLatentEnvParams:
   """Top-level knobs for the slow-latent environment config."""
 
@@ -139,9 +251,13 @@ class G1SlowLatentEnvParams:
   )
   """Target-heading command distribution and play overrides."""
   rewards: G1SlowLatentRewardParams = field(default_factory=G1SlowLatentRewardParams)
-  """Target progress and step-boundary danger reward parameters."""
+  """All slow-latent reward weights and key reward parameters."""
   labels: G1SlowLatentLabelParams = field(default_factory=G1SlowLatentLabelParams)
   """Auxiliary label thresholds for slow-latent training."""
+  terrain_replay: G1SlowLatentTerrainReplayParams = field(
+    default_factory=G1SlowLatentTerrainReplayParams
+  )
+  """Late-curriculum mixed terrain replay schedule."""
   play_visualization: G1SlowLatentPlayVisualizationParams = field(
     default_factory=G1SlowLatentPlayVisualizationParams
   )
@@ -183,14 +299,139 @@ def _configure_target_command(
     twist_cmd.target_tile_radius = params.play_target_tile_radius
 
 
-def _configure_step_boundary_rewards(
+def _configure_slow_latent_rewards(
   cfg: ManagerBasedRlEnvCfg, params: G1SlowLatentRewardParams
 ) -> None:
+  def torso_body_cfg() -> SceneEntityCfg:
+    return SceneEntityCfg("robot", body_names=("torso_link",))
+
   def foot_asset_cfg() -> SceneEntityCfg:
     return SceneEntityCfg(
       "robot",
       body_names=("left_ankle_roll_link", "right_ankle_roll_link"),
     )
+
+  def foot_site_cfg() -> SceneEntityCfg:
+    return SceneEntityCfg("robot", site_names=("left_foot", "right_foot"))
+
+  cfg.rewards["track_linear_velocity"].weight = params.track_linear_velocity_weight
+  cfg.rewards["track_linear_velocity"].params.update(
+    {
+      "command_name": "twist",
+      "std": params.track_linear_velocity_std,
+    }
+  )
+  cfg.rewards["track_angular_velocity"].weight = params.track_angular_velocity_weight
+  cfg.rewards["track_angular_velocity"].params.update(
+    {
+      "command_name": "twist",
+      "std": params.track_angular_velocity_std,
+    }
+  )
+  cfg.rewards["upright"].weight = params.upright_weight
+  cfg.rewards["upright"].params.update(
+    {
+      "std": params.upright_std,
+      "asset_cfg": torso_body_cfg(),
+    }
+  )
+  cfg.rewards["pose"].weight = params.pose_weight
+  cfg.rewards["pose"].params.update(
+    {
+      "command_name": "twist",
+      "walking_threshold": params.pose_walking_threshold,
+      "running_threshold": params.pose_running_threshold,
+      "std_standing": dict(params.pose_std_standing),
+      "std_walking": dict(params.pose_std_walking),
+      "std_running": dict(params.pose_std_running),
+    }
+  )
+
+  cfg.rewards["foot_clearance"].weight = params.foot_clearance_weight
+  cfg.rewards["foot_clearance"].params.update(
+    {
+      "command_name": "twist",
+      "command_threshold": params.foot_clearance_command_threshold,
+      "height_sensor_name": "foot_height_scan",
+      "min_height": params.foot_clearance_min_height,
+      "max_height": params.foot_clearance_max_height,
+      "asset_cfg": foot_site_cfg(),
+    }
+  )
+  cfg.rewards["foot_swing_height"].weight = params.foot_swing_height_weight
+  cfg.rewards["foot_swing_height"].params.update(
+    {
+      "command_name": "twist",
+      "command_threshold": params.foot_swing_command_threshold,
+      "height_sensor_name": "foot_height_scan",
+      "sensor_name": "feet_ground_contact",
+      "target_height": params.foot_swing_target_height,
+    }
+  )
+  cfg.rewards["foot_slip"].weight = params.foot_slip_weight
+  cfg.rewards["foot_slip"].params.update(
+    {
+      "command_name": "twist",
+      "command_threshold": params.foot_slip_command_threshold,
+      "sensor_name": "feet_ground_contact",
+      "asset_cfg": foot_site_cfg(),
+    }
+  )
+  cfg.rewards["soft_landing"].weight = params.soft_landing_weight
+  cfg.rewards["soft_landing"].params.update(
+    {
+      "command_name": "twist",
+      "command_threshold": params.soft_landing_command_threshold,
+      "sensor_name": "feet_ground_contact",
+    }
+  )
+  cfg.rewards["idle_penalty"].weight = params.idle_penalty_weight
+  cfg.rewards["idle_penalty"].params.update(
+    {
+      "command_name": "twist",
+      "command_threshold": params.idle_command_threshold,
+      "velocity_threshold": params.idle_velocity_threshold,
+    }
+  )
+  cfg.rewards["foot_gait"].weight = params.foot_gait_weight
+  cfg.rewards["foot_gait"].params.update(
+    {
+      "command_name": "twist",
+      "command_threshold": params.foot_gait_command_threshold,
+      "sensor_name": "feet_ground_contact",
+      "period": params.foot_gait_period,
+      "offset": list(params.foot_gait_offset),
+      "threshold": params.foot_gait_threshold,
+    }
+  )
+  cfg.rewards[
+    "base_height_above_support"
+  ].weight = params.base_height_above_support_weight
+  cfg.rewards["base_height_above_support"].params.update(
+    {
+      "height_sensor_name": "foot_height_scan",
+      "contact_sensor_name": "feet_ground_contact",
+      "min_height": params.base_height_above_support_min_height,
+      "error_scale": params.base_height_above_support_error_scale,
+      "asset_cfg": foot_site_cfg(),
+    }
+  )
+
+  cfg.rewards["body_ang_vel"].weight = params.body_ang_vel_weight
+  cfg.rewards["body_ang_vel"].params["asset_cfg"] = torso_body_cfg()
+  cfg.rewards["angular_momentum"].weight = params.angular_momentum_weight
+  cfg.rewards["angular_momentum"].params["sensor_name"] = "robot/root_angmom"
+  cfg.rewards["dof_pos_limits"].weight = params.joint_pos_limits_weight
+  cfg.rewards["action_rate_l2"].weight = params.action_rate_l2_weight
+  cfg.rewards["self_collisions"].weight = params.self_collisions_weight
+  cfg.rewards["self_collisions"].params.update(
+    {
+      "sensor_name": "self_collision",
+      "force_threshold": params.self_collision_force_threshold,
+    }
+  )
+  cfg.rewards["joint_acc_l2"].weight = params.joint_acc_l2_weight
+  cfg.rewards["action_acc_l2"].weight = params.action_acc_l2_weight
 
   cfg.rewards["target_progress"].weight = params.target_progress_weight
   cfg.rewards["target_progress"].params["min_distance"] = (
@@ -239,6 +480,10 @@ def _configure_step_boundary_rewards(
       "probe_min_progress": params.toe_probe_min_progress,
       "probe_max_safe_force": params.toe_probe_max_safe_force,
       "probe_cooldown_time": params.toe_probe_cooldown_time,
+      "second_layer_attraction_reward": params.toe_second_layer_attraction_reward,
+      "second_layer_attraction_distance": params.toe_second_layer_attraction_distance,
+      "second_layer_attraction_u_margin": params.toe_second_layer_attraction_u_margin,
+      "second_layer_attraction_v_margin": params.toe_second_layer_attraction_v_margin,
       "min_ascent_height": params.toe_probe_min_ascent_height,
       "ascent_velocity_threshold": params.toe_probe_ascent_velocity_threshold,
       "asset_cfg": foot_asset_cfg(),
@@ -355,6 +600,7 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_env_cfg(
       target_command=params.target_command,
       rewards=params.rewards,
       labels=params.labels,
+      terrain_replay=params.terrain_replay,
       play_visualization=params.play_visualization,
     )
 
@@ -363,8 +609,15 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_env_cfg(
     use_target_navigation=True,
   )
   cfg.observations["actor"].history_length = params.actor_history_length
+  if not play:
+    configure_g1_high_stairs_mixed_replay(
+      cfg,
+      start_level=params.terrain_replay.start_level,
+      level_ranges=params.terrain_replay.level_ranges,
+      weights=params.terrain_replay.weights,
+    )
   _configure_target_command(cfg, params.target_command, play)
-  _configure_step_boundary_rewards(cfg, params.rewards)
+  _configure_slow_latent_rewards(cfg, params.rewards)
   _configure_latent_observations(cfg, params)
   if play:
     _configure_slow_latent_play_visualization(
