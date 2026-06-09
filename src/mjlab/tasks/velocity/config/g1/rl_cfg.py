@@ -13,9 +13,7 @@ from mjlab.rl import (
 )
 
 G1_TEACHER_KL_CHECKPOINT = (
-  "logs/rsl_rl/g1_velocity_target_heading_teacher_depth/"
-  "Mjlab-Velocity-TargetHeading-Rough-Teacher-Unitree-G1/"
-  "2026-05-21_11-54-52_rollback_29750/model_118200.pt"
+  "teacher_policies/g1_target_heading_depth_teacher/model_118200.pt"
 )
 G1_LSTM_TEACHER_KL_NUM_STEPS_PER_ENV = 36
 
@@ -57,7 +55,7 @@ class G1SlowLatentPolicyModelParams:
   """EMA update rate in normal fast-update mode."""
   alpha_write: float = 0.8
   """EMA update rate while writing stair evidence into memory."""
-  alpha_hold: float = 0.01#原本0.02
+  alpha_hold: float = 0.01  # 原本0.02
   """EMA update rate while holding stair memory."""
   write_steps: int = 2
   """Number of steps spent in write mode after an event trigger."""
