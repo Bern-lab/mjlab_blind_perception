@@ -117,7 +117,7 @@ class G1SlowLatentRewardParams:
   foot_clearance_min_height: float = 0.10
   foot_clearance_max_height: float = 0.25
   foot_clearance_command_threshold: float = 0.0
-  foot_swing_height_weight: float = -0.25
+  foot_swing_height_weight: float = -0.75#0.25
   foot_swing_target_height: float = 0.10
   foot_swing_command_threshold: float = 0.01
   foot_slip_weight: float = -0.2
@@ -180,7 +180,7 @@ class G1SlowLatentRewardParams:
   toe_probe_min_progress: float = 0.0
   toe_probe_max_safe_force: float | None = None
   toe_probe_cooldown_time: float = 0.20
-  toe_second_layer_attraction_reward: float = 0.06
+  toe_second_layer_attraction_reward: float = 0.06#0.06
   toe_second_layer_attraction_distance: float = 0.35
   toe_second_layer_attraction_u_margin: float = 0.04
   toe_second_layer_attraction_v_margin: float = 0.08
