@@ -336,9 +336,9 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert toe_reward_params["contact_penalty_scale"] == 0.5
   assert toe_reward_params["probe_contact_count"] == 2
   assert toe_reward_params["probe_slab_reward_scale"] == 0.0
-  assert toe_reward_params["probe_contact_reward"] == 0.08
-  assert toe_reward_params["second_layer_attraction_reward"] == 0.06
-  assert toe_reward_params["second_layer_attraction_distance"] == 0.35
+  assert toe_reward_params["probe_contact_reward"] == 0.20
+  assert toe_reward_params["second_layer_attraction_reward"] == 0.15
+  assert toe_reward_params["second_layer_attraction_distance"] == 0.55
   toe_sensor_cfg = cast(
     ContactSensorCfg,
     next(
