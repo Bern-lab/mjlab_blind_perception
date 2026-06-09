@@ -9,9 +9,7 @@ from mjlab.asset_zoo.robots import (
   get_g1_robot_cfg,
 )
 from mjlab.envs import ManagerBasedRlEnvCfg
-from mjlab.envs import mdp as envs_mdp
 from mjlab.envs.mdp.actions import JointPositionActionCfg
-from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
@@ -36,9 +34,11 @@ from mjlab.tasks.velocity.mdp.velocity_command import UniformVelocityCommandCfg
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 from mjlab.terrains import FlatPatchSamplingCfg, TerrainGeneratorCfg
 from mjlab.terrains.config import BLIND_HIGH_STAIRS_TERRAINS_CFG
-from mjlab.terrains.primitive_terrains import (
-  BoxInvertedPyramidStairsTerrainCfg,
-  BoxPyramidStairsTerrainCfg,
+
+from .env_cfgs import (
+  configure_g1_high_stairs_mixed_replay,
+  configure_g1_high_stairs_play_randomization,
+  configure_g1_high_stairs_play_terrain_generator,
 )
 
 
@@ -84,20 +84,7 @@ def _add_target_flat_patch_sampling(
 
 def _target_heading_play_terrain_cfg() -> TerrainGeneratorCfg:
   terrain_cfg = deepcopy(BLIND_HIGH_STAIRS_TERRAINS_CFG)
-  terrain_cfg.curriculum = False
-  terrain_cfg.num_rows = 5
-  terrain_cfg.num_cols = 5
-  terrain_cfg.border_width = 10.0
-
-  for terrain_name in ("high_stairs", "high_stairs_inv"):
-    sub_terrain = terrain_cfg.sub_terrains[terrain_name]
-    assert isinstance(
-      sub_terrain,
-      BoxPyramidStairsTerrainCfg | BoxInvertedPyramidStairsTerrainCfg,
-    )
-    sub_terrain.step_height_range = (0.14, 0.14)
-
-  return terrain_cfg
+  return configure_g1_high_stairs_play_terrain_generator(terrain_cfg)
 
 
 def _disable_observation_noise_and_delay(cfg: ManagerBasedRlEnvCfg) -> None:
@@ -246,6 +233,8 @@ def unitree_g1_target_heading_teacher_env_cfg(
       else deepcopy(BLIND_HIGH_STAIRS_TERRAINS_CFG)
     )
     cfg.scene.terrain.max_init_terrain_level = 2
+  if not play:
+    configure_g1_high_stairs_mixed_replay(cfg)
 
   joint_pos_action = cfg.actions["joint_pos"]
   assert isinstance(joint_pos_action, JointPositionActionCfg)
@@ -354,19 +343,7 @@ def unitree_g1_target_heading_teacher_env_cfg(
     cfg.events.pop("push_robot", None)
     cfg.terminations.pop("out_of_terrain_bounds", None)
     cfg.curriculum = {}
-    cfg.events["randomize_terrain"] = EventTermCfg(
-      func=envs_mdp.randomize_terrain,
-      mode="reset",
-      params={},
-    )
-
-    if (
-      cfg.scene.terrain is not None and cfg.scene.terrain.terrain_generator is not None
-    ):
-      cfg.scene.terrain.terrain_generator.curriculum = False
-      cfg.scene.terrain.terrain_generator.num_cols = 5
-      cfg.scene.terrain.terrain_generator.num_rows = 5
-      cfg.scene.terrain.terrain_generator.border_width = 10.0
+    configure_g1_high_stairs_play_randomization(cfg)
 
   history_terms = (
     "base_ang_vel",

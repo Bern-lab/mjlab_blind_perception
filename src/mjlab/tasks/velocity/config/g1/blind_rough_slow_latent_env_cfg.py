@@ -18,6 +18,12 @@ from mjlab.terrains import StepDangerVisualizationCfg
 
 from .blind_rough_teacher_kl_env_cfg import unitree_g1_blind_rough_teacherkl_env_cfg
 from .blind_rough_toe_contact_cfg import TOE_TERRAIN_CONTACT_SENSOR, g1_foot_body_cfg
+from .env_cfgs import (
+  G1_HIGH_STAIRS_MIXED_REPLAY_LEVEL_RANGES,
+  G1_HIGH_STAIRS_MIXED_REPLAY_START_LEVEL,
+  G1_HIGH_STAIRS_MIXED_REPLAY_WEIGHTS,
+  configure_g1_high_stairs_mixed_replay,
+)
 
 
 @dataclass(frozen=True)
@@ -78,10 +84,11 @@ class G1SlowLatentRewardParams:
   toe_contact_vertical_normal_z_max: float = 0.4
   toe_contact_forward_velocity_threshold: float = 0.05
   toe_probe_contact_count: int = 2
-  toe_probe_slab_reward_scale: float = 0.35
+  # Kept for older configs; layer probing now rewards first contact only.
+  toe_probe_slab_reward_scale: float = 0.0
   toe_probe_contact_reward: float = 0.08
-  toe_probe_min_progress: float = 0.08
-  toe_probe_max_safe_force: float | None = 45.0
+  toe_probe_min_progress: float = 0.0
+  toe_probe_max_safe_force: float | None = None
   toe_probe_cooldown_time: float = 0.20
   toe_probe_min_ascent_height: float = 0.03
   toe_probe_ascent_velocity_threshold: float = 0.03
@@ -119,6 +126,18 @@ class G1SlowLatentPlayVisualizationParams:
 
 
 @dataclass(frozen=True)
+class G1SlowLatentTerrainReplayParams:
+  """Mixed stair-level replay parameters for late curriculum training."""
+
+  start_level: int | None = G1_HIGH_STAIRS_MIXED_REPLAY_START_LEVEL
+  """First terrain level that permanently activates mixed replay for an env."""
+  level_ranges: tuple[tuple[int, int], ...] = G1_HIGH_STAIRS_MIXED_REPLAY_LEVEL_RANGES
+  """Inclusive low/mid/high terrain-level buckets sampled during replay."""
+  weights: tuple[float, ...] = G1_HIGH_STAIRS_MIXED_REPLAY_WEIGHTS
+  """Replay bucket weights, e.g. low/mid/high = 0.2/0.3/0.5."""
+
+
+@dataclass(frozen=True)
 class G1SlowLatentEnvParams:
   """Top-level knobs for the slow-latent environment config."""
 
@@ -142,6 +161,10 @@ class G1SlowLatentEnvParams:
   """Target progress and step-boundary danger reward parameters."""
   labels: G1SlowLatentLabelParams = field(default_factory=G1SlowLatentLabelParams)
   """Auxiliary label thresholds for slow-latent training."""
+  terrain_replay: G1SlowLatentTerrainReplayParams = field(
+    default_factory=G1SlowLatentTerrainReplayParams
+  )
+  """Late-curriculum mixed terrain replay schedule."""
   play_visualization: G1SlowLatentPlayVisualizationParams = field(
     default_factory=G1SlowLatentPlayVisualizationParams
   )
@@ -355,6 +378,7 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_env_cfg(
       target_command=params.target_command,
       rewards=params.rewards,
       labels=params.labels,
+      terrain_replay=params.terrain_replay,
       play_visualization=params.play_visualization,
     )
 
@@ -363,6 +387,13 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_env_cfg(
     use_target_navigation=True,
   )
   cfg.observations["actor"].history_length = params.actor_history_length
+  if not play:
+    configure_g1_high_stairs_mixed_replay(
+      cfg,
+      start_level=params.terrain_replay.start_level,
+      level_ranges=params.terrain_replay.level_ranges,
+      weights=params.terrain_replay.weights,
+    )
   _configure_target_command(cfg, params.target_command, play)
   _configure_step_boundary_rewards(cfg, params.rewards)
   _configure_latent_observations(cfg, params)

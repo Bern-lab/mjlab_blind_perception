@@ -28,36 +28,90 @@ from mjlab.tasks.velocity.mdp import (
   UniformVelocityCommandCfg,
 )
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
-from mjlab.terrains import FlatPatchSamplingCfg
+from mjlab.terrains import FlatPatchSamplingCfg, TerrainGeneratorCfg
 from mjlab.terrains.config import BLIND_HIGH_STAIRS_TERRAINS_CFG
-from mjlab.terrains.primitive_terrains import (
-  BoxInvertedPyramidStairsTerrainCfg,
-  BoxPyramidStairsTerrainCfg,
-)
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
 from .blind_rough_toe_contact_cfg import (
   configure_g1_toe_riser_contact_memory_penalty,
 )
 
+G1_HIGH_STAIRS_MIXED_REPLAY_START_LEVEL = 8
+G1_HIGH_STAIRS_MIXED_REPLAY_LEVEL_RANGES = ((0, 2), (3, 5), (6, 9))
+G1_HIGH_STAIRS_MIXED_REPLAY_WEIGHTS = (0.2, 0.3, 0.5)
+G1_HIGH_STAIRS_PLAY_NUM_ROWS = 10
+
+
+def configure_g1_high_stairs_mixed_replay(
+  cfg: ManagerBasedRlEnvCfg,
+  start_level: int | None = G1_HIGH_STAIRS_MIXED_REPLAY_START_LEVEL,
+  level_ranges: tuple[tuple[int, int], ...] = (
+    G1_HIGH_STAIRS_MIXED_REPLAY_LEVEL_RANGES
+  ),
+  weights: tuple[float, ...] = G1_HIGH_STAIRS_MIXED_REPLAY_WEIGHTS,
+) -> None:
+  """Enable high-level stair replay on the shared terrain curriculum."""
+  terrain_levels = cfg.curriculum.get("terrain_levels")
+  if terrain_levels is None:
+    return
+
+  params = terrain_levels.params
+  if start_level is None:
+    params.pop("mixed_replay_start_level", None)
+    params.pop("mixed_replay_level_ranges", None)
+    params.pop("mixed_replay_weights", None)
+    return
+
+  params["mixed_replay_start_level"] = start_level
+  params["mixed_replay_level_ranges"] = level_ranges
+  params["mixed_replay_weights"] = weights
+
+
+def configure_g1_high_stairs_play_terrain_generator(
+  terrain_cfg: TerrainGeneratorCfg,
+) -> TerrainGeneratorCfg:
+  """Use curriculum rows in play so low/mid/high replay ratios are meaningful."""
+  terrain_cfg.curriculum = True
+  terrain_cfg.num_rows = G1_HIGH_STAIRS_PLAY_NUM_ROWS
+  terrain_cfg.num_cols = len(terrain_cfg.sub_terrains)
+  terrain_cfg.border_width = 10.0
+  return terrain_cfg
+
+
+def configure_g1_high_stairs_play_randomization(cfg: ManagerBasedRlEnvCfg) -> None:
+  """Randomize play terrain rows with the same low/mid/high replay ratios."""
+  if cfg.scene.terrain is not None and cfg.scene.terrain.terrain_generator is not None:
+    configure_g1_high_stairs_play_terrain_generator(cfg.scene.terrain.terrain_generator)
+    cfg.scene.terrain.max_init_terrain_level = None
+
+  params = {
+    "level_ranges": G1_HIGH_STAIRS_MIXED_REPLAY_LEVEL_RANGES,
+    "level_weights": G1_HIGH_STAIRS_MIXED_REPLAY_WEIGHTS,
+    "use_sub_terrain_proportions": True,
+  }
+  randomize_startup = EventTermCfg(
+    func=envs_mdp.randomize_terrain,
+    mode="startup",
+    params=params,
+  )
+  randomize_reset = EventTermCfg(
+    func=envs_mdp.randomize_terrain,
+    mode="reset",
+    params=params,
+  )
+  cfg.events.pop("randomize_terrain_startup", None)
+  cfg.events.pop("randomize_terrain", None)
+  cfg.events = {
+    "randomize_terrain_startup": randomize_startup,
+    "randomize_terrain": randomize_reset,
+    **cfg.events,
+  }
+
 
 def _blind_rough_play_terrain_cfg():
   """Return a tougher blind-rough terrain set for visual play testing."""
   terrain_cfg = deepcopy(BLIND_HIGH_STAIRS_TERRAINS_CFG)
-  terrain_cfg.curriculum = False
-  terrain_cfg.num_rows = 5
-  terrain_cfg.num_cols = 5
-  terrain_cfg.border_width = 10.0
-
-  for terrain_name in ("high_stairs", "high_stairs_inv"):
-    sub_terrain = terrain_cfg.sub_terrains[terrain_name]
-    assert isinstance(
-      sub_terrain,
-      BoxPyramidStairsTerrainCfg | BoxInvertedPyramidStairsTerrainCfg,
-    )
-    sub_terrain.step_height_range = (0.14, 0.14)
-
-  return terrain_cfg
+  return configure_g1_high_stairs_play_terrain_generator(terrain_cfg)
 
 
 def unitree_g1_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -123,6 +177,8 @@ def unitree_g1_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
       _blind_rough_play_terrain_cfg() if play else BLIND_HIGH_STAIRS_TERRAINS_CFG
     )
     cfg.scene.terrain.max_init_terrain_level = 2
+  if not play:
+    configure_g1_high_stairs_mixed_replay(cfg)
 
   joint_pos_action = cfg.actions["joint_pos"]
   assert isinstance(joint_pos_action, JointPositionActionCfg)
@@ -298,18 +354,7 @@ def unitree_g1_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.events.pop("push_robot", None)
     cfg.terminations.pop("out_of_terrain_bounds", None)
     cfg.curriculum = {}
-    cfg.events["randomize_terrain"] = EventTermCfg(
-      func=envs_mdp.randomize_terrain,
-      mode="reset",
-      params={},
-    )
-
-    if cfg.scene.terrain is not None:
-      if cfg.scene.terrain.terrain_generator is not None:
-        cfg.scene.terrain.terrain_generator.curriculum = False
-        cfg.scene.terrain.terrain_generator.num_cols = 5
-        cfg.scene.terrain.terrain_generator.num_rows = 5
-        cfg.scene.terrain.terrain_generator.border_width = 10.0
+    configure_g1_high_stairs_play_randomization(cfg)
 
   return cfg
 

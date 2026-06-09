@@ -18,6 +18,7 @@ from mjlab.tasks.velocity.config.g1.blind_rough_slow_latent_env_cfg import (
   G1SlowLatentEnvParams,
   G1SlowLatentPlayVisualizationParams,
   G1SlowLatentRewardParams,
+  G1SlowLatentTerrainReplayParams,
   unitree_g1_blind_rough_target_navigation_slow_latent_env_cfg,
 )
 from mjlab.tasks.velocity.config.g1.rl_cfg import (
@@ -28,6 +29,10 @@ from mjlab.tasks.velocity.config.g1.rl_cfg import (
 from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from mjlab.tasks.velocity.mdp.teacher_target_heading_command import (
   TeacherTargetHeadingVelocityCommandCfg,
+)
+from mjlab.terrains.primitive_terrains import (
+  BoxInvertedPyramidStairsTerrainCfg,
+  BoxPyramidStairsTerrainCfg,
 )
 
 MAIN_BRANCH_VELOCITY_TASK_IDS = (
@@ -171,8 +176,8 @@ def test_rough_velocity_training_has_curriculum_enabled() -> None:
     )
 
 
-def test_rough_velocity_play_has_curriculum_disabled() -> None:
-  """Rough velocity play tasks should have terrain curriculum disabled."""
+def test_rough_velocity_play_keeps_curriculum_rows_for_mixed_distribution() -> None:
+  """Play tasks keep curriculum rows so low/mid/high sampling is meaningful."""
   for task_id in MAIN_BRANCH_VELOCITY_TASK_IDS:
     cfg = load_env_cfg(task_id, play=True)
 
@@ -182,9 +187,9 @@ def test_rough_velocity_play_has_curriculum_disabled() -> None:
     assert cfg.scene.terrain.terrain_generator is not None, (
       f"Task {task_id} (play mode) has no terrain_generator"
     )
-    assert cfg.scene.terrain.terrain_generator.curriculum is False, (
+    assert cfg.scene.terrain.terrain_generator.curriculum is True, (
       f"Task {task_id} (play mode) curriculum={cfg.scene.terrain.terrain_generator.curriculum}, "
-      "expected False"
+      "expected True"
     )
 
 
@@ -248,6 +253,60 @@ def test_teacherkl_target_navigation_switch() -> None:
   assert "toe_terrain_contact" in target_cfg.observations["critic"].terms
 
 
+def test_g1_high_stairs_tasks_enable_mixed_terrain_replay() -> None:
+  for task_id in MAIN_BRANCH_VELOCITY_TASK_IDS:
+    cfg = load_env_cfg(task_id)
+    params = cfg.curriculum["terrain_levels"].params
+    assert params["mixed_replay_start_level"] == 8
+    assert params["mixed_replay_level_ranges"] == ((0, 2), (3, 5), (6, 9))
+    assert params["mixed_replay_weights"] == (0.2, 0.3, 0.5)
+
+
+def test_g1_high_stairs_tasks_randomize_step_depth() -> None:
+  for task_id in MAIN_BRANCH_VELOCITY_TASK_IDS:
+    cfg = load_env_cfg(task_id)
+    assert cfg.scene.terrain is not None
+    terrain_generator = cfg.scene.terrain.terrain_generator
+    assert terrain_generator is not None
+    for terrain_name in ("high_stairs", "high_stairs_inv"):
+      sub_terrain = terrain_generator.sub_terrains[terrain_name]
+      assert isinstance(
+        sub_terrain,
+        BoxPyramidStairsTerrainCfg | BoxInvertedPyramidStairsTerrainCfg,
+      )
+      assert sub_terrain.step_width == 0.30
+      assert sub_terrain.step_width_range == (0.25, 0.35)
+
+
+def test_g1_high_stairs_play_uses_mixed_level_distribution() -> None:
+  for task_id in MAIN_BRANCH_VELOCITY_TASK_IDS:
+    cfg = load_env_cfg(task_id, play=True)
+    assert cfg.scene.terrain is not None
+    terrain_generator = cfg.scene.terrain.terrain_generator
+    assert terrain_generator is not None
+    assert terrain_generator.curriculum is True
+    assert terrain_generator.num_rows == 10
+
+    randomize = cfg.events["randomize_terrain"]
+    assert randomize.params["level_ranges"] == ((0, 2), (3, 5), (6, 9))
+    assert randomize.params["level_weights"] == (0.2, 0.3, 0.5)
+    assert randomize.params["use_sub_terrain_proportions"] is True
+    assert cfg.events["randomize_terrain_startup"].mode == "startup"
+    assert cfg.events["randomize_terrain_startup"].params == randomize.params
+    event_order = list(cfg.events)
+    assert event_order.index("randomize_terrain") < event_order.index("reset_base")
+    assert cfg.scene.terrain.max_init_terrain_level is None
+
+    for terrain_name in ("high_stairs", "high_stairs_inv"):
+      sub_terrain = terrain_generator.sub_terrains[terrain_name]
+      assert isinstance(
+        sub_terrain,
+        BoxPyramidStairsTerrainCfg | BoxInvertedPyramidStairsTerrainCfg,
+      )
+      assert sub_terrain.step_height_range == (0.04, 0.2)
+      assert sub_terrain.step_width_range == (0.25, 0.35)
+
+
 def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   task_id = (
     "Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1"
@@ -272,7 +331,7 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert toe_reward_params["contact_sensor_name"] == "toe_terrain_contact"
   assert toe_reward_params["contact_penalty_scale"] == 0.5
   assert toe_reward_params["probe_contact_count"] == 2
-  assert toe_reward_params["probe_slab_reward_scale"] == 0.35
+  assert toe_reward_params["probe_slab_reward_scale"] == 0.0
   assert toe_reward_params["probe_contact_reward"] == 0.08
   toe_sensor_cfg = cast(
     ContactSensorCfg,
@@ -334,6 +393,11 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
       toe_probe_contact_count=3,
       toe_probe_slab_reward_scale=0.5,
     ),
+    terrain_replay=G1SlowLatentTerrainReplayParams(
+      start_level=7,
+      level_ranges=((0, 1), (2, 4), (5, 9)),
+      weights=(0.1, 0.2, 0.7),
+    ),
     play_visualization=G1SlowLatentPlayVisualizationParams(
       danger_lip_radius=0.09,
       danger_slab_depth=0.11,
@@ -344,6 +408,9 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
     play=True,
     params=env_params,
   )
+  train_env_cfg = unitree_g1_blind_rough_target_navigation_slow_latent_env_cfg(
+    params=env_params,
+  )
 
   assert env_cfg.observations["actor"].history_length == 7
   assert env_cfg.rewards["foot_step_lip_volume_penalty"].params["edge_radius"] == 0.08
@@ -352,6 +419,10 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
   assert toe_params["contact_penalty_scale"] == 0.7
   assert toe_params["probe_contact_count"] == 3
   assert toe_params["probe_slab_reward_scale"] == 0.5
+  replay_params = train_env_cfg.curriculum["terrain_levels"].params
+  assert replay_params["mixed_replay_start_level"] == 7
+  assert replay_params["mixed_replay_level_ranges"] == ((0, 1), (2, 4), (5, 9))
+  assert replay_params["mixed_replay_weights"] == (0.1, 0.2, 0.7)
   assert env_cfg.scene.terrain is not None
   assert env_cfg.scene.terrain.terrain_generator is not None
   vis = env_cfg.scene.terrain.terrain_generator.step_danger_visualization
