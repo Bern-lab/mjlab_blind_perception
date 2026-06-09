@@ -31,10 +31,13 @@ check_mjlab_env.sh
 *.mnn
 *.pth
 
+# Curated frozen teacher policies kept with task configs.
+!teacher_policies/
+!teacher_policies/**/*.pt
+
 # System junk.
 .DS_Store
 Thumbs.db
 *~
 *.swp
 *.swo
-
