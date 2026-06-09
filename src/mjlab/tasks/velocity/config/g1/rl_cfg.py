@@ -10,9 +10,7 @@ from mjlab.rl import (
 )
 
 G1_TEACHER_KL_CHECKPOINT = (
-  "logs/rsl_rl/g1_velocity_target_heading_teacher_depth/"
-  "Mjlab-Velocity-TargetHeading-Rough-Teacher-Unitree-G1/"
-  "2026-05-21_11-54-52_rollback_29750/model_118200.pt"
+  "teacher_policies/g1_target_heading_depth_teacher/model_118200.pt"
 )
 G1_TARGET_HEADING_DEPTH_TEACHER_KL_CHECKPOINT = G1_TEACHER_KL_CHECKPOINT
 G1_LSTM_TEACHER_KL_NUM_STEPS_PER_ENV = 24
@@ -130,7 +128,9 @@ def _unitree_g1_lstm_policy_model_cfg() -> RslRlModelCfg:
   )
 
 
-def _unitree_g1_teacher_guidance_cfg() -> RslRlTeacherKLCfg:#同时影响此分支所有student
+def _unitree_g1_teacher_guidance_cfg() -> (
+  RslRlTeacherKLCfg
+):  # 同时影响此分支所有student
   """Match main's normal TeacherKL setting: PPO and teacher guidance both active."""
   return RslRlTeacherKLCfg(
     enabled=True,
