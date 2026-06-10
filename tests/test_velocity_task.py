@@ -335,10 +335,17 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert toe_reward_params["contact_sensor_name"] == "toe_terrain_contact"
   assert toe_reward_params["contact_penalty_scale"] == 0.5
   assert toe_reward_params["probe_contact_count"] == 2
-  assert toe_reward_params["probe_slab_reward_scale"] == 0.0
-  assert toe_reward_params["probe_contact_reward"] == 0.20
-  assert toe_reward_params["second_layer_attraction_reward"] == 0.15
-  assert toe_reward_params["second_layer_attraction_distance"] == 0.55
+  assert toe_reward_params["temporal_probe_first_reward"] == 0.05
+  assert toe_reward_params["temporal_probe_confirm_reward"] == 0.20
+  assert toe_reward_params["temporal_probe_lift_reward"] == 0.15
+  assert toe_reward_params["temporal_probe_forward_reward"] == 0.15
+  assert toe_reward_params["temporal_probe_min_lift"] == 0.03
+  assert toe_reward_params["temporal_probe_lift_scale"] == 0.08
+  assert toe_reward_params["temporal_probe_min_forward"] == 0.08
+  assert toe_reward_params["temporal_probe_forward_scale"] == 0.20
+  assert toe_reward_params["temporal_probe_timeout"] == 0.80
+  assert toe_reward_params["temporal_probe_max_forward_vel"] == 0.45
+  assert toe_reward_params["temporal_probe_overspeed_penalty"] == 0.10
   toe_sensor_cfg = cast(
     ContactSensorCfg,
     next(
@@ -405,9 +412,9 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
       toe_slab_depth=0.12,
       toe_contact_penalty_scale=0.7,
       toe_probe_contact_count=3,
-      toe_probe_slab_reward_scale=0.5,
-      toe_second_layer_attraction_reward=0.11,
-      toe_second_layer_attraction_distance=0.42,
+      toe_temporal_probe_first_reward=0.5,
+      toe_temporal_probe_lift_reward=0.11,
+      toe_temporal_probe_timeout=0.42,
     ),
     terrain_replay=G1SlowLatentTerrainReplayParams(
       start_level=7,
@@ -445,9 +452,9 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
   toe_params = env_cfg.rewards["toe_step_riser_slab_penalty"].params
   assert toe_params["contact_penalty_scale"] == 0.7
   assert toe_params["probe_contact_count"] == 3
-  assert toe_params["probe_slab_reward_scale"] == 0.5
-  assert toe_params["second_layer_attraction_reward"] == 0.11
-  assert toe_params["second_layer_attraction_distance"] == 0.42
+  assert toe_params["temporal_probe_first_reward"] == 0.5
+  assert toe_params["temporal_probe_lift_reward"] == 0.11
+  assert toe_params["temporal_probe_timeout"] == 0.42
   replay_params = train_env_cfg.curriculum["terrain_levels"].params
   assert replay_params["mixed_replay_start_level"] == 7
   assert replay_params["mixed_replay_level_ranges"] == ((0, 1), (2, 4), (5, 9))

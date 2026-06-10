@@ -357,6 +357,7 @@ class toe_step_riser_slab_penalty(_LegacyToeStepRiserSlabPenalty):
         self._probe_second_confirmed[timeout_mask] = False
 
       in_phase1 = self._probe_phase == 1
+      phase1_for_step = in_phase1.clone()
       target_foot = self._probe_target_foot.clamp(0, max(1, num_feet - 1))
       env_ids = torch.arange(env.num_envs, device=env.device)
       second_layer_contact_by_foot = torch.any(
@@ -447,7 +448,7 @@ class toe_step_riser_slab_penalty(_LegacyToeStepRiserSlabPenalty):
       target_foot_point_mask = foot_indices == target_foot_for_points.view(-1, 1, 1)
       temporal_protected_points = (
         active_gate[:, None, None]
-        & (self._probe_phase == 1)[:, None, None]
+        & phase1_for_step[:, None, None]
         & target_foot_point_mask
         & (point_layers > 0)
       )
@@ -464,7 +465,7 @@ class toe_step_riser_slab_penalty(_LegacyToeStepRiserSlabPenalty):
 
       temporal_protected_contact = (
         active_gate[:, None, None]
-        & (self._probe_phase == 1)[:, None, None]
+        & phase1_for_step[:, None, None]
         & (foot_indices == target_foot_for_points.view(-1, 1, 1))
         & probe_layer_contact
       )
