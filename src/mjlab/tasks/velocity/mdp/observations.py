@@ -219,35 +219,30 @@ def _get_toe_heel_site_indices(
   return indices
 
 
-def _body_frame_foot_positions(
+def _world_frame_foot_positions(
   env: ManagerBasedRlEnv,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-  """Compute body-frame toe and heel positions from MJCF sites or FK offsets.
+  """Compute world-frame toe and heel positions from MJCF sites or FK offsets.
 
   Returns:
-    left_toe_pos_body:  [num_envs, 3]
-    right_toe_pos_body: [num_envs, 3]
-    left_heel_pos_body: [num_envs, 3]
-    right_heel_pos_body: [num_envs, 3]
+    left_toe_pos_w:  [num_envs, 3]
+    right_toe_pos_w: [num_envs, 3]
+    left_heel_pos_w: [num_envs, 3]
+    right_heel_pos_w: [num_envs, 3]
 
-  All positions are in the robot's body frame (gravity-aligned).
+  All positions are in the world frame.
   """
   robot = env.scene["robot"]
-  root_pos_w = robot.data.root_link_pos_w  # [num_envs, 3]
-  root_quat_w = robot.data.root_link_quat_w  # [num_envs, 4]
-
-  def _world_to_body(point_w: torch.Tensor) -> torch.Tensor:
-    return quat_apply_inverse(root_quat_w, point_w - root_pos_w)
 
   site_indices = _get_toe_heel_site_indices(env)
   if site_indices is not None:
     left_toe_idx, right_toe_idx, left_heel_idx, right_heel_idx = site_indices
     site_pos_w = robot.data.site_pos_w
     return (
-      _world_to_body(site_pos_w[:, left_toe_idx, :]),
-      _world_to_body(site_pos_w[:, right_toe_idx, :]),
-      _world_to_body(site_pos_w[:, left_heel_idx, :]),
-      _world_to_body(site_pos_w[:, right_heel_idx, :]),
+      site_pos_w[:, left_toe_idx, :],
+      site_pos_w[:, right_toe_idx, :],
+      site_pos_w[:, left_heel_idx, :],
+      site_pos_w[:, right_heel_idx, :],
     )
 
   left_idx, right_idx = _get_foot_link_indices(env)
@@ -257,19 +252,47 @@ def _body_frame_foot_positions(
   _toe = _TOE_OFFSET_BODY.to(env.device)
   _heel = _HEEL_OFFSET_BODY.to(env.device)
 
-  def _link_pos_body(link_idx: int, offset: torch.Tensor) -> torch.Tensor:
+  def _link_pos_w(link_idx: int, offset: torch.Tensor) -> torch.Tensor:
     link_pos_w = body_link_pos_w[:, link_idx, :]  # [B, 3]
     link_quat_w = body_link_quat_w[:, link_idx, :]  # [B, 4]
     offset_w = quat_apply(link_quat_w, offset.expand(env.num_envs, -1))
-    point_w = link_pos_w + offset_w
-    return _world_to_body(point_w)
+    return link_pos_w + offset_w
 
-  left_toe = _link_pos_body(left_idx, _toe)
-  right_toe = _link_pos_body(right_idx, _toe)
-  left_heel = _link_pos_body(left_idx, _heel)
-  right_heel = _link_pos_body(right_idx, _heel)
+  return (
+    _link_pos_w(left_idx, _toe),
+    _link_pos_w(right_idx, _toe),
+    _link_pos_w(left_idx, _heel),
+    _link_pos_w(right_idx, _heel),
+  )
 
-  return left_toe, right_toe, left_heel, right_heel
+
+def _body_frame_foot_positions(
+  env: ManagerBasedRlEnv,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+  """Compute body-frame (root/body frame) toe and heel positions.
+
+  Returns:
+    left_toe_pos_body:  [num_envs, 3]
+    right_toe_pos_body: [num_envs, 3]
+    left_heel_pos_body: [num_envs, 3]
+    right_heel_pos_body: [num_envs, 3]
+
+  All positions are in the robot's root body frame.
+  """
+  robot = env.scene["robot"]
+  root_pos_w = robot.data.root_link_pos_w  # [num_envs, 3]
+  root_quat_w = robot.data.root_link_quat_w  # [num_envs, 4]
+
+  def _world_to_body(point_w: torch.Tensor) -> torch.Tensor:
+    return quat_apply_inverse(root_quat_w, point_w - root_pos_w)
+
+  left_toe_w, right_toe_w, left_heel_w, right_heel_w = _world_frame_foot_positions(env)
+  return (
+    _world_to_body(left_toe_w),
+    _world_to_body(right_toe_w),
+    _world_to_body(left_heel_w),
+    _world_to_body(right_heel_w),
+  )
 
 
 def _body_frame_foot_velocities(
@@ -299,8 +322,17 @@ def _body_frame_foot_velocities(
   prev_left = env.extras["prev_left_toe_pos_body"]
   prev_right = env.extras["prev_right_toe_pos_body"]
 
-  left_vel = (left_toe - prev_left) / dt
-  right_vel = (right_toe - prev_right) / dt
+  raw_left_vel = (left_toe - prev_left) / dt
+  raw_right_vel = (right_toe - prev_right) / dt
+
+  cache_valid = env.extras.get("stair_latent_cache_valid")
+  if cache_valid is not None:
+    valid = cache_valid.unsqueeze(-1)
+    left_vel = torch.where(valid, raw_left_vel, torch.zeros_like(raw_left_vel))
+    right_vel = torch.where(valid, raw_right_vel, torch.zeros_like(raw_right_vel))
+  else:
+    left_vel = raw_left_vel
+    right_vel = raw_right_vel
 
   env.extras["prev_left_toe_pos_body"] = left_toe.clone()
   env.extras["prev_right_toe_pos_body"] = right_toe.clone()
@@ -309,10 +341,16 @@ def _body_frame_foot_velocities(
 
 
 def _clear_foot_velocity_cache(env: ManagerBasedRlEnv, env_ids: torch.Tensor) -> None:
-  """Reset foot velocity cache for the given env IDs."""
-  if "prev_left_toe_pos_body" in env.extras:
-    env.extras["prev_left_toe_pos_body"][env_ids] = 0.0
-    env.extras["prev_right_toe_pos_body"][env_ids] = 0.0
+  """Reset foot velocity cache for the given env IDs.
+
+  Sets the prev toe positions to the current toe positions so that the
+  next velocity computation yields zero instead of a spurious spike.
+  """
+  if "prev_left_toe_pos_body" not in env.extras:
+    return
+  left_toe, right_toe, _, _ = _body_frame_foot_positions(env)
+  env.extras["prev_left_toe_pos_body"][env_ids] = left_toe[env_ids]
+  env.extras["prev_right_toe_pos_body"][env_ids] = right_toe[env_ids]
 
 
 # ======================================================================
@@ -482,14 +520,17 @@ def stair_latent_obs(
     _body_frame_foot_positions(env)
   )
 
+  # ---- Foot FK positions (world frame, for world-z height differences) ----
+  left_toe_w, right_toe_w, left_heel_w, right_heel_w = _world_frame_foot_positions(env)
+
   # ---- Foot relative geometry ----
   toe_delta = left_toe_pos - right_toe_pos  # [B, 3]
   heel_delta = left_heel_pos - right_heel_pos  # [B, 3]
-  toe_horizontal_dist = torch.sqrt(
-    toe_delta[:, 0] ** 2 + toe_delta[:, 1] ** 2
-  ).unsqueeze(-1)
-  toe_vertical_dist = toe_delta[:, 2:3]
-  heel_vertical_dist = heel_delta[:, 2:3]
+  # Forward distance along body x (ignores lateral offset).
+  toe_horizontal_dist = toe_delta[:, 0:1].abs()
+  # World-z height difference (immune to body pitch/roll).
+  toe_vertical_dist = left_toe_w[:, 2:3] - right_toe_w[:, 2:3]
+  heel_vertical_dist = left_heel_w[:, 2:3] - right_heel_w[:, 2:3]
 
   # ---- Toe velocities (body frame) ----
   left_toe_vel, right_toe_vel = _body_frame_foot_velocities(env)
