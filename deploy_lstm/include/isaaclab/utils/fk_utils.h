@@ -25,11 +25,16 @@ namespace fk {
 // G1 leg kinematic parameters
 // =========================================================================
 
-// Each link's parent-to-child translation and joint axis, all expressed
-// in the parent body frame.
+// Each link's parent-to-child translation, initial body quaternion,
+// and joint axis, all expressed in the parent body frame.
+//
+// In MJCF, the body pos + quat are applied BEFORE the joint rotation:
+//   T_child = T_parent * translate(body.pos) * rotate(body.quat) * rotate(joint.axis, θ)
+// The quat is the body quat attribute (w, x, y, z).
 struct LegLinkParams {
-  Eigen::Vector3f translation;  // parent → child origin in parent frame
-  Eigen::Vector3f axis;         // joint rotation axis in parent frame
+  Eigen::Vector3f    translation;  // body pos = parent → child origin
+  Eigen::Quaternionf quat;         // body quat (initial rotation before joint)
+  Eigen::Vector3f    axis;         // joint rotation axis in body frame
 };
 
 // Left-leg kinematic chain from pelvis to ankle_roll_link (6 joints).
@@ -50,35 +55,44 @@ static constexpr int G1_RIGHT_LEG_JOINT_START = 6;
 inline const std::array<LegLinkParams, G1_LEFT_LEG_JOINT_COUNT>
 kLeftLegParams() {
   // Axis convention follows MJCF unit vectors.
+  // All G1 leg body quats are identity (no quat attribute in MJCF for leg links).
   return {{
     // pelvis → left_hip_pitch
     {
       Eigen::Vector3f(0.0f,   0.064452f, -0.1027f),
+      Eigen::Quaternionf::Identity(),
       Eigen::Vector3f(0.0f, 1.0f, 0.0f)           // Y
     },
     // left_hip_pitch → left_hip_roll
+    // MJCF: quat="0.996179 0 -0.0873386 0"  (~ -5° about Y)
     {
       Eigen::Vector3f(0.0f,   0.052f,    -0.030465f),
+      Eigen::Quaternionf(0.996179f, 0.0f, -0.0873386f, 0.0f),
       Eigen::Vector3f(1.0f, 0.0f, 0.0f)           // X
     },
-    // left_hip_roll → left_hip_yaw
+    // left_hip_roll → left_hip_yaw (no body quat)
     {
       Eigen::Vector3f(0.025001f, 0.0f, -0.12412f),
+      Eigen::Quaternionf::Identity(),
       Eigen::Vector3f(0.0f, 0.0f, 1.0f)           // Z
     },
     // left_hip_yaw → left_knee
+    // MJCF: quat="0.996179 0 0.0873386 0"  (~ +5° about Y)
     {
       Eigen::Vector3f(-0.078273f, 0.0021489f, -0.17734f),
+      Eigen::Quaternionf(0.996179f, 0.0f, 0.0873386f, 0.0f),
       Eigen::Vector3f(0.0f, 1.0f, 0.0f)           // Y
     },
     // left_knee → left_ankle_pitch
     {
       Eigen::Vector3f(0.0f, -9.4445e-05f, -0.30001f),
+      Eigen::Quaternionf::Identity(),
       Eigen::Vector3f(0.0f, 1.0f, 0.0f)           // Y
     },
     // left_ankle_pitch → left_ankle_roll
     {
       Eigen::Vector3f(0.0f, 0.0f, -0.017558f),
+      Eigen::Quaternionf::Identity(),
       Eigen::Vector3f(1.0f, 0.0f, 0.0f)           // X
     },
   }};
@@ -90,31 +104,39 @@ kRightLegParams() {
     // pelvis → right_hip_pitch  (Y sign flipped vs left)
     {
       Eigen::Vector3f(0.0f,   -0.064452f, -0.1027f),
+      Eigen::Quaternionf::Identity(),
       Eigen::Vector3f(0.0f, 1.0f, 0.0f)           // Y
     },
     // right_hip_pitch → right_hip_roll  (Y sign flipped)
+    // MJCF: quat="0.996179 0 -0.0873386 0"  (~ -5° about Y)
     {
       Eigen::Vector3f(0.0f,   -0.052f,    -0.030465f),
+      Eigen::Quaternionf(0.996179f, 0.0f, -0.0873386f, 0.0f),
       Eigen::Vector3f(1.0f, 0.0f, 0.0f)           // X
     },
-    // right_hip_roll → right_hip_yaw
+    // right_hip_roll → right_hip_yaw (no body quat)
     {
       Eigen::Vector3f(0.025001f, 0.0f, -0.12412f),
+      Eigen::Quaternionf::Identity(),
       Eigen::Vector3f(0.0f, 0.0f, 1.0f)           // Z
     },
     // right_hip_yaw → right_knee  (Y sign flipped)
+    // MJCF: quat="0.996179 0 0.0873386 0"  (~ +5° about Y)
     {
       Eigen::Vector3f(-0.078273f, -0.0021489f, -0.17734f),
+      Eigen::Quaternionf(0.996179f, 0.0f, 0.0873386f, 0.0f),
       Eigen::Vector3f(0.0f, 1.0f, 0.0f)           // Y
     },
     // right_knee → right_ankle_pitch  (Y sign flipped)
     {
       Eigen::Vector3f(0.0f, 9.4445e-05f, -0.30001f),
+      Eigen::Quaternionf::Identity(),
       Eigen::Vector3f(0.0f, 1.0f, 0.0f)           // Y
     },
     // right_ankle_pitch → right_ankle_roll
     {
       Eigen::Vector3f(0.0f, 0.0f, -0.017558f),
+      Eigen::Quaternionf::Identity(),
       Eigen::Vector3f(1.0f, 0.0f, 0.0f)           // X
     },
   }};
@@ -133,13 +155,22 @@ inline Eigen::Vector3f kHeelOffset() {
 // Forward kinematics
 // =========================================================================
 
-// Return the 4×4 transform produced by a translation + rotation about axis.
-inline Eigen::Matrix4f jointTransform(
-    const Eigen::Vector3f& translation,
-    const Eigen::Vector3f& axis,
-    float angle) {
+// Build the 4×4 homogeneous transform from parent body to child body.
+//
+// In MJCF: T = translate(body.pos) * rotate(body.quat) * rotate(joint.axis, θ)
+// where body.pos  = translation (parent → child origin in parent frame)
+//       body.quat = optional initial rotation (default identity)
+//       joint.axis = rotation axis expressed in the body (post-quat) frame
+//       θ         = joint angle in radians
+//
+inline Eigen::Matrix4f linkTransform(
+    const Eigen::Vector3f&    translation,
+    const Eigen::Quaternionf& quat,
+    const Eigen::Vector3f&    axis,
+    float                     angle) {
   Eigen::Matrix4f T = Eigen::Matrix4f::Identity();
   T.block<3, 3>(0, 0) =
+      quat.toRotationMatrix() *
       Eigen::AngleAxisf(angle, axis.normalized()).toRotationMatrix();
   T.block<3, 1>(0, 3) = translation;
   return T;
@@ -158,11 +189,11 @@ inline Eigen::Vector3f legFK(
     const Eigen::Vector3f& offset_in_last) {
   Eigen::Matrix4f T = Eigen::Matrix4f::Identity();
   for (int i = 0; i < 6; ++i) {
-    T = T * jointTransform(link_params[i].translation,
-                           link_params[i].axis,
-                           joint_angles[i]);
+    T = T * linkTransform(link_params[i].translation,
+                          link_params[i].quat,
+                          link_params[i].axis,
+                          joint_angles[i]);
   }
-  // The ankle_roll_link origin is at the last transform's translation.
   // Apply the toe/heel offset in the ankle_roll orientation.
   Eigen::Vector4f pt_local(offset_in_last.x(),
                            offset_in_last.y(),

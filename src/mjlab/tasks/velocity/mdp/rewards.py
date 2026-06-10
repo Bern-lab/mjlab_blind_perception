@@ -525,6 +525,37 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       env.num_envs, device=env.device, dtype=torch.bool
     )
 
+    # ── Temporal foot-specific probe state ──
+    self._probe_phase = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
+    self._probe_first_foot = torch.full(
+      (env.num_envs,), -1, device=env.device, dtype=torch.long
+    )
+    self._probe_target_foot = torch.full(
+      (env.num_envs,), -1, device=env.device, dtype=torch.long
+    )
+    self._probe_timer = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
+    self._probe_first_toe_x_body = torch.zeros(
+      env.num_envs, device=env.device, dtype=torch.float32
+    )
+    self._probe_first_toe_z_world = torch.zeros(
+      env.num_envs, device=env.device, dtype=torch.float32
+    )
+    self._probe_success = torch.zeros(
+      env.num_envs, device=env.device, dtype=torch.bool
+    )
+    self._probe_contact_count = torch.zeros(
+      env.num_envs, device=env.device, dtype=torch.long
+    )
+    self._probe_target_lift_progress = torch.zeros(
+      env.num_envs, device=env.device, dtype=torch.float32
+    )
+    self._probe_target_forward_progress = torch.zeros(
+      env.num_envs, device=env.num_envs, dtype=torch.float32
+    )
+    self._probe_second_confirmed = torch.zeros(
+      env.num_envs, device=env.device, dtype=torch.bool
+    )
+
   def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
     if env_ids is None:
       env_ids = slice(None)
@@ -535,6 +566,17 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     self._max_root_z[env_ids] = 0.0
     self._ascent_active[env_ids] = False
     self._needs_root_z_init[env_ids] = True
+    self._probe_phase[env_ids] = 0
+    self._probe_first_foot[env_ids] = -1
+    self._probe_target_foot[env_ids] = -1
+    self._probe_timer[env_ids] = 0
+    self._probe_first_toe_x_body[env_ids] = 0.0
+    self._probe_first_toe_z_world[env_ids] = 0.0
+    self._probe_success[env_ids] = False
+    self._probe_contact_count[env_ids] = 0
+    self._probe_target_lift_progress[env_ids] = 0.0
+    self._probe_target_forward_progress[env_ids] = 0.0
+    self._probe_second_confirmed[env_ids] = False
 
   def _ensure_probe_layer_capacity(self, probe_contact_count: int) -> int:
     max_probe_layers = max(0, int(probe_contact_count))
@@ -652,7 +694,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     contact_time_scale: float,
     probe_contact_reward: float,
     probe_cooldown_time: float,
-  ) -> tuple[torch.Tensor, torch.Tensor]:
+  ) -> dict[str, torch.Tensor]:
     sensor = env.scene[sensor_name]
     assert isinstance(sensor, ContactSensor), (
       f"toe_step_riser_slab_penalty requires a ContactSensor for "
@@ -854,7 +896,18 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     env.extras["log"]["Metrics/toe_riser_slab_contact_time_mean"] = (
       env_contact_time.mean()
     )
-    return contact_penalty, probe_reward
+    return dict(
+      contact_penalty=contact_penalty,
+      new_hit_by_foot=new_hit_by_foot,
+      current_hit_by_foot=current_hit_by_foot,
+      contact_layers=contact_layers,
+      hit_strength=hit_strength,
+      foot_forward_vel=foot_forward_vel,
+      foot_forward_xy=foot_forward_xy,
+      foot_quat_w=foot_quat_w,
+      foot_pos_w=foot_pos_w,
+      probe_layer_contact=probe_layer_contact,
+    )
 
   def _second_layer_attraction_reward(
     self,
@@ -1142,21 +1195,10 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         min_ascent_height,
         ascent_velocity_threshold,
       )
-      probe_phase = (
-        active_gate if max_probe_layers > 0 else torch.zeros_like(active_gate)
-      )
-      protected_probe_points = active_gate[:, None, None] & (point_layers > 0)
-      if bool(torch.any(protected_probe_points).item()):
-        protected_penalty = torch.sum(
-          torch.where(
-            protected_probe_points,
-            point_penalty,
-            torch.zeros_like(point_penalty),
-          ),
-          dim=(1, 2),
-        )
-      effective_point_penalty = penalty - protected_penalty
-      contact_penalty, probe_reward = self._contact_probe_terms(
+      inactive = ~active_gate
+      probe_timeout_steps = max(1, int(0.8 / env.step_dt))
+
+      ctd = self._contact_probe_terms(
         env,
         contact_sensor_name,
         asset,
@@ -1175,27 +1217,210 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         probe_contact_reward,
         probe_cooldown_time,
       )
-      attraction_reward = self._second_layer_attraction_reward(
-        env,
-        toe_points,
-        boundaries,
-        probe_boundary_layers,
-        active_gate,
-        second_layer_attraction_reward,
-        second_layer_attraction_distance,
-        second_layer_attraction_u_margin,
-        second_layer_attraction_v_margin,
-        surface_tol,
+      contact_penalty = ctd["contact_penalty"]
+      new_hit_by_foot = ctd["new_hit_by_foot"]  # [B, 2]
+      foot_forward_vel = ctd["foot_forward_vel"]  # [B, 2]
+      foot_pos_w = ctd["foot_pos_w"]  # [B, 2, 3]
+
+      # ── Temporal foot-specific probe state machine ──
+      first_hit_mask = (self._probe_phase == 0) & active_gate & torch.any(
+        new_hit_by_foot, dim=-1
       )
-      raw_penalty = (
-        effective_point_penalty + contact_penalty - probe_reward - attraction_reward
+      if bool(torch.any(first_hit_mask).item()):
+        right_hit = new_hit_by_foot[:, 1]
+        self._probe_first_foot[first_hit_mask] = torch.where(
+          right_hit[first_hit_mask],
+          torch.tensor(1, device=env.device, dtype=torch.long),
+          torch.tensor(0, device=env.device, dtype=torch.long),
+        )
+        self._probe_target_foot[first_hit_mask] = (
+          1 - self._probe_first_foot[first_hit_mask]
+        )
+        self._probe_phase[first_hit_mask] = 1
+        self._probe_timer[first_hit_mask] = 0
+        self._probe_contact_count[first_hit_mask] = 1
+        self._probe_target_lift_progress[first_hit_mask] = 0.0
+        self._probe_target_forward_progress[first_hit_mask] = 0.0
+        for foot_idx in range(2):
+          foot_mask = first_hit_mask & (self._probe_first_foot == foot_idx)
+          if bool(torch.any(foot_mask).item()):
+            self._probe_first_toe_x_body[foot_mask] = (
+              foot_pos_w[foot_mask, foot_idx, 0]
+              - asset.data.root_link_pos_w[foot_mask, 0]
+            )
+            self._probe_first_toe_z_world[foot_mask] = (
+              foot_pos_w[foot_mask, foot_idx, 2]
+            )
+
+      # Phase 1 timeout -> phase 0
+      self._probe_timer = torch.where(
+        self._probe_phase == 1, self._probe_timer + 1, self._probe_timer
       )
+      timeout_mask = (
+        self._probe_phase == 1
+      ) & (self._probe_timer > probe_timeout_steps)
+      if bool(torch.any(timeout_mask).item()):
+        self._probe_phase[timeout_mask] = 0
+        self._probe_first_foot[timeout_mask] = -1
+        self._probe_target_foot[timeout_mask] = -1
+        self._probe_timer[timeout_mask] = 0
+        self._probe_contact_count[timeout_mask] = 0
+
+      # Phase 1 -> Phase 2: target foot second hit
+      in_phase1 = self._probe_phase == 1
+      target_foot = self._probe_target_foot.clamp(0, 1)
+      env_ids = torch.arange(env.num_envs, device=env.device)
+      target_hit_mask = (
+        in_phase1 & active_gate & new_hit_by_foot[env_ids, target_foot]
+        & ~self._probe_second_confirmed
+      )
+      second_confirm_reward = torch.zeros(
+        env.num_envs, device=env.device, dtype=torch.float32
+      )
+      if bool(torch.any(target_hit_mask).item()):
+        self._probe_phase[target_hit_mask] = 2
+        self._probe_contact_count[target_hit_mask] += 1
+        self._probe_success[target_hit_mask] = True
+        self._probe_second_confirmed[target_hit_mask] = True
+        second_confirm_reward[target_hit_mask] = 0.20
+
+      # Reset temporal state on inactive envs
+      if bool(torch.any(inactive).item()):
+        self._probe_phase[inactive] = 0
+        self._probe_first_foot[inactive] = -1
+        self._probe_target_foot[inactive] = -1
+        self._probe_timer[inactive] = 0
+        self._probe_contact_count[inactive] = 0
+        self._probe_success[inactive] = False
+        self._probe_target_lift_progress[inactive] = 0.0
+        self._probe_target_forward_progress[inactive] = 0.0
+        self._probe_second_confirmed[inactive] = False
+
+      # ── Target-foot shaping rewards (Phase 1 only) ──
+      target_lift_reward = torch.zeros(
+        env.num_envs, device=env.device, dtype=torch.float32
+      )
+      target_forward_reward = torch.zeros(
+        env.num_envs, device=env.device, dtype=torch.float32
+      )
+      target_overspeed_penalty = torch.zeros(
+        env.num_envs, device=env.device, dtype=torch.float32
+      )
+      if bool(torch.any(in_phase1).item()):
+        target_idx = target_foot[in_phase1]
+        target_z = foot_pos_w[in_phase1, target_idx, 2]
+        lift_gain = target_z - self._probe_first_toe_z_world[in_phase1]
+        min_probe_lift = 0.03
+        probe_lift_scale = 0.08
+        lift_score = torch.clamp(
+          (lift_gain - min_probe_lift) / probe_lift_scale, 0.0, 1.0
+        )
+        lift_delta = torch.relu(
+          lift_score - self._probe_target_lift_progress[in_phase1]
+        )
+        self._probe_target_lift_progress[in_phase1] = torch.maximum(
+          self._probe_target_lift_progress[in_phase1], lift_score
+        )
+        probe_height_reward_weight = 0.15
+        target_lift_reward[in_phase1] = lift_delta * probe_height_reward_weight
+
+        target_x_body = (
+          foot_pos_w[in_phase1, target_idx, 0]
+          - asset.data.root_link_pos_w[in_phase1, 0]
+        )
+        forward_gain = target_x_body - self._probe_first_toe_x_body[in_phase1]
+        min_probe_forward = 0.08
+        probe_forward_scale = 0.20
+        forward_score = torch.clamp(
+          (forward_gain - min_probe_forward) / probe_forward_scale, 0.0, 1.0
+        )
+        forward_delta = torch.relu(
+          forward_score - self._probe_target_forward_progress[in_phase1]
+        )
+        self._probe_target_forward_progress[in_phase1] = torch.maximum(
+          self._probe_target_forward_progress[in_phase1], forward_score
+        )
+        probe_forward_reward_weight = 0.15
+        target_forward_reward[in_phase1] = (
+          forward_delta * probe_forward_reward_weight
+        )
+
+        target_forward_vel = foot_forward_vel[in_phase1, target_idx]
+        overspeed = torch.relu(target_forward_vel - 0.45)
+        probe_overspeed_weight = 0.10
+        target_overspeed_penalty[in_phase1] = overspeed * probe_overspeed_weight
+
+      # ── Phase-gated protected points ──
+      phase1_gate = (self._probe_phase == 1).to(
+        torch.bool, device=env.device
+      )
+      foot_indices = torch.arange(num_feet, device=env.device).view(
+        1, num_feet, 1
+      )
+      target_foot_for_points = self._probe_target_foot.clamp(0, 1)
+      target_foot_point_mask = foot_indices == target_foot_for_points.view(-1, 1, 1)
+      temporal_protected_points = (
+        active_gate[:, None, None]
+        & phase1_gate[:, None, None]
+        & target_foot_point_mask
+        & (point_layers > 0)
+      )
+      if bool(torch.any(temporal_protected_points).item()):
+        protected_penalty = torch.sum(
+          torch.where(
+            temporal_protected_points,
+            point_penalty,
+            torch.zeros_like(point_penalty),
+          ),
+          dim=(1, 2),
+        )
+      effective_point_penalty = penalty - protected_penalty
+
+      probe_reward = (
+        second_confirm_reward + target_lift_reward
+        + target_forward_reward - target_overspeed_penalty
+      )
+      attraction_reward = torch.zeros_like(probe_reward)
+      raw_penalty = effective_point_penalty + contact_penalty - probe_reward
+
       env.extras["log"]["Metrics/toe_riser_slab_probe_active_ratio"] = (
-        probe_phase.float().mean()
+        active_gate.float().mean()
       )
       env.extras["log"]["Metrics/toe_riser_slab_probe_slab_neutral_ratio"] = (
-        protected_probe_points.float().mean()
+        temporal_protected_points.float().mean()
       )
+      # ── Temporal probe metrics ──
+      env.extras["log"][
+        "Metrics/toe_riser_temporal_probe_phase_mean"
+      ] = self._probe_phase.float().mean()
+      env.extras["log"][
+        "Metrics/toe_riser_temporal_probe_first_left_ratio"
+      ] = (self._probe_first_foot == 0).float().mean()
+      env.extras["log"][
+        "Metrics/toe_riser_temporal_probe_first_right_ratio"
+      ] = (self._probe_first_foot == 1).float().mean()
+      env.extras["log"][
+        "Metrics/toe_riser_temporal_probe_success_ratio"
+      ] = self._probe_success.float().mean()
+      env.extras["log"][
+        "Metrics/toe_riser_temporal_probe_target_lift_mean"
+      ] = self._probe_target_lift_progress.mean()
+      env.extras["log"][
+        "Metrics/toe_riser_temporal_probe_target_forward_gain_mean"
+      ] = self._probe_target_forward_progress.mean()
+      env.extras["log"][
+        "Metrics/toe_riser_temporal_probe_second_confirm_ratio"
+      ] = self._probe_second_confirmed.float().mean()
+      env.extras["log"][
+        "Metrics/toe_riser_temporal_probe_timeout_ratio"
+      ] = timeout_mask.float().mean()
+      same_foot_hit = (
+        in_phase1 & active_gate
+        & new_hit_by_foot[env_ids, self._probe_first_foot.clamp(0, 1)]
+      )
+      env.extras["log"][
+        "Metrics/toe_riser_temporal_probe_same_foot_repeat_ratio"
+      ] = same_foot_hit.float().mean()
     else:
       zero = torch.zeros((), device=env.device)
       env.extras["log"]["Metrics/toe_riser_slab_contact_penalty_mean"] = zero
