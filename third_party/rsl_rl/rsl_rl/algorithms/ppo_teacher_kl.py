@@ -340,10 +340,20 @@ class PPOTeacherKL(PPO):
                 "teacher_kl_lambda": 0.0,
                 "teacher_guidance_enabled": 0.0,
             }
+            teacher_kl_lambda = 0.0
 
-        aux_loss, aux_logs = self._compute_slow_latent_aux_loss(batch)
+        # 仅当 batch.hidden_states 存在且非空时才计算 slow-latent 辅助损失, 避免无谓算力消耗
+        aux_loss = torch.zeros((), device=self.device)
+        aux_logs: dict[str, float] = {}
+        hs = getattr(batch, "hidden_states", None)
+        if hs is not None and len(hs) > 0 and hs[0] is not None:
+            aux_loss, aux_logs = self._compute_slow_latent_aux_loss(batch)
+
+        additional_loss = teacher_loss + aux_loss
+        log_dict["aux_loss"] = aux_loss.item() if isinstance(aux_loss, torch.Tensor) else float(aux_loss)
+        log_dict["teacher_kl_lambda"] = teacher_kl_lambda
         log_dict.update(aux_logs)
-        return teacher_loss + aux_loss, log_dict
+        return additional_loss, log_dict
 
     def _compute_future_collision_labels(
         self,
@@ -408,6 +418,7 @@ class PPOTeacherKL(PPO):
                 latent_labels_shape = tuple(observations["latent_labels"].shape)
 
         if not hasattr(self, "_printed_slow_latent_debug"):
+
             def _shape_dict(obj: dict | None) -> dict[str, tuple[int, ...] | str] | None:
                 if not obj:
                     return obj
@@ -418,21 +429,30 @@ class PPOTeacherKL(PPO):
 
             print(
                 "\n[DBG slow latent aux]",
-                "\n  actor_type=", type(self.actor),
-                "\n  has_get_aux_outputs=", get_aux_outputs is not None,
-                "\n  has_get_slow_latent_diagnostics=", get_diagnostics is not None,
-                "\n  aux_output_shapes=", _shape_dict(aux_outputs),
-                "\n  diagnostic_shapes=", _shape_dict(diagnostics),
+                "\n  actor_type=",
+                type(self.actor),
+                "\n  has_get_aux_outputs=",
+                get_aux_outputs is not None,
+                "\n  has_get_slow_latent_diagnostics=",
+                get_diagnostics is not None,
+                "\n  aux_output_shapes=",
+                _shape_dict(aux_outputs),
+                "\n  diagnostic_shapes=",
+                _shape_dict(diagnostics),
                 "\n  aux_coefs=",
                 {
                     "event": event_coef,
                     "stair": stair_coef,
                     "future": future_coef,
                 },
-                "\n  batch_has_observations=", observations is not None,
-                "\n  observation_keys=", obs_keys,
-                "\n  latent_labels_shape=", latent_labels_shape,
-                "\n  masks_shape=", tuple(batch.masks.shape) if batch.masks is not None else None,
+                "\n  batch_has_observations=",
+                observations is not None,
+                "\n  observation_keys=",
+                obs_keys,
+                "\n  latent_labels_shape=",
+                latent_labels_shape,
+                "\n  masks_shape=",
+                tuple(batch.masks.shape) if batch.masks is not None else None,
                 "\n  hidden_state_shapes=",
                 [
                     tuple(h.shape) if hasattr(h, "shape") else type(h).__name__

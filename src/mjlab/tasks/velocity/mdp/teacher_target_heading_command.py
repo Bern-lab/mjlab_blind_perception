@@ -45,7 +45,7 @@ class TeacherTargetHeadingVelocityCommand(UniformVelocityCommand):
 
   @property
   def target_cfg(self) -> TeacherTargetHeadingVelocityCommandCfg:
-    return cast(TeacherTargetHeadingVelocityCommandCfg, self.cfg)
+    return self.cfg
 
   def reset(self, env_ids: torch.Tensor | slice | None) -> dict[str, float]:
     assert isinstance(env_ids, torch.Tensor)
@@ -199,6 +199,7 @@ class TeacherTargetHeadingVelocityCommand(UniformVelocityCommand):
       return
 
     patches = terrain.flat_patches[cfg.patch_name]
+    patch_counts = getattr(terrain, "flat_patch_counts", {}).get(cfg.patch_name)
     num_rows, num_cols, num_patches, _ = patches.shape
     rows, cols = self._current_tile_indices(env_ids, num_rows, num_cols)
     offsets = self._candidate_tile_offsets()
@@ -221,7 +222,15 @@ class TeacherTargetHeadingVelocityCommand(UniformVelocityCommand):
         num_cols,
         offsets,
       )
-      patch_ids = torch.randint(0, num_patches, (len(sample_ids),), device=self.device)
+      if patch_counts is None:
+        patch_ids = torch.randint(
+          0, num_patches, (len(sample_ids),), device=self.device
+        )
+      else:
+        valid_counts = patch_counts[target_rows, target_cols].clamp_min(1)
+        patch_ids = torch.floor(
+          torch.rand(len(sample_ids), device=self.device) * valid_counts
+        ).to(torch.long)
       sampled_targets = patches[target_rows, target_cols, patch_ids]
       distances = torch.linalg.norm(sampled_targets[:, :2] - root_xy[sample_ids], dim=1)
       accepted = (distances >= cfg.target_min_distance) & (
@@ -241,9 +250,15 @@ class TeacherTargetHeadingVelocityCommand(UniformVelocityCommand):
         num_cols,
         offsets,
       )
-      patch_ids = torch.randint(
-        0, num_patches, (len(fallback_ids),), device=self.device
-      )
+      if patch_counts is None:
+        patch_ids = torch.randint(
+          0, num_patches, (len(fallback_ids),), device=self.device
+        )
+      else:
+        valid_counts = patch_counts[target_rows, target_cols].clamp_min(1)
+        patch_ids = torch.floor(
+          torch.rand(len(fallback_ids), device=self.device) * valid_counts
+        ).to(torch.long)
       targets[fallback_ids] = patches[target_rows, target_cols, patch_ids]
 
     self.target_pos_w[env_ids] = targets

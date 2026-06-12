@@ -48,15 +48,16 @@ def _make_foot_volume_points(
   xs = torch.linspace(x_range[0], x_range[1], grid_shape[0], device=device)
   ys = torch.linspace(y_range[0], y_range[1], grid_shape[1], device=device)
   zs = torch.linspace(z_range[0], z_range[1], grid_shape[2], device=device)
-  xx, yy, zz = torch.meshgrid(xs, ys, zs, indexing="ij")
-  points = torch.stack([xx, yy, zz], dim=-1).reshape(-1, 3)
-
-  x = points[:, 0]
-  weights = torch.full_like(x, midfoot_weight)
-  weights = torch.where(x < heel_x_max, heel_weight, weights)
-  front_mask = (x >= front_sole_x_min) & (x < toe_tip_x_min)
-  weights = torch.where(front_mask, front_sole_weight, weights)
-  weights = torch.where(x >= toe_tip_x_min, toe_tip_weight, weights)
+  xv, yv, zv = torch.meshgrid(xs, ys, zs, indexing="ij")
+  points = torch.stack([xv.ravel(), yv.ravel(), zv.ravel()], dim=-1)
+  weights = torch.full((points.shape[0],), midfoot_weight, device=device)
+  weights = torch.where(points[:, 0] <= heel_x_max, heel_weight, weights)
+  weights = torch.where(
+    (points[:, 0] >= front_sole_x_min) & (points[:, 0] < toe_tip_x_min),
+    front_sole_weight,
+    weights,
+  )
+  weights = torch.where(points[:, 0] >= toe_tip_x_min, toe_tip_weight, weights)
   return points, weights
 
 
@@ -64,21 +65,12 @@ def _current_step_boundaries(
   env: ManagerBasedRlEnv,
 ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
   terrain = getattr(env.scene, "terrain", None)
-  if terrain is None or not hasattr(terrain, "step_boundaries_by_tile"):
+  if terrain is None:
     return None, None
-  if getattr(terrain, "terrain_levels", None) is None:
+  boundaries = getattr(terrain, "step_boundaries", None)
+  valid = getattr(terrain, "step_boundaries_valid", None)
+  if boundaries is None or valid is None:
     return None, None
-
-  boundaries_by_tile = terrain.step_boundaries_by_tile
-  if boundaries_by_tile.shape[2] == 0:
-    return None, None
-
-  levels = terrain.terrain_levels
-  terrain_types = terrain.terrain_types
-  boundaries = boundaries_by_tile[levels, terrain_types]
-  counts = terrain.step_boundary_counts[levels, terrain_types]
-  boundary_ids = torch.arange(boundaries.shape[1], device=env.device)
-  valid = boundary_ids.unsqueeze(0) < counts.unsqueeze(1)
   return boundaries, valid
 
 
@@ -121,6 +113,41 @@ class _StepBoundaryFootVolume:
     self._max_point_ref_distance = torch.norm(
       self._local_points - self._foot_ref_local, dim=-1
     ).max()
+    self._env = env
+    self._debug_vis_foot_points = bool(params.get("debug_vis_foot_points", False))
+    self._debug_vis_foot_point_radius = float(
+      params.get("debug_vis_foot_point_radius", 0.012)
+    )
+    self._debug_vis_foot_point_color = tuple(
+      params.get("debug_vis_foot_point_color", (0.1, 0.65, 1.0, 0.85))
+    )
+    self._debug_vis_asset_cfg: SceneEntityCfg = params.get(
+      "asset_cfg", _DEFAULT_FOOT_BODY_CFG
+    )
+    self._debug_vis_step_danger_zones = bool(
+      params.get("debug_vis_step_danger_zones", False)
+    )
+    self._debug_vis_danger_lip_radius = float(
+      params.get("debug_vis_danger_lip_radius", params.get("edge_radius", 0.05))
+    )
+    self._debug_vis_danger_slab_depth = float(
+      params.get("debug_vis_danger_slab_depth", 0.04)
+    )
+    self._debug_vis_danger_slab_u_margin = float(
+      params.get("debug_vis_danger_slab_u_margin", 0.02)
+    )
+    self._debug_vis_danger_slab_v_margin = float(
+      params.get("debug_vis_danger_slab_v_margin", 0.02)
+    )
+    self._debug_vis_max_danger_boundaries = int(
+      params.get("debug_vis_max_danger_boundaries", 96)
+    )
+    self._debug_vis_danger_lip_color = tuple(
+      params.get("debug_vis_danger_lip_color", (1.0, 0.10, 0.05, 0.45))
+    )
+    self._debug_vis_danger_slab_color = tuple(
+      params.get("debug_vis_danger_slab_color", (1.0, 0.75, 0.05, 0.28))
+    )
 
   def _foot_points_w(
     self, env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg
@@ -161,6 +188,130 @@ class _StepBoundaryFootVolume:
       self._point_weights.view(1, 1, -1)
       .expand(num_envs, num_feet, -1)
       .reshape(num_envs, num_feet * self._point_weights.shape[0])
+    )
+
+  def debug_vis(self, visualizer: DebugVisualizer) -> None:
+    if not self._debug_vis_foot_points and not self._debug_vis_step_danger_zones:
+      return
+
+    env = self._env
+    env_indices = list(visualizer.get_env_indices(env.num_envs))
+    if not env_indices:
+      return
+
+    if self._debug_vis_step_danger_zones:
+      self._draw_step_danger_zones(visualizer, env_indices)
+
+    if not self._debug_vis_foot_points:
+      return
+
+    points_w, _ = self._foot_points_w(env, self._debug_vis_asset_cfg)
+    points_np = points_w.detach().cpu().numpy()
+    for env_id in env_indices:
+      env_points = points_np[env_id]
+      for foot_id in range(env_points.shape[0]):
+        for point_id in range(env_points.shape[1]):
+          visualizer.add_sphere(
+            center=env_points[foot_id, point_id],
+            radius=self._debug_vis_foot_point_radius,
+            color=cast(
+              tuple[float, float, float, float], self._debug_vis_foot_point_color
+            ),
+            label=f"foot_volume_{env_id}_{foot_id}_{point_id}",
+          )
+
+  def _draw_step_danger_zones(
+    self, visualizer: DebugVisualizer, env_indices: list[int]
+  ) -> None:
+    boundaries, valid_boundaries = _current_step_boundaries(self._env)
+    if boundaries is None or valid_boundaries is None:
+      return
+
+    max_boundaries = self._debug_vis_max_danger_boundaries
+    if max_boundaries <= 0:
+      return
+
+    asset: Entity = self._env.scene[self._debug_vis_asset_cfg.name]
+    root_pos_np = asset.data.root_link_pos_w.detach().cpu().numpy()
+    boundaries_np = boundaries.detach().cpu().numpy()
+    valid_np = valid_boundaries.detach().cpu().numpy()
+
+    for env_id in env_indices:
+      env_boundaries = boundaries_np[env_id, valid_np[env_id]]
+      if len(env_boundaries) == 0:
+        continue
+
+      centers_xy = 0.5 * (env_boundaries[:, 0:2] + env_boundaries[:, 3:5])
+      root_xy = root_pos_np[env_id, :2]
+      distances = np.linalg.norm(centers_xy - root_xy[None, :], axis=1)
+      order = np.argsort(distances)[:max_boundaries]
+      for local_id, boundary_id in enumerate(order):
+        self._draw_step_danger_boundary(
+          visualizer,
+          env_boundaries[boundary_id],
+          label=f"step_danger_{env_id}_{local_id}",
+        )
+
+  def _draw_step_danger_boundary(
+    self,
+    visualizer: DebugVisualizer,
+    boundary: np.ndarray,
+    label: str,
+  ) -> None:
+    p0 = boundary[0:3].astype(np.float64)
+    p1 = boundary[3:6].astype(np.float64)
+    normal_to_low = boundary[6:9].astype(np.float64)
+    z_low = float(boundary[9])
+    z_high = float(boundary[10])
+    height = z_high - z_low
+    if height <= 1.0e-6:
+      return
+
+    visualizer.add_cylinder(
+      start=p0,
+      end=p1,
+      radius=self._debug_vis_danger_lip_radius,
+      color=cast(tuple[float, float, float, float], self._debug_vis_danger_lip_color),
+      label=f"{label}_lip",
+    )
+
+    slab_depth = self._debug_vis_danger_slab_depth
+    edge = p1 - p0
+    edge_len = float(np.linalg.norm(edge))
+    if edge_len <= 1.0e-6 or slab_depth <= 0.0:
+      return
+
+    x_axis = edge / edge_len
+    y_axis = normal_to_low
+    y_axis[2] = 0.0
+    y_axis = y_axis - np.dot(y_axis, x_axis) * x_axis
+    y_norm = np.linalg.norm(y_axis)
+    if y_norm <= 1.0e-6:
+      return
+    y_axis = y_axis / y_norm
+    z_axis = np.cross(x_axis, y_axis)
+    z_norm = np.linalg.norm(z_axis)
+    if z_norm <= 1.0e-6:
+      return
+    z_axis = z_axis / z_norm
+
+    center = 0.5 * (p0 + p1)
+    center[2] = 0.5 * (z_low + z_high)
+    center += y_axis * (0.5 * slab_depth)
+    size = np.array(
+      [
+        0.5 * edge_len + self._debug_vis_danger_slab_u_margin,
+        0.5 * slab_depth,
+        0.5 * height + self._debug_vis_danger_slab_v_margin,
+      ]
+    )
+    mat = np.column_stack([x_axis, y_axis, z_axis])
+    visualizer.add_ellipsoid(
+      center=center,
+      size=size,
+      mat=mat,
+      color=cast(tuple[float, float, float, float], self._debug_vis_danger_slab_color),
+      label=f"{label}_slab",
     )
 
   @staticmethod
@@ -370,74 +521,47 @@ class foot_step_lip_volume_penalty(_StepBoundaryFootVolume):
   def __call__(
     self,
     env: ManagerBasedRlEnv,
-    edge_radius: float = 0.05,
-    edge_height_band: float | None = 0.06,
-    nearest_boundaries: int | None = None,
+    edge_radius: float,
+    edge_height_band: float,
+    support_speed_floor: float,
+    nearest_boundaries: int | None,
+    contact_sensor_name: str | None,
+    min_terrain_level: int | None,
     log_only: bool = False,
-    min_terrain_level: int | None = None,
-    asset_cfg: SceneEntityCfg = _DEFAULT_FOOT_BODY_CFG,
-    **_: object,
+    **_,
   ) -> torch.Tensor:
     boundaries, valid_boundaries = _current_step_boundaries(env)
     if boundaries is None or valid_boundaries is None:
       return torch.zeros(env.num_envs, device=env.device)
 
-    points_w, point_vel_w = self._foot_points_w(env, asset_cfg)
-    num_envs, num_feet, num_points = points_w.shape[:3]
-
     level_active = _terrain_level_active(env, min_terrain_level)
     base_valid = valid_boundaries & level_active[:, None]
+    if not bool(torch.any(base_valid).item()):
+      return torch.zeros(env.num_envs, device=env.device)
 
-    p0 = boundaries[:, :, 0:3]
-    p1 = boundaries[:, :, 3:6]
-    foot_ref_w = self._foot_ref_w(env, asset_cfg)
-    ref_dist = self._ref_to_segment_distance(foot_ref_w, p0, p1)
-    influence_radius = edge_radius + self._max_point_ref_distance
-    selected_idx, fallback = self._nearest_boundary_indices(
-      ref_dist, base_valid, influence_radius, nearest_boundaries
-    )
-
-    if selected_idx is None:
-      expanded_boundaries = boundaries[:, None, :, :].expand(num_envs, num_feet, -1, -1)
-      expanded_valid = base_valid[:, None, :].expand(num_envs, num_feet, -1)
-      min_dist = self._lip_min_dist(
-        points_w, expanded_boundaries, expanded_valid, edge_height_band
-      )
-      fallback_ratio = torch.zeros((), device=env.device)
-    else:
-      assert fallback is not None
-      selected_boundaries = self._gather_by_foot(boundaries, selected_idx)
-      selected_valid = self._gather_mask_by_foot(base_valid, selected_idx)
-      min_dist = self._lip_min_dist(
-        points_w, selected_boundaries, selected_valid, edge_height_band
-      )
-      fallback_ratio = fallback.float().mean()
-      if bool(torch.any(fallback).item()):
-        expanded_boundaries = boundaries[:, None, :, :].expand(
-          num_envs, num_feet, -1, -1
-        )
-        expanded_valid = base_valid[:, None, :].expand(num_envs, num_feet, -1)
-        full_min_dist = self._lip_min_dist(
-          points_w, expanded_boundaries, expanded_valid, edge_height_band
-        )
-        min_dist = torch.where(fallback[:, :, None], full_min_dist, min_dist)
-
-    penetration = torch.relu(edge_radius - min_dist)
-    point_speed = torch.norm(point_vel_w, dim=-1)
-    weights = self._point_weights.view(1, 1, num_points)
-    penalty = torch.sum(weights * penetration * (point_speed + 1e-6), dim=(1, 2))
-
+    points_w, _ = self._foot_points_w(env, self._debug_vis_asset_cfg)
+    min_dist = self._lip_min_dist(points_w, boundaries, base_valid, edge_height_band)
     finite = torch.isfinite(min_dist)
-    finite_count = finite.float().sum().clamp_min(1.0)
-    min_dist_mean = (
-      torch.where(finite, min_dist, torch.zeros_like(min_dist)).sum() / finite_count
-    )
-    env.extras["log"]["Metrics/step_lip_penalty_mean"] = penalty.mean()
-    env.extras["log"]["Metrics/step_lip_penetration_ratio"] = (
-      (penetration > 0.0).float().mean()
-    )
-    env.extras["log"]["Metrics/step_lip_min_dist_mean"] = min_dist_mean
-    env.extras["log"]["Metrics/step_lip_nearest_fallback_ratio"] = fallback_ratio
+    if not bool(torch.any(finite).item()):
+      return torch.zeros(env.num_envs, device=env.device)
+
+    in_radius = min_dist < edge_radius
+    in_radius_flat = in_radius.reshape(env.num_envs, -1)
+    penetration = edge_radius - min_dist
+
+    if contact_sensor_name is not None:
+      foot_xy_speed = torch.norm(
+        env.scene["robot"].data.body_link_lin_vel_w[
+          :, self._debug_vis_asset_cfg.body_ids, :2
+        ],
+        dim=-1,
+      )
+      moving = foot_xy_speed > support_speed_floor
+      support_mask = moving[:, :, None].expand_as(in_radius_flat)
+      penetration = penetration * support_mask.float()
+
+    flat_weights = self._flat_point_weights(env.num_envs, 2)
+    penalty = torch.sum(penetration.reshape(env.num_envs, -1) * flat_weights, dim=-1)
 
     if log_only:
       return torch.zeros_like(penalty)
@@ -554,61 +678,20 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     ascent_observed = (root_z_gain >= min_ascent_height) | (
       root_vz > ascent_velocity_threshold
     )
-    ascent_observed |= interaction_observed
 
     self._ascent_active |= level_active & ascent_observed
     active_gate = level_active & self._ascent_active
+
     inactive = ~active_gate
     if bool(torch.any(inactive).item()):
-      self._probe_layer_hit[inactive] = False
       self._probe_hit_cooldown[inactive] = 0.0
-    self._probe_hit_cooldown = torch.clamp(
-      self._probe_hit_cooldown - env.step_dt, min=0.0
-    )
+
     return active_gate
-
-  @staticmethod
-  def _contact_probe_layers(
-    contact_pos_w: torch.Tensor,
-    boundaries: torch.Tensor,
-    probe_boundary_layers: torch.Tensor,
-  ) -> torch.Tensor:
-    p0 = boundaries[:, :, 0:3]
-    p1 = boundaries[:, :, 3:6]
-    segment = p1 - p0
-    segment_len_sq = torch.sum(torch.square(segment), dim=-1).clamp_min(1.0e-12)
-    point_delta = contact_pos_w[:, :, :, None, :] - p0[:, None, None, :, :]
-    t = torch.sum(point_delta * segment[:, None, None, :, :], dim=-1)
-    t = torch.clamp(t / segment_len_sq[:, None, None, :], 0.0, 1.0)
-    closest = p0[:, None, None, :, :] + t[..., None] * segment[:, None, None, :, :]
-    distances = torch.norm(contact_pos_w[:, :, :, None, :] - closest, dim=-1)
-
-    valid_probe_layers = probe_boundary_layers > 0
-    distances = torch.where(
-      valid_probe_layers[:, None, None, :],
-      distances,
-      torch.full_like(distances, torch.inf),
-    )
-    nearest_dist, nearest_idx = torch.min(distances, dim=-1)
-    expanded_layers = probe_boundary_layers[:, None, None, :].expand(
-      *nearest_idx.shape,
-      probe_boundary_layers.shape[-1],
-    )
-    nearest_layers = torch.gather(
-      expanded_layers,
-      dim=-1,
-      index=nearest_idx[..., None],
-    ).squeeze(-1)
-    return torch.where(
-      torch.isfinite(nearest_dist),
-      nearest_layers,
-      torch.zeros_like(nearest_layers),
-    )
 
   def _contact_probe_terms(
     self,
     env: ManagerBasedRlEnv,
-    sensor_name: str,
+    contact_sensor_name: str,
     asset: Entity,
     asset_cfg: SceneEntityCfg,
     active_gate: torch.Tensor,
@@ -616,20 +699,17 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     probe_boundary_layers: torch.Tensor,
     max_probe_layers: int,
     toe_x_min: float,
-    vertical_normal_z_max: float,
-    forward_velocity_threshold: float,
-    force_threshold: float,
-    force_scale: float,
+    contact_vertical_normal_z_max: float,
+    contact_forward_velocity_threshold: float,
+    contact_force_threshold: float,
+    contact_force_scale: float,
     contact_penalty_scale: float,
     contact_time_scale: float,
     probe_contact_reward: float,
     probe_cooldown_time: float,
   ) -> tuple[torch.Tensor, torch.Tensor]:
-    sensor = env.scene[sensor_name]
-    assert isinstance(sensor, ContactSensor), (
-      f"toe_step_riser_slab_penalty requires a ContactSensor for "
-      f"contact_sensor_name='{sensor_name}', got {type(sensor).__name__}"
-    )
+    sensor = env.scene[contact_sensor_name]
+    assert isinstance(sensor, ContactSensor)
     data = sensor.data
     assert data.found is not None
     assert data.force is not None
@@ -637,12 +717,8 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     assert data.pos is not None
 
     num_envs = env.num_envs
-    num_feet = self._probe_hit_cooldown.shape[1]
+    num_feet = len(asset_cfg.body_ids) if isinstance(asset_cfg.body_ids, list) else 2
     num_contacts = data.found.shape[1]
-    assert num_contacts % num_feet == 0, (
-      f"Contact sensor '{sensor_name}' has {num_contacts} contact slots, which is "
-      f"not divisible by {num_feet} feet"
-    )
     num_slots = num_contacts // num_feet
 
     found = data.found.view(num_envs, num_feet, num_slots) > 0
@@ -668,18 +744,18 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     foot_forward_w = quat_apply(foot_quat_w, local_forward)
     foot_forward_xy = foot_forward_w[..., :2]
     foot_forward_xy = foot_forward_xy / torch.clamp(
-      torch.norm(foot_forward_xy, dim=-1, keepdim=True), min=1.0e-6
+      torch.norm(foot_forward_xy, dim=-1, keepdim=True), min=1e-6
     )
-
     foot_forward_vel = torch.sum(foot_vel_w[..., :2] * foot_forward_xy, dim=-1)
-    is_forward_sweep = foot_forward_vel[:, :, None] > forward_velocity_threshold
-    is_vertical_face = torch.abs(normal_w[..., 2]) < vertical_normal_z_max
+    is_forward_sweep = foot_forward_vel[:, :, None] > contact_forward_velocity_threshold
+
+    is_vertical_face = torch.abs(normal_w[..., 2]) < contact_vertical_normal_z_max
     force_dot_forward = torch.sum(
       force_w[..., :2] * foot_forward_xy[:, :, None, :], dim=-1
     )
     blocking_force = torch.relu(-force_dot_forward)
     hit_strength = torch.clamp(
-      (blocking_force - force_threshold) / force_scale,
+      (blocking_force - contact_force_threshold) / contact_force_scale,
       min=0.0,
       max=1.0,
     )
@@ -692,8 +768,13 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       & (hit_strength > 0.0)
     )
     hit_by_foot = torch.any(toe_riser_hit, dim=-1)
-    current_hit_by_foot = hit_by_foot & active_gate[:, None]
-    new_hit_by_foot = current_hit_by_foot & (self._probe_hit_cooldown <= 0.0)
+
+    self._probe_hit_cooldown = torch.clamp(
+      self._probe_hit_cooldown - env.step_dt, min=0.0
+    )
+    new_hit_by_foot = (
+      hit_by_foot & active_gate[:, None] & (self._probe_hit_cooldown <= 0.0)
+    )
 
     if bool(torch.any(new_hit_by_foot).item()):
       self._probe_hit_cooldown = torch.where(
@@ -702,114 +783,63 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         self._probe_hit_cooldown,
       )
 
-    current_hit_env = torch.any(current_hit_by_foot, dim=-1)
-    new_hit_env = torch.any(new_hit_by_foot, dim=-1)
-    contact_layers = self._contact_probe_layers(
-      contact_pos_w,
-      boundaries,
-      probe_boundary_layers,
-    )
-    active_toe_hit = toe_riser_hit & active_gate[:, None, None]
-    probe_layer_contact = active_toe_hit & (contact_layers > 0)
-    non_probe_contact = active_toe_hit & ~probe_layer_contact
-    non_probe_hit_by_foot = torch.any(non_probe_contact, dim=-1)
-    non_probe_hit_env = torch.any(non_probe_hit_by_foot, dim=-1)
-
-    per_foot_non_probe_strength = torch.max(
-      torch.where(non_probe_contact, hit_strength, torch.zeros_like(hit_strength)),
+    per_foot_strength = torch.max(
+      torch.where(toe_riser_hit, hit_strength, torch.zeros_like(hit_strength)),
       dim=-1,
     ).values
-    current_strength = torch.max(
+    env_hit_strength = torch.max(
       torch.where(
-        non_probe_hit_by_foot,
-        per_foot_non_probe_strength,
-        torch.zeros_like(per_foot_non_probe_strength),
+        new_hit_by_foot,
+        per_foot_strength,
+        torch.zeros_like(per_foot_strength),
       ),
       dim=-1,
     ).values
 
-    if max_probe_layers > 0:
-      layer_ids = torch.arange(
-        1,
-        max_probe_layers + 1,
-        device=env.device,
-        dtype=torch.long,
-      )
-      current_probe_layers = torch.any(
-        probe_layer_contact[..., None] & (contact_layers[..., None] == layer_ids),
-        dim=(1, 2),
-      )
-      tracked_probe_layers = self._probe_layer_hit[:, :max_probe_layers]
-      new_probe_layers = current_probe_layers & ~tracked_probe_layers
-      if bool(torch.any(current_probe_layers).item()):
-        self._probe_layer_hit[:, :max_probe_layers] = (
-          tracked_probe_layers | current_probe_layers
-        )
-      probe_count_by_env = (
-        self._probe_layer_hit[:, :max_probe_layers].float().sum(dim=-1)
-      )
-    else:
-      new_probe_layers = torch.zeros(
-        (num_envs, 0),
-        device=env.device,
-        dtype=torch.bool,
-      )
-      probe_count_by_env = torch.zeros(
-        num_envs,
-        device=env.device,
-        dtype=torch.float32,
-      )
-
-    contact_time = data.current_contact_time
-    if contact_time is None:
-      contact_time = current_hit_by_foot.float() * env.step_dt
-    elif contact_time.shape[1] != num_feet:
-      if contact_time.shape[1] % num_feet != 0:
-        raise RuntimeError(
-          f"Contact sensor '{sensor_name}' contact times cannot be grouped by foot: "
-          f"{contact_time.shape[1]} entries for {num_feet} feet"
-        )
-      contact_time = contact_time.view(num_envs, num_feet, -1).max(dim=-1).values
-
-    env_contact_time = torch.max(
-      torch.where(current_hit_by_foot, contact_time, torch.zeros_like(contact_time)),
-      dim=-1,
-    ).values
-    penalty_contact_time = torch.max(
-      torch.where(non_probe_hit_by_foot, contact_time, torch.zeros_like(contact_time)),
-      dim=-1,
-    ).values
-    time_scale = max(contact_time_scale, 1.0e-6)
-    contact_time_weight = torch.clamp(
-      penalty_contact_time / time_scale,
-      min=0.0,
-      max=1.0,
-    )
-
     contact_penalty = (
-      non_probe_hit_env.float()
-      * current_strength
-      * (1.0 + contact_time_weight)
+      active_gate.float()
+      * env_hit_strength
       * contact_penalty_scale
+      * contact_time_scale
     )
-    probe_reward = new_probe_layers.float().sum(dim=-1) * probe_contact_reward
 
-    env.extras["log"]["Metrics/toe_riser_slab_true_contact_ratio"] = (
-      current_hit_env.float().mean()
-    )
-    env.extras["log"]["Metrics/toe_riser_slab_new_contact_ratio"] = (
-      new_hit_env.float().mean()
-    )
-    env.extras["log"]["Metrics/toe_riser_slab_contact_penalty_mean"] = (
-      contact_penalty.mean()
-    )
+    # Probe reward: check contact positions against boundary layers
+    if max_probe_layers > 0:
+      p0 = boundaries[:, :, 0:3]
+      p1 = boundaries[:, :, 3:6]
+      segment = p1 - p0
+      segment_len_sq = torch.sum(torch.square(segment), dim=-1).clamp_min(1e-12)
+      contact_delta = contact_pos_w[:, :, :, None, :] - p0[:, None, :, None, :]
+      t = torch.sum(contact_delta * segment[:, None, :, None, :], dim=-1)
+      t = t / segment_len_sq[:, None, :, None]
+      t_clamped = torch.clamp(t, 0.0, 1.0)
+      closest = (
+        p0[:, None, :, None, :] + t_clamped[..., None] * segment[:, None, :, None, :]
+      )
+      contact_dist = torch.norm(contact_pos_w[:, :, :, None, :] - closest, dim=-1)
+      near_boundary = contact_dist < 0.05
+      env_boundary_layers = probe_boundary_layers[:, None, :].expand(
+        num_envs, num_feet, -1
+      )
+      contact_layers = torch.where(
+        near_boundary,
+        env_boundary_layers[:, :, None, :].expand(num_envs, num_feet, num_slots, -1),
+        torch.zeros_like(
+          env_boundary_layers[:, :, None, :].expand(num_envs, num_feet, num_slots, -1)
+        ),
+      )
+      max_contact_layers = torch.max(contact_layers, dim=-1).values
+      new_layers = (
+        (max_contact_layers > 0)
+        & hit_by_foot
+        & ~(self._probe_layer_hit[:, :1].expand(num_envs, num_feet))
+      )
+      new_layers = new_layers & active_gate[:, None]
+      probe_reward = new_layers.float().sum(dim=-1) * probe_contact_reward
+    else:
+      probe_reward = torch.zeros(env.num_envs, device=env.device)
+
     env.extras["log"]["Metrics/toe_riser_slab_probe_reward_mean"] = probe_reward.mean()
-    env.extras["log"]["Metrics/toe_riser_slab_probe_count_mean"] = (
-      probe_count_by_env.mean()
-    )
-    env.extras["log"]["Metrics/toe_riser_slab_contact_time_mean"] = (
-      env_contact_time.mean()
-    )
     return contact_penalty, probe_reward
 
   def __call__(
@@ -1030,6 +1060,324 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
 
 class toe_step_riser_approach_penalty(toe_step_riser_slab_penalty):
   """Backward-compatible alias for the toe riser slab penalty."""
+
+
+# ---------------------------------------------------------------------------
+# heel_step_riser_clearance_penalty
+# ---------------------------------------------------------------------------
+
+
+class heel_step_riser_clearance_penalty(_StepBoundaryFootVolume):
+  """Penalize heel points getting too close to the low-side riser face.
+
+  As the foot swings forward, the heel should maintain a minimum clearance
+  from the riser to avoid clipping through it. This penalizes heel volume
+  points that approach the riser from the low side.
+  """
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    heel_clearance: float = 0.10,
+    u_margin: float = 0.04,
+    v_margin: float = 0.06,
+    heel_x_max: float = 0.0,
+    surface_tol: float = 0.005,
+    nearest_boundaries: int | None = 4,
+    contact_sensor_name: str | None = None,
+    min_terrain_level: int | None = 3,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FOOT_BODY_CFG,
+    **_: object,
+  ) -> torch.Tensor:
+    boundaries, valid_boundaries = _current_step_boundaries(env)
+    if boundaries is None or valid_boundaries is None:
+      return torch.zeros(env.num_envs, device=env.device)
+
+    level_active = _terrain_level_active(env, min_terrain_level)
+    base_valid = valid_boundaries & level_active[:, None]
+    if not bool(torch.any(base_valid).item()):
+      return torch.zeros(env.num_envs, device=env.device)
+
+    # Heel mask: points with x <= heel_x_max
+    heel_mask = self._local_x <= heel_x_max
+    if heel_mask.sum().item() == 0:
+      return torch.zeros(env.num_envs, device=env.device)
+
+    points_w, point_vel_w = self._foot_points_w(env, asset_cfg)
+    heel_points = points_w[:, :, heel_mask, :]
+    heel_vel = point_vel_w[:, :, heel_mask, :]
+    num_envs, num_feet = heel_points.shape[:2]
+
+    # Use foot reference to find nearest boundaries
+    foot_ref_w = self._foot_ref_w(env, asset_cfg)
+    # Use riser_slab slab_depth=heel_clearance, with same u/v margins
+    ref_dist = self._riser_slab_ref_distance(
+      foot_ref_w,
+      boundaries,
+      heel_clearance,
+      u_margin,
+      v_margin,
+      surface_tol,
+    )
+    heel_ref_radius = torch.norm(
+      self._local_points[heel_mask] - self._foot_ref_local, dim=-1
+    ).max()
+    selected_idx, fallback = self._nearest_boundary_indices(
+      ref_dist, base_valid, heel_ref_radius, nearest_boundaries
+    )
+
+    if selected_idx is None:
+      expanded_boundaries = boundaries[:, None, :, :].expand(num_envs, num_feet, -1, -1)
+      expanded_valid = base_valid[:, None, :].expand(num_envs, num_feet, -1)
+      point_penalty, active, _, _ = self._riser_slab_point_penalty(
+        heel_points,
+        heel_vel,
+        expanded_boundaries,
+        expanded_valid,
+        heel_clearance,
+        u_margin,
+        v_margin,
+        0.0,  # No speed threshold for clearance
+        surface_tol,
+      )
+    else:
+      selected_boundaries = self._gather_by_foot(boundaries, selected_idx)
+      selected_valid = self._gather_mask_by_foot(base_valid, selected_idx)
+      point_penalty, active, _, _ = self._riser_slab_point_penalty(
+        heel_points,
+        heel_vel,
+        selected_boundaries,
+        selected_valid,
+        heel_clearance,
+        u_margin,
+        v_margin,
+        0.0,
+        surface_tol,
+      )
+      if bool(torch.any(fallback).item()):
+        expanded_boundaries = boundaries[:, None, :, :].expand(
+          num_envs, num_feet, -1, -1
+        )
+        expanded_valid = base_valid[:, None, :].expand(num_envs, num_feet, -1)
+        full_penalty, full_active, _, _ = self._riser_slab_point_penalty(
+          heel_points,
+          heel_vel,
+          expanded_boundaries,
+          expanded_valid,
+          heel_clearance,
+          u_margin,
+          v_margin,
+          0.0,
+          surface_tol,
+        )
+        fallback_mask = fallback[:, :, None]
+        point_penalty = torch.where(fallback_mask, full_penalty, point_penalty)
+        active = torch.where(fallback_mask, full_active, active)
+
+    penalty = torch.sum(point_penalty, dim=(1, 2))
+    env.extras["log"]["Metrics/heel_riser_clearance_penalty_mean"] = penalty.mean()
+
+    # Gate by contact: only active when foot is in stance
+    if contact_sensor_name is not None:
+      contact_sensor: ContactSensor = env.scene[contact_sensor_name]
+      assert contact_sensor.data.found is not None
+      in_air = (contact_sensor.data.found == 0).all(dim=-1)
+      penalty = penalty * (~in_air).float()
+
+    return penalty
+
+
+# ---------------------------------------------------------------------------
+# foot_landing_flatness_penalty
+# ---------------------------------------------------------------------------
+
+
+class foot_landing_flatness_penalty:
+  """Penalize landing on tilted terrain surfaces.
+
+  At each foot landing contact, checks the terrain normal under the foot
+  via height samples. If the terrain tilt exceeds *max_tilt_deg*, a
+  proportional penalty is applied.
+  """
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    self._step_dt = env.step_dt
+    self._env = env
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    near_height: float = 0.15,
+    max_tilt_deg: float = 12.0,
+    max_upward_speed: float = 0.10,
+    height_sensor_name: str = "foot_height_scan",
+    contact_sensor_name: str = "feet_ground_contact",
+    min_terrain_level: int | None = 3,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FOOT_BODY_CFG,
+    **_: object,
+  ) -> torch.Tensor:
+    contact_sensor: ContactSensor = env.scene[contact_sensor_name]
+    height_sensor = env.scene[height_sensor_name]
+    assert isinstance(height_sensor, TerrainHeightSensor), (
+      f"foot_landing_flatness_penalty requires a TerrainHeightSensor, "
+      f"got {type(height_sensor).__name__}"
+    )
+
+    asset: Entity = env.scene[asset_cfg.name]
+    first_contact = contact_sensor.compute_first_contact(dt=self._step_dt)
+    if not bool(torch.any(first_contact).item()):
+      return torch.zeros(env.num_envs, device=env.device)
+
+    level_active = _terrain_level_active(env, min_terrain_level)
+    if not bool(torch.any(level_active).item()):
+      return torch.zeros(env.num_envs, device=env.device)
+
+    # Get terrain normal from height samples
+    terrain_normal = terrain_normal_from_sensors(env, (height_sensor_name,))
+    # Compute tilt: angle between terrain normal and world up (0,0,1)
+    world_up = torch.tensor([0.0, 0.0, 1.0], device=env.device, dtype=torch.float32)
+    cos_tilt = torch.sum(terrain_normal * world_up.unsqueeze(0), dim=-1)
+    cos_tilt = torch.clamp(cos_tilt, -1.0, 1.0)
+    tilt_deg = torch.rad2deg(torch.acos(cos_tilt))
+
+    # Only penalize if foot is coming down slowly (near landing)
+    foot_vel_z = asset.data.body_link_lin_vel_w[:, asset_cfg.body_ids, 2]
+    foot_near_ground = foot_vel_z > -max_upward_speed
+
+    # Height check: foot must be near ground
+    foot_height = height_sensor.data.heights
+    near_touchdown = (foot_height < near_height) & (foot_height >= 0.0)
+
+    # Combine: first contact OR near touchdown with foot moving down
+    valid_check = first_contact | (foot_near_ground & near_touchdown)
+    valid_per_env = valid_check.any(dim=-1)
+
+    excess_tilt = torch.relu(tilt_deg - max_tilt_deg)
+    tilt_ratio = excess_tilt / max_tilt_deg
+
+    penalty = tilt_ratio * level_active.float() * valid_per_env.float()
+    env.extras["log"]["Metrics/foot_landing_tilt_deg_mean"] = tilt_deg.mean()
+    env.extras["log"]["Metrics/foot_landing_flatness_penalty_mean"] = penalty.mean()
+
+    return penalty
+
+
+# ---------------------------------------------------------------------------
+# shank_step_lip_proximity_penalty
+# ---------------------------------------------------------------------------
+
+
+class shank_step_lip_proximity_penalty(_StepBoundaryFootVolume):
+  """Penalize shank (knee link) points getting too close to step lip edges.
+
+  Uses a volume of points on the shank link body and checks minimum
+  distance to step boundary lips. Two-tier penalty: soft clearance zone
+  and hard collision zone.
+  """
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    super().__init__(cfg, env)
+    self._ascent_active = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+    self._height_history = torch.zeros(
+      env.num_envs, device=env.device, dtype=torch.float32
+    )
+    self._ascent_hold_counter = torch.zeros(
+      env.num_envs, device=env.device, dtype=torch.long
+    )
+
+  def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+    if env_ids is None:
+      env_ids = slice(None)
+    self._ascent_active[env_ids] = False
+    self._height_history[env_ids] = 0.0
+    self._ascent_hold_counter[env_ids] = 0
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    clearance_radius: float = 0.20,
+    collision_radius: float = 0.05,
+    collision_weight: float = 4.0,
+    height_history_len: int = 6,
+    height_gain_threshold: float = 0.03,
+    ascent_hold_steps: int = 4,
+    shank_tilt_threshold_deg: float = 15.0,
+    nearest_boundaries: int | None = 4,
+    min_terrain_level: int | None = 3,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FOOT_BODY_CFG,
+    **_: object,
+  ) -> torch.Tensor:
+    boundaries, valid_boundaries = _current_step_boundaries(env)
+    if boundaries is None or valid_boundaries is None:
+      return torch.zeros(env.num_envs, device=env.device)
+
+    level_active = _terrain_level_active(env, min_terrain_level)
+    base_valid = valid_boundaries & level_active[:, None]
+    if not bool(torch.any(base_valid).item()):
+      return torch.zeros(env.num_envs, device=env.device)
+
+    # Ascent detection via body tilt
+    asset: Entity = env.scene[asset_cfg.name]
+    body_quat_w = asset.data.root_link_quat_w
+    gravity_b = quat_apply_inverse(body_quat_w, asset.data.gravity_vec_w)
+    tilt_angle = torch.rad2deg(
+      torch.acos(torch.clamp(torch.abs(gravity_b[:, 2]), -1.0, 1.0))
+    )
+    tilted = tilt_angle > shank_tilt_threshold_deg
+
+    # Height tracking for ascent gating
+    root_z = asset.data.root_link_pos_w[:, 2]
+    current_height = root_z.clone()
+    height_gain = current_height - self._height_history
+    ascending = height_gain > height_gain_threshold
+
+    self._ascent_hold_counter = torch.where(
+      ascending,
+      torch.full_like(self._ascent_hold_counter, ascent_hold_steps),
+      torch.clamp(self._ascent_hold_counter - 1, min=0),
+    )
+    ascent_active_now = (self._ascent_hold_counter > 0) | self._ascent_active
+    self._ascent_active = ascent_active_now
+    self._height_history = current_height
+
+    active_gate = level_active & tilted & ascent_active_now
+    if not bool(torch.any(active_gate).item()):
+      return torch.zeros(env.num_envs, device=env.device)
+
+    # Get shank volume points in world frame
+    points_w, _ = self._foot_points_w(env, asset_cfg)
+    num_envs, num_feet = points_w.shape[:2]
+
+    # Compute min distance to step lips
+    min_dist = self._lip_min_dist(points_w, boundaries, base_valid, None)
+    finite = torch.isfinite(min_dist)
+    if not bool(torch.any(finite).item()):
+      return torch.zeros(env.num_envs, device=env.device)
+
+    # Two-tier penalty
+    in_collision = (min_dist < collision_radius) & finite
+    in_clearance = (
+      (min_dist >= collision_radius) & (min_dist < clearance_radius) & finite
+    )
+
+    collision_pen = torch.sum(
+      (collision_radius - min_dist) * in_collision.float(), dim=(1, 2)
+    )
+    clearance_pen = torch.sum(
+      (clearance_radius - min_dist) * in_clearance.float(), dim=(1, 2)
+    )
+    penalty = collision_pen * collision_weight + clearance_pen
+    penalty = penalty * active_gate.float()
+
+    env.extras["log"]["Metrics/shank_lip_proximity_penalty_mean"] = penalty.mean()
+    env.extras["log"]["Metrics/shank_lip_proximity_collision_ratio"] = (
+      in_collision.float().mean()
+    )
+    env.extras["log"]["Metrics/shank_lip_proximity_active_ratio"] = (
+      active_gate.float().mean()
+    )
+
+    return penalty
 
 
 def track_linear_velocity(
@@ -1270,11 +1618,7 @@ def feet_clearance(
       raise ValueError("feet_clearance requires both min_height and max_height.")
     if min_height > max_height:
       raise ValueError("feet_clearance min_height must be <= max_height.")
-    min_height_tensor = foot_height.new_tensor(min_height)
-    max_height_tensor = foot_height.new_tensor(max_height)
-    delta = torch.relu(min_height_tensor - foot_height) + torch.relu(
-      foot_height - max_height_tensor
-    )
+    delta = torch.relu(min_height - foot_height) + torch.relu(foot_height - max_height)
   else:
     if target_height is None:
       raise ValueError("feet_clearance requires target_height or min/max height.")
@@ -1292,7 +1636,7 @@ def feet_clearance(
 
 
 class feet_swing_height:
-  """Penalize swing peaks below the target height, evaluated at landing."""
+  """Penalize deviation from target swing height, evaluated at landing."""
 
   def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
     height_sensor = env.scene[cfg.params["height_sensor_name"]]
@@ -1330,8 +1674,8 @@ class feet_swing_height:
     angular_norm = torch.abs(command[:, 2])
     total_command = linear_norm + angular_norm
     active = (total_command > command_threshold).float()
-    shortfall = torch.relu(1.0 - self.peak_heights / target_height)
-    cost = torch.sum(torch.square(shortfall) * first_contact.float(), dim=1) * active
+    error = self.peak_heights / target_height - 1.0
+    cost = torch.sum(torch.square(error) * first_contact.float(), dim=1) * active
     num_landings = torch.sum(first_contact.float())
     peak_heights_at_landing = self.peak_heights * first_contact.float()
     mean_peak_height = torch.sum(peak_heights_at_landing) / torch.clamp(

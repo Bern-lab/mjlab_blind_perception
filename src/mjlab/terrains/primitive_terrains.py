@@ -17,6 +17,7 @@ import mujoco
 import numpy as np
 
 from mjlab.terrains.terrain_generator import (
+  FlatPatchSamplingCfg,
   SubTerrainCfg,
   TerrainGeometry,
   TerrainOutput,
@@ -1262,6 +1263,341 @@ class BoxRandomStairsTerrainCfg(SubTerrainCfg):
 
     origin = np.array([terrain_center[0], terrain_center[1], current_z])
     return TerrainOutput(origin=origin, geometries=geometries)
+
+
+@dataclass(kw_only=True)
+class BoxSteppingStoneGridTerrainCfg(SubTerrainCfg):
+  """Regular grid of stepping stones with difficulty-driven curriculum.
+
+  At low difficulty, stones are large, flat, and tightly spaced. As difficulty
+  increases they shrink to approximately 0.3 m cubes with wider gaps. The
+  center platform is exposed as the target flat-patch for target-heading
+  navigation.
+
+  Two variants are supported:
+
+  * ``inverted=False`` - raised stones over empty gaps.
+  * ``inverted=True``  - stones below a higher surrounding rim over empty gaps.
+
+  The non-inverted variant keeps its outer rim at ground level. The inverted
+  variant raises the outer rim and center platform with difficulty so the robot
+  must step down onto the stones.
+  """
+
+  stone_size_start: float = 0.60
+  """Stone top side length at difficulty 0, in meters."""
+  stone_size_end: float = 0.30
+  """Stone top side length at difficulty 1, in meters."""
+  stone_height_start: float = 0.08
+  """Normal top height, and inverted pillar depth scale, at difficulty 0."""
+  stone_height_end: float = 0.30
+  """Normal top height, and inverted pillar depth scale, at difficulty 1."""
+  inverted_rim_height_start: float = 0.0
+  """Outer-rim/center-platform height above inverted stone tops at difficulty 0."""
+  inverted_rim_height_end: float = 0.30
+  """Outer-rim/center-platform height above inverted stone tops at difficulty 1."""
+  gap_start: float = 0.05
+  """Extra gap beyond stone_size between adjacent stones at difficulty 0."""
+  gap_end: float = 0.18
+  """Extra gap beyond stone_size between adjacent stones at difficulty 1."""
+  jitter_start: float = 0.01
+  """Max random XY jitter applied to each stone center at difficulty 0."""
+  jitter_end: float = 0.05
+  """Max random XY jitter applied to each stone center at difficulty 1."""
+
+  num_rows: int | None = None
+  """Number of stone rows. Computed from inner size / spacing when None."""
+  num_cols: int | None = None
+  """Number of stone columns. Computed from inner size / spacing when None."""
+  platform_width: float = 1.0
+  """Side length of the flat square platform at the grid center, in meters."""
+  border_width: float = 0.5
+  """Width of the flat border frame around the stone grid, in meters."""
+
+  floor_clearance: float = 0.15
+  """Depth below the lowest stepping surface used for pillar bottoms."""
+  inverted: bool = False
+  """If True, rim and center platform are raised above the stone tops."""
+  sample_goals_on_stones: bool = True
+  """If True, expose the center platform as the 'target' flat patch."""
+
+  def __post_init__(self) -> None:
+    if self.sample_goals_on_stones and self.flat_patch_sampling is None:
+      object.__setattr__(
+        self,
+        "flat_patch_sampling",
+        {"target": FlatPatchSamplingCfg(num_patches=1)},
+      )
+
+  def function(
+    self, difficulty: float, spec: mujoco.MjSpec, rng: np.random.Generator
+  ) -> TerrainOutput:
+    d = difficulty
+
+    stone_size = float(
+      self.stone_size_start + d * (self.stone_size_end - self.stone_size_start)
+    )
+    stone_height = float(
+      self.stone_height_start + d * (self.stone_height_end - self.stone_height_start)
+    )
+    inverted_rim_height = float(
+      self.inverted_rim_height_start
+      + d * (self.inverted_rim_height_end - self.inverted_rim_height_start)
+    )
+    gap = float(self.gap_start + d * (self.gap_end - self.gap_start))
+    spacing = stone_size + gap
+    max_jitter = max(0.0, 0.5 * gap - 0.02)
+    jitter = min(
+      float(self.jitter_start + d * (self.jitter_end - self.jitter_start)), max_jitter
+    )
+
+    body = spec.body("terrain")
+    geometries: list[TerrainGeometry] = []
+    step_boundaries: list[np.ndarray] = []
+
+    terrain_center = np.array([0.5 * self.size[0], 0.5 * self.size[1], 0.0])
+    inner_min = np.array([self.border_width, self.border_width])
+    inner_max = np.array(
+      [self.size[0] - self.border_width, self.size[1] - self.border_width]
+    )
+    inner_size = inner_max - inner_min
+    if np.any(inner_size <= 0.0):
+      raise ValueError(
+        "BoxSteppingStoneGridTerrainCfg.border_width leaves no inner area: "
+        f"size={self.size}, border_width={self.border_width}."
+      )
+
+    # No inner floor is added: missed footholds fall through the gaps.
+    low_z = (
+      -stone_height - self.floor_clearance if self.inverted else -self.floor_clearance
+    )
+    rim_z = inverted_rim_height if self.inverted else 0.0
+
+    # ----- Border frame -----
+    border_rgba = darken_rgba(brand_ramp(_MUJOCO_GREEN, 0.0), 0.85)
+    if self.border_width > 0.0:
+      border_height = rim_z - low_z
+      border_center_z = low_z + border_height / 2.0
+      border_center = (terrain_center[0], terrain_center[1], border_center_z)
+      border_inner = (
+        self.size[0] - 2.0 * self.border_width,
+        self.size[1] - 2.0 * self.border_width,
+      )
+      for b in make_border(body, self.size, border_inner, border_height, border_center):
+        geometries.append(TerrainGeometry(geom=b, color=border_rgba))
+      _append_square_step_boundaries(
+        step_boundaries,
+        terrain_center.tolist(),
+        tuple(inner_size.tolist()),
+        step_width=0.0,
+        boundary_index=0,
+        z_low=low_z,
+        z_high=rim_z,
+        normal_direction="inward",
+      )
+
+    # ----- Center platform -----
+    platform_z = inverted_rim_height if self.inverted else stone_height
+    platform_half = self.platform_width / 2.0
+    platform_box_height = platform_z - low_z
+    platform_center_z = low_z + platform_box_height / 2.0
+    plat_geom = body.add_geom(
+      type=mujoco.mjtGeom.mjGEOM_BOX,
+      size=(platform_half, platform_half, platform_box_height / 2.0),
+      pos=(terrain_center[0], terrain_center[1], platform_center_z),
+    )
+    geometries.append(
+      TerrainGeometry(geom=plat_geom, color=_get_platform_color(_MUJOCO_GREEN))
+    )
+
+    # Platform step boundaries (4 edges)
+    plat_p0 = np.array(
+      [
+        terrain_center[0] - platform_half,
+        terrain_center[1] + platform_half,
+        platform_z,
+      ]
+    )
+    plat_p1_top = np.array(
+      [
+        terrain_center[0] + platform_half,
+        terrain_center[1] + platform_half,
+        platform_z,
+      ]
+    )
+    plat_p2_right = np.array(
+      [
+        terrain_center[0] + platform_half,
+        terrain_center[1] - platform_half,
+        platform_z,
+      ]
+    )
+    plat_p3_bot = np.array(
+      [
+        terrain_center[0] - platform_half,
+        terrain_center[1] - platform_half,
+        platform_z,
+      ]
+    )
+    plat_z_low = low_z
+    plat_z_high = platform_z
+    _append_step_boundary(
+      step_boundaries,
+      tuple(plat_p0),
+      tuple(plat_p1_top),
+      (0.0, 1.0, 0.0),
+      plat_z_low,
+      plat_z_high,
+    )
+    _append_step_boundary(
+      step_boundaries,
+      tuple(plat_p2_right),
+      tuple(plat_p3_bot),
+      (0.0, -1.0, 0.0),
+      plat_z_low,
+      plat_z_high,
+    )
+    _append_step_boundary(
+      step_boundaries,
+      tuple(plat_p1_top),
+      tuple(plat_p2_right),
+      (1.0, 0.0, 0.0),
+      plat_z_low,
+      plat_z_high,
+    )
+    _append_step_boundary(
+      step_boundaries,
+      tuple(plat_p3_bot),
+      tuple(plat_p0),
+      (-1.0, 0.0, 0.0),
+      plat_z_low,
+      plat_z_high,
+    )
+
+    # ----- Stone grid filling the inner area from the platform outward -----
+    inner_w = inner_size[0]
+    inner_h = inner_size[1]
+    stone_rgba_base = brand_ramp(_MUJOCO_GREEN, 0.3)
+    half_s = stone_size / 2.0
+
+    def _axis_offsets(
+      requested_count: int | None,
+      inner_extent: float,
+    ) -> np.ndarray:
+      inner_half = inner_extent / 2.0
+      first_center = platform_half + gap + half_s
+      usable = inner_half - first_center
+      if usable < -_STEP_BOUNDARY_EPS:
+        raise ValueError(
+          "BoxSteppingStoneGridTerrainCfg platform/gap/stone size leaves no "
+          f"room for stones: size={self.size}, platform_width={self.platform_width}, "
+          f"stone_size={stone_size}, gap={gap}."
+        )
+      max_side_count = max(1, int(np.floor(max(usable, 0.0) / spacing)) + 1)
+      if requested_count is None:
+        side_count = max_side_count
+      else:
+        side_count = min(max(1, int(np.ceil(requested_count / 2))), max_side_count)
+      side_offsets = first_center + np.arange(side_count) * spacing
+      return np.concatenate([-side_offsets[::-1], np.array([0.0]), side_offsets])
+
+    x_offsets = _axis_offsets(self.num_cols, inner_w)
+    y_offsets = _axis_offsets(self.num_rows, inner_h)
+    safe_jitter = min(jitter, max(0.0, 0.45 * gap))
+
+    for y_offset in y_offsets:
+      for x_offset in x_offsets:
+        cx = (
+          terrain_center[0] + x_offset + float(rng.uniform(-safe_jitter, safe_jitter))
+        )
+        cy = (
+          terrain_center[1] + y_offset + float(rng.uniform(-safe_jitter, safe_jitter))
+        )
+
+        cx = float(np.clip(cx, inner_min[0] + half_s, inner_max[0] - half_s))
+        cy = float(np.clip(cy, inner_min[1] + half_s, inner_max[1] - half_s))
+
+        # Skip stones that overlap with the center platform
+        if (
+          abs(cx - terrain_center[0]) < platform_half + half_s
+          and abs(cy - terrain_center[1]) < platform_half + half_s
+        ):
+          continue
+
+        stone_top_z = 0.0 if self.inverted else stone_height
+        stone_box_half_h = (stone_top_z - low_z) / 2.0
+        box_z = low_z + stone_box_half_h
+
+        g = body.add_geom(
+          type=mujoco.mjtGeom.mjGEOM_BOX,
+          size=(half_s, half_s, stone_box_half_h),
+          pos=(cx, cy, box_z),
+        )
+        geometries.append(TerrainGeometry(geom=g, color=stone_rgba_base))
+
+        # --- Step boundaries for this stone (4 edges) ---
+        x0, x1 = cx - half_s, cx + half_s
+        y0, y1 = cy - half_s, cy + half_s
+        z_low_edge = low_z
+        z_high_edge = stone_top_z
+
+        # +Y edge
+        _append_step_boundary(
+          step_boundaries,
+          (x0, y1, z_high_edge),
+          (x1, y1, z_high_edge),
+          (0.0, 1.0, 0.0),
+          z_low_edge,
+          z_high_edge,
+        )
+        # -Y edge
+        _append_step_boundary(
+          step_boundaries,
+          (x1, y0, z_high_edge),
+          (x0, y0, z_high_edge),
+          (0.0, -1.0, 0.0),
+          z_low_edge,
+          z_high_edge,
+        )
+        # +X edge
+        _append_step_boundary(
+          step_boundaries,
+          (x1, y0, z_high_edge),
+          (x1, y1, z_high_edge),
+          (1.0, 0.0, 0.0),
+          z_low_edge,
+          z_high_edge,
+        )
+        # -X edge
+        _append_step_boundary(
+          step_boundaries,
+          (x0, y1, z_high_edge),
+          (x0, y0, z_high_edge),
+          (-1.0, 0.0, 0.0),
+          z_low_edge,
+          z_high_edge,
+        )
+
+    # Flat patches for target navigation
+    flat_patches: dict[str, np.ndarray] | None = None
+    if self.sample_goals_on_stones:
+      flat_patches = {
+        "target": np.array(
+          [(terrain_center[0], terrain_center[1], platform_z)],
+          dtype=np.float32,
+        ),
+      }
+
+    origin = np.array([terrain_center[0], terrain_center[1], platform_z])
+    boundaries_arr = (
+      np.asarray(step_boundaries, dtype=np.float32) if step_boundaries else None
+    )
+    return TerrainOutput(
+      origin=origin,
+      geometries=geometries,
+      flat_patches=flat_patches,
+      step_boundaries=boundaries_arr,
+    )
 
 
 @dataclass(kw_only=True)

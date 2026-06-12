@@ -70,6 +70,27 @@ def test_partial_misses():
     torch.testing.assert_close(normal[b], expected, atol=1e-4, rtol=1e-4)
 
 
+def test_partial_misses_with_nonfinite_hit_points():
+  """Invalid ray hits with inf/nan positions are ignored before fitting."""
+  B, N = 2, 20
+  torch.manual_seed(42)
+  points = torch.zeros(B, N, 3)
+  points[:, :, 0] = torch.randn(B, N)
+  points[:, :, 1] = torch.randn(B, N)
+  valid_mask = torch.ones(B, N, dtype=torch.bool)
+
+  valid_mask[:, ::2] = False
+  points[:, ::4] = torch.inf
+  points[:, 2::4] = torch.nan
+
+  normal = fit_terrain_normal(points, valid_mask)
+
+  expected = torch.tensor([0.0, 0.0, 1.0])
+  assert torch.isfinite(normal).all()
+  for b in range(B):
+    torch.testing.assert_close(normal[b], expected, atol=1e-4, rtol=1e-4)
+
+
 def test_fewer_than_3_valid_fallback():
   """Fewer than 3 valid points (including zero) falls back to [0, 0, 1]."""
   B, N = 3, 10

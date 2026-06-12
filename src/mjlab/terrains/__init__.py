@@ -37,6 +37,9 @@ from mjlab.terrains.primitive_terrains import (
   BoxRandomStairsTerrainCfg as BoxRandomStairsTerrainCfg,
 )
 from mjlab.terrains.primitive_terrains import (
+  BoxSteppingStoneGridTerrainCfg as BoxSteppingStoneGridTerrainCfg,
+)
+from mjlab.terrains.primitive_terrains import (
   BoxSteppingStonesTerrainCfg as BoxSteppingStonesTerrainCfg,
 )
 from mjlab.terrains.primitive_terrains import (

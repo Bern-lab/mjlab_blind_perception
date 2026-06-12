@@ -95,6 +95,10 @@ class TerrainEntityCfg(EntityCfg):
     default_factory=lambda: (_DEFAULT_SUN_LIGHT,)
   )
   """Lights for the scene. Defaults to a directional sun light."""
+  visualize_flat_patches: bool = True
+  """If True, add visual sites for flat patches."""
+  max_flat_patch_sites_per_tile: int | None = None
+  """Optional cap on visual flat-patch sites per terrain tile."""
 
   def build(self) -> TerrainEntity:
     raise TypeError(
@@ -147,6 +151,10 @@ class TerrainEntity(Entity):
         name: torch.from_numpy(arr).to(device=self._device, dtype=torch.float)
         for name, arr in terrain_generator.flat_patches.items()
       }
+      self._flat_patch_counts: dict[str, torch.Tensor] = {
+        name: torch.from_numpy(arr).to(device=self._device, dtype=torch.long)
+        for name, arr in terrain_generator.flat_patch_counts.items()
+      }
       self._flat_patch_radii: dict[str, float] = dict(
         terrain_generator.flat_patch_radii
       )
@@ -160,6 +168,7 @@ class TerrainEntity(Entity):
       self._import_ground_plane("terrain")
       self._configure_env_origins()
       self._flat_patches: dict[str, torch.Tensor] = {}
+      self._flat_patch_counts: dict[str, torch.Tensor] = {}
       self._flat_patch_radii: dict[str, float] = {}
       self._step_boundaries_by_tile = torch.zeros(
         (0, 0, 0, 11), device=self._device, dtype=torch.float
@@ -182,6 +191,10 @@ class TerrainEntity(Entity):
   @property
   def flat_patches(self) -> dict[str, torch.Tensor]:
     return self._flat_patches
+
+  @property
+  def flat_patch_counts(self) -> dict[str, torch.Tensor]:
+    return self._flat_patch_counts
 
   @property
   def flat_patch_radii(self) -> dict[str, float]:
@@ -317,17 +330,25 @@ class TerrainEntity(Entity):
         )
 
   def _add_flat_patch_sites(self) -> None:
-    if not self._flat_patches:
+    if not self.cfg.visualize_flat_patches or not self._flat_patches:
       return
     site_thickness = 0.02
     site_color = (0.9, 0.6, 0.1, 0.1)
     for name, patches_tensor in self._flat_patches.items():
       radius = self._flat_patch_radii.get(name, 0.5)
       patches_np = patches_tensor.cpu().numpy()
+      counts = self._flat_patch_counts.get(name)
+      counts_np = counts.cpu().numpy() if counts is not None else None
       num_rows, num_cols, num_patches, _ = patches_np.shape
       for row in range(num_rows):
         for col in range(num_cols):
-          for p in range(num_patches):
+          patch_count = num_patches if counts_np is None else int(counts_np[row, col])
+          max_sites = self.cfg.max_flat_patch_sites_per_tile
+          if max_sites is not None and patch_count > max_sites:
+            patch_indices = np.linspace(0, patch_count - 1, max_sites, dtype=int)
+          else:
+            patch_indices = range(patch_count)
+          for p in patch_indices:
             pos = patches_np[row, col, p]
             self._spec.worldbody.add_site(
               name=f"flat_patch_{name}_{row}_{col}_{p}",

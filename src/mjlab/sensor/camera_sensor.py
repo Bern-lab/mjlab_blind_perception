@@ -84,6 +84,13 @@ class CameraSensorCfg(SensorCfg):
   enabled_geom_groups: tuple[int, ...] = (0, 1, 2)
   """Geom groups (0-5) visible to the camera."""
 
+  visualizer_max_range: float | None = None
+  """Maximum depth range shown by viewer debug visualizers.
+
+  None uses the viewer default. Set this to the observation cutoff distance
+  when the visualized footprint should match the policy input.
+  """
+
   orthographic: bool = False
   """Use orthographic projection instead of perspective."""
 

@@ -46,10 +46,19 @@ Added
 - Added live toe-riser contact markers to goal-pyramid velocity play
   evaluation, drawing red dots at newly detected G1 toe/stair-riser
   collision points for the current episode.
+- Added ``CameraDepthStack`` for stacking recent depth-camera frames along the
+  CNN channel dimension, and switched G1 perception depth observations to an
+  eight-frame stack.
+- Added ``Mjlab-Velocity-Blind-Rough-Perception-PPO-Unitree-G1`` as a pure
+  PPO counterpart to the G1 perception TeacherKL task.
 
 Changed
 ^^^^^^^
 
+- G1 perception PPO now uses target-navigation commands for both training and
+  play. Its student depth camera now uses the G1 D435i 42.4 degree mounting
+  angle from vertical with a 55.2 degree vertical FOV, and play visualizes the
+  same 3 m depth footprint used by training.
 - G1 high-stair curriculum tasks now enable mixed terrain replay after
   reaching high levels, sampling low/mid/high stair rows at a 20/30/50 ratio.
 - G1 high-stair terrains now randomize stair step depth per tile from
@@ -96,6 +105,22 @@ Changed
 Fixed
 ^^^^^
 
+- G1 perception TeacherKL tasks now keep the frozen teacher's depth camera
+  observation separate from the student's stacked depth input, fixing teacher
+  checkpoint loading when the student uses eight-frame camera stacks.
+- Terrain-normal fitting now ignores non-finite ray hits and falls back safely
+  when eigendecomposition fails, preventing G1 perception stair rewards from
+  crashing training on degenerate height samples.
+- G1 perception target-navigation play now visualizes real flat target points,
+  step danger zones, foot-volume sample points, and the depth camera frustum;
+  stepping-stone-grid terrains now keep a flat outer rim and target sampling
+  ignores preallocated placeholder slots. Stepping-stone-grid gaps are now open
+  below missed footholds, stone/platform gaps grow with terrain difficulty, and
+  inverted grids raise the surrounding rim and center platform up to 0.3 m.
+  Stepping-stone-grid target points now stay on the center platform, while their
+  step-boundary danger zones are available for rewards and play visualization.
+  Training no longer adds visual flat-patch sites, and play caps target-site
+  rendering to avoid viewer stalls.
 - Fixed ONNX export path resolution in the velocity, manipulation, and
   tracking runners when a parent directory name contains the word
   ``"model"`` (:issue:`867`). Contribution by @gokulp01.

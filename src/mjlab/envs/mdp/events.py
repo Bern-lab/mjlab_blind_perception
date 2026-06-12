@@ -323,8 +323,15 @@ def reset_root_state_from_flat_patches(
   levels = terrain.terrain_levels[env_ids]
   types = terrain.terrain_types[env_ids]
 
-  # Randomly select a patch index for each env.
-  patch_ids = torch.randint(0, num_patches, (len(env_ids),), device=env.device)
+  patch_counts = getattr(terrain, "flat_patch_counts", {}).get(patch_name)
+  if patch_counts is None:
+    valid_counts = torch.full((len(env_ids),), num_patches, device=env.device)
+  else:
+    valid_counts = patch_counts[levels, types].clamp_min(1)
+
+  # Randomly select a valid patch index for each env.
+  patch_ids = torch.floor(torch.rand(len(env_ids), device=env.device) * valid_counts)
+  patch_ids = patch_ids.to(torch.long)
   positions = patches[levels, types, patch_ids]
 
   asset: Entity = env.scene[asset_cfg.name]

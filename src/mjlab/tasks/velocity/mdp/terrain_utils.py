@@ -28,18 +28,34 @@ def fit_terrain_normal(
   """
   B = points.shape[0]
   device = points.device
+  dtype = points.dtype
 
+  valid_mask = valid_mask & torch.isfinite(points).all(dim=-1)
   count = valid_mask.sum(dim=1)
   enough = count >= 3
 
-  mask_f = valid_mask.float().unsqueeze(-1)
-  masked_points = points * mask_f
-  count_clamped = count.clamp(min=1).float().unsqueeze(-1)
-  centroid = masked_points.sum(dim=1) / count_clamped
-  centered = (points - centroid.unsqueeze(1)) * mask_f
+  mask_f = valid_mask.unsqueeze(-1)
+  safe_points = torch.where(mask_f, points, torch.zeros_like(points))
+  count_clamped = count.clamp(min=1).to(dtype=dtype).unsqueeze(-1)
+  centroid = safe_points.sum(dim=1) / count_clamped
+  centered = torch.where(
+    mask_f,
+    safe_points - centroid.unsqueeze(1),
+    torch.zeros_like(points),
+  )
 
+  up = torch.tensor([0.0, 0.0, 1.0], device=device, dtype=dtype).expand(B, 3)
   cov = torch.einsum("bni,bnj->bij", centered, centered)
-  eigenvalues, eigenvectors = torch.linalg.eigh(cov)
+  cov = 0.5 * (cov + cov.transpose(-1, -2))
+  try:
+    eigenvalues, eigenvectors = torch.linalg.eigh(cov)
+  except RuntimeError:
+    try:
+      eigenvalues_cpu, eigenvectors_cpu = torch.linalg.eigh(cov.cpu())
+    except RuntimeError:
+      return up
+    eigenvalues = eigenvalues_cpu.to(device=device)
+    eigenvectors = eigenvectors_cpu.to(device=device)
   normal = eigenvectors[:, :, 0]  # Smallest eigenvalue = plane normal.
   normal = normal / normal.norm(dim=-1, keepdim=True).clamp(min=1e-8)
 
@@ -54,7 +70,6 @@ def fit_terrain_normal(
   has_spread = eigenvalues[:, 1] > eigenvalues[:, 2].clamp(min=eps) * 1e-6
   reliable = enough & plane_like & has_spread
 
-  up = torch.tensor([0.0, 0.0, 1.0], device=device).expand(B, 3)
   return torch.where(reliable.unsqueeze(-1), normal, up)
 
 

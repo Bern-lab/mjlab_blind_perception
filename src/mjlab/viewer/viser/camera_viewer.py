@@ -74,6 +74,9 @@ class ViserCameraViewer:
     self._has_rgb = "rgb" in self._camera_sensor.cfg.data_types
     self._has_depth = "depth" in self._camera_sensor.cfg.data_types
     self._has_seg = "segmentation" in self._camera_sensor.cfg.data_types
+    self._ground_footprint_max_range = (
+      self._camera_sensor.cfg.visualizer_max_range or _GROUND_FOOTPRINT_MAX_RANGE
+    )
 
     height = self._camera_sensor.cfg.height
     width = self._camera_sensor.cfg.width
@@ -125,9 +128,9 @@ class ViserCameraViewer:
     self._footprint_range_slider = self._server.gui.add_slider(
       label="Footprint Range",
       min=0.5,
-      max=_GROUND_FOOTPRINT_MAX_RANGE,
+      max=self._ground_footprint_max_range,
       step=0.1,
-      initial_value=_GROUND_FOOTPRINT_MAX_RANGE,
+      initial_value=self._ground_footprint_max_range,
     )
     self._fov, self._aspect = self._compute_camera_fov_aspect()
 

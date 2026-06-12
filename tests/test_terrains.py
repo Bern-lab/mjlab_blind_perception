@@ -6,12 +6,14 @@ import numpy as np
 from mjlab.terrains.primitive_terrains import (
   BoxInvertedPyramidStairsTerrainCfg,
   BoxPyramidStairsTerrainCfg,
+  BoxSteppingStoneGridTerrainCfg,
   BoxSteppingStonesTerrainCfg,
 )
 from mjlab.terrains.terrain_generator import (
   StepDangerVisualizationCfg,
   TerrainGenerator,
   TerrainGeneratorCfg,
+  TerrainOutput,
 )
 
 _CFG = BoxSteppingStonesTerrainCfg(
@@ -83,6 +85,170 @@ def test_stone_size_decreases_with_difficulty():
     sizes[difficulty] = np.mean([hx + hy for _, _, hx, hy in stones])
 
   assert sizes[0.0] > sizes[1.0]
+
+
+def _stepping_stone_grid_cfg(inverted: bool) -> BoxSteppingStoneGridTerrainCfg:
+  return BoxSteppingStoneGridTerrainCfg(
+    size=(8.0, 8.0),
+    stone_size_start=0.60,
+    stone_size_end=0.30,
+    stone_height_start=0.08,
+    stone_height_end=0.30,
+    gap_start=0.16,
+    gap_end=0.40,
+    jitter_start=0.0,
+    jitter_end=0.0,
+    num_rows=8,
+    num_cols=8,
+    platform_width=0.8,
+    border_width=0.5,
+    floor_clearance=0.15,
+    inverted_rim_height_start=0.0,
+    inverted_rim_height_end=0.30,
+    inverted=inverted,
+  )
+
+
+def _generate_stepping_stone_grid(
+  cfg: BoxSteppingStoneGridTerrainCfg,
+  difficulty: float,
+):
+  spec = mujoco.MjSpec()
+  spec.worldbody.add_body(name="terrain")
+  return cfg.function(difficulty=difficulty, spec=spec, rng=np.random.default_rng(0))
+
+
+def _target_platform_gap(
+  cfg: BoxSteppingStoneGridTerrainCfg,
+  difficulty: float,
+) -> float:
+  output = _generate_stepping_stone_grid(cfg, difficulty)
+  targets = _stepping_stone_grid_stone_centers(output)
+  center = np.array([cfg.size[0] / 2.0, cfg.size[1] / 2.0])
+  platform_half = cfg.platform_width / 2.0
+  stone_size = cfg.stone_size_start + difficulty * (
+    cfg.stone_size_end - cfg.stone_size_start
+  )
+  half_s = stone_size / 2.0
+  separation_xy = np.maximum(np.abs(targets - center) - (platform_half + half_s), 0.0)
+  return float(np.linalg.norm(separation_xy, axis=1).min())
+
+
+def _stepping_stone_grid_stone_centers(output: TerrainOutput) -> np.ndarray:
+  # Four border geoms and one center platform precede the stone geoms.
+  return np.array(
+    [
+      geom_info.geom.pos[:2]
+      for geom_info in output.geometries[5:]
+      if geom_info.geom is not None
+    ]
+  )
+
+
+def test_stepping_stone_grid_has_open_gaps_without_inner_floor():
+  """Both stepping-stone grid variants should leave missed footholds open."""
+  for inverted in (False, True):
+    output = _generate_stepping_stone_grid(
+      _stepping_stone_grid_cfg(inverted=inverted), 0.5
+    )
+    assert output.flat_patches is not None
+    # Four border geoms, one center platform, then exactly one geom per stone.
+    assert len(output.geometries) == len(_stepping_stone_grid_stone_centers(output)) + 5
+
+
+def test_stepping_stone_grid_targets_only_center_platform():
+  """Target flat patches should stay on the center platform, not on stones."""
+  center_xy = np.array([4.0, 4.0])
+  for inverted in (False, True):
+    cfg = _stepping_stone_grid_cfg(inverted=inverted)
+    for difficulty in (0.0, 0.5, 1.0):
+      output = _generate_stepping_stone_grid(cfg, difficulty)
+      assert output.flat_patches is not None
+      targets = output.flat_patches["target"]
+      assert targets.shape == (1, 3)
+      np.testing.assert_allclose(targets[0, :2], center_xy)
+      np.testing.assert_allclose(targets[0, 2], output.origin[2])
+
+
+def test_stepping_stone_grid_outputs_step_boundaries_for_danger_rewards():
+  """Stepping-stone grids should expose edges used by danger-zone rewards."""
+  for inverted in (False, True):
+    output = _generate_stepping_stone_grid(
+      _stepping_stone_grid_cfg(inverted=inverted), 0.5
+    )
+    assert output.step_boundaries is not None
+    assert output.step_boundaries.shape[1] == 11
+    assert len(output.step_boundaries) > 0
+    assert np.all(output.step_boundaries[:, 10] > output.step_boundaries[:, 9])
+
+
+def test_stepping_stone_grid_inverted_rim_height_uses_curriculum():
+  """Inverted grids should raise the rim/platform while stone tops stay at 0."""
+  cfg = _stepping_stone_grid_cfg(inverted=True)
+  for difficulty, expected_rim_z in ((0.0, 0.0), (0.5, 0.15), (1.0, 0.30)):
+    output = _generate_stepping_stone_grid(cfg, difficulty)
+    assert output.flat_patches is not None
+    np.testing.assert_allclose(output.origin[2], expected_rim_z)
+    np.testing.assert_allclose(output.flat_patches["target"][:, 2], expected_rim_z)
+
+    border_tops = [
+      geom_info.geom.pos[2] + geom_info.geom.size[2]
+      for geom_info in output.geometries[:4]
+      if geom_info.geom is not None
+    ]
+    np.testing.assert_allclose(border_tops, expected_rim_z)
+
+    platform_geom = output.geometries[4].geom
+    assert platform_geom is not None
+    platform_top = platform_geom.pos[2] + platform_geom.size[2]
+    np.testing.assert_allclose(platform_top, expected_rim_z)
+
+
+def test_stepping_stone_grid_normal_origin_and_targets_follow_stone_height():
+  """Normal grids should keep the rim at 0 and raise stones/platforms."""
+  cfg = _stepping_stone_grid_cfg(inverted=False)
+  for difficulty, expected_stone_z in ((0.0, 0.08), (0.5, 0.19), (1.0, 0.30)):
+    output = _generate_stepping_stone_grid(cfg, difficulty)
+    assert output.flat_patches is not None
+    np.testing.assert_allclose(output.origin[2], expected_stone_z)
+    np.testing.assert_allclose(output.flat_patches["target"][:, 2], expected_stone_z)
+
+    border_tops = [
+      geom_info.geom.pos[2] + geom_info.geom.size[2]
+      for geom_info in output.geometries[:4]
+      if geom_info.geom is not None
+    ]
+    np.testing.assert_allclose(border_tops, 0.0)
+
+    platform_geom = output.geometries[4].geom
+    assert platform_geom is not None
+    platform_top = platform_geom.pos[2] + platform_geom.size[2]
+    np.testing.assert_allclose(platform_top, expected_stone_z)
+
+
+def test_stepping_stone_grid_gap_increases_with_difficulty():
+  """Platform-to-stone and stone-to-stone gaps should follow curriculum difficulty."""
+  for inverted in (False, True):
+    cfg = _stepping_stone_grid_cfg(inverted=inverted)
+    gaps = [_target_platform_gap(cfg, difficulty) for difficulty in (0.0, 0.5, 1.0)]
+    np.testing.assert_allclose(gaps, [0.16, 0.28, 0.40], atol=1e-6)
+    assert gaps[0] < gaps[1] < gaps[2]
+
+
+def test_stepping_stone_grid_stones_do_not_overlap():
+  """Generated grid stones should preserve a positive gap at every difficulty."""
+  for inverted in (False, True):
+    cfg = _stepping_stone_grid_cfg(inverted=inverted)
+    for difficulty in (0.0, 0.5, 1.0):
+      output = _generate_stepping_stone_grid(cfg, difficulty)
+      targets = _stepping_stone_grid_stone_centers(output)
+      stone_size = cfg.stone_size_start + difficulty * (
+        cfg.stone_size_end - cfg.stone_size_start
+      )
+      for i in range(len(targets)):
+        delta = np.abs(targets[i + 1 :] - targets[i])
+        overlaps = (delta[:, 0] < stone_size) & (delta[:, 1] < stone_size)
+        assert not overlaps.any()
 
 
 def test_pyramid_stairs_step_boundaries_use_high_side_lip():

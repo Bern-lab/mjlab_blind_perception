@@ -11,6 +11,7 @@ from mjlab.utils.lab_api.math import quat_apply, quat_apply_inverse
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
+  from mjlab.managers.observation_manager import ObservationTermCfg
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
@@ -71,12 +72,85 @@ def camera_depth(
   min_depth: float = 0.01,
 ) -> torch.Tensor:
   """Depth observation in CNN-compatible format (B, 1, H, W)."""
+  return _normalized_camera_depth_bchw(env, sensor_name, cutoff_distance, min_depth)
+
+
+def _normalized_camera_depth_bchw(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+  cutoff_distance: float,
+  min_depth: float = 0.01,
+) -> torch.Tensor:
+  """Depth image normalized to [0, 1] in CNN-compatible BxCxHxW format."""
   sensor: CameraSensor = env.scene[sensor_name]
   depth_data = sensor.data.depth  # (B, H, W, 1)
   assert depth_data is not None, f"Camera '{sensor_name}' has no depth data"
   depth_data = depth_data.permute(0, 3, 1, 2)
   depth_data_clipped = torch.clamp(depth_data, min=min_depth, max=cutoff_distance)
   return torch.clamp(depth_data_clipped / cutoff_distance, 0.0, 1.0)
+
+
+class CameraDepthStack:
+  """Stack recent depth frames along the CNN channel dimension."""
+
+  def __init__(self, cfg: ObservationTermCfg, env: ManagerBasedRlEnv) -> None:
+    del cfg, env
+    self._buffer: torch.Tensor | None = None
+    self._initialized: torch.Tensor | None = None
+
+  def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+    if self._initialized is None:
+      return
+    if env_ids is None:
+      self._initialized[:] = False
+    else:
+      self._initialized[env_ids] = False
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    cutoff_distance: float,
+    stack_length: int = 8,
+    min_depth: float = 0.01,
+  ) -> torch.Tensor:
+    """Return normalized depth as (B, stack_length, H, W).
+
+    The newest frame is channel 0. Newly initialized or reset environments are
+    back-filled with their current frame so early-episode inputs do not contain
+    artificial zero history.
+    """
+    if stack_length <= 0:
+      raise ValueError("CameraDepthStack requires stack_length > 0.")
+
+    depth = _normalized_camera_depth_bchw(
+      env, sensor_name, cutoff_distance, min_depth
+    ).squeeze(1)
+    expected_shape = (env.num_envs, stack_length, *depth.shape[1:])
+    if (
+      self._buffer is None
+      or tuple(self._buffer.shape) != expected_shape
+      or self._buffer.device != depth.device
+      or self._buffer.dtype != depth.dtype
+    ):
+      self._buffer = depth.new_empty(expected_shape)
+      self._initialized = torch.zeros(
+        env.num_envs, dtype=torch.bool, device=depth.device
+      )
+
+    assert self._buffer is not None
+    assert self._initialized is not None
+    self._buffer = self._buffer.roll(1, dims=1)
+    self._buffer[:, 0] = depth
+
+    backfill_mask = ~self._initialized
+    if torch.any(backfill_mask):
+      self._buffer[backfill_mask] = (
+        depth[backfill_mask].unsqueeze(1).repeat(1, stack_length, 1, 1)
+      )
+      self._initialized[backfill_mask] = True
+
+    return self._buffer
 
 
 # ======================================================================

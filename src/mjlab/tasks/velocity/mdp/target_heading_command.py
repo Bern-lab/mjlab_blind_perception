@@ -44,6 +44,9 @@ class TargetHeadingVelocityCommand(UniformVelocityCommand):
 
     self.terrain = terrain
     self.valid_targets = terrain.flat_patches[cfg.patch_name]
+    self.valid_target_counts = getattr(terrain, "flat_patch_counts", {}).get(
+      cfg.patch_name
+    )
     terrain_cfg = terrain.cfg.terrain_generator
     if terrain_cfg is None:
       raise RuntimeError(
@@ -176,14 +179,20 @@ class TargetHeadingVelocityCommand(UniformVelocityCommand):
         self.has_target[env_id] = False
         continue
 
-      candidates = torch.cat(
-        [self.valid_targets[row, col] for row, col in tile_indices],
-        dim=0,
-      )
-      if candidates.numel() == 0:
+      candidates_by_tile: list[torch.Tensor] = []
+      for row, col in tile_indices:
+        if self.valid_target_counts is None:
+          count = self.valid_targets.shape[2]
+        else:
+          count = int(self.valid_target_counts[row, col].item())
+        if count > 0:
+          candidates_by_tile.append(self.valid_targets[row, col, :count])
+
+      if not candidates_by_tile:
         self.has_target[env_id] = False
         continue
 
+      candidates = torch.cat(candidates_by_tile, dim=0)
       robot_xy = self.robot.data.root_link_pos_w[env_id, :2]
       dist = torch.norm(candidates[:, :2] - robot_xy[None, :], dim=-1)
       valid_mask = dist >= self.cfg.target_min_distance

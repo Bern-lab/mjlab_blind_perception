@@ -133,7 +133,6 @@ class NativeMujocoViewer(BaseViewer):
   _DEPTH_CAMERA_PROJECTION_STRIDE = 2
   _DEPTH_CAMERA_POINT_RADIUS = 0.005
   _DEPTH_CAMERA_SURFACE_Z_OFFSET = 0.002
-  _DEPTH_CAMERA_FRUSTUM_LENGTH = 0.75
 
   def __init__(
     self,
@@ -373,7 +372,9 @@ class NativeMujocoViewer(BaseViewer):
       dtype=np.float64,
     )
     local_dirs /= np.linalg.norm(local_dirs, axis=1, keepdims=True)
-    corners = cam_pos + (cam_mat @ local_dirs.T).T * self._DEPTH_CAMERA_FRUSTUM_LENGTH
+    max_depth = self._depth_camera_visualizer_range(sensor)
+    ray_scales = max_depth / np.maximum(-local_dirs[:, 2], 1.0e-6)
+    corners = cam_pos + (cam_mat @ (local_dirs * ray_scales[:, None]).T).T
 
     for corner in corners:
       visualizer.add_cylinder(
@@ -410,12 +411,11 @@ class NativeMujocoViewer(BaseViewer):
       pixel_x=grid_x.reshape(-1),
       pixel_y=grid_y.reshape(-1),
     )
+    max_depth = self._depth_camera_visualizer_range(sensor)
     depth_values = depth[grid_y.reshape(-1), grid_x.reshape(-1)].astype(np.float64)
     ray_scale = depth_values / np.maximum(-local_dirs[:, 2], 1.0e-6)
     valid = (
-      np.isfinite(depth_values)
-      & (depth_values > 1.0e-4)
-      & (ray_scale <= self._DEPTH_CAMERA_MAX_RANGE)
+      np.isfinite(depth_values) & (depth_values > 1.0e-4) & (depth_values <= max_depth)
     )
     if segmentation is not None:
       geom_ids = segmentation[grid_y.reshape(-1), grid_x.reshape(-1)].astype(np.int64)
@@ -435,6 +435,9 @@ class NativeMujocoViewer(BaseViewer):
         radius=self._DEPTH_CAMERA_POINT_RADIUS,
         color=self._DEPTH_CAMERA_PROJECTION_COLOR,
       )
+
+  def _depth_camera_visualizer_range(self, sensor: CameraSensor) -> float:
+    return sensor.cfg.visualizer_max_range or self._DEPTH_CAMERA_MAX_RANGE
 
   def _depth_camera_pixel_dirs(
     self,
@@ -496,7 +499,7 @@ class NativeMujocoViewer(BaseViewer):
     sim_data: _SimDataProtocol,
   ) -> None:
     """Render non-selected environments into the native viewer scene."""
-    if self.vd is None:
+    if self.vd is None or not self._show_all_envs:
       return
     assert self.mjm is not None
     assert self.vopt is not None

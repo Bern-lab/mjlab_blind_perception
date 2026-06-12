@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 from mjlab.viewer.base import ViewerAction
@@ -38,3 +39,22 @@ def test_prev_next_env_actions_wrap_and_succeed():
   assert v.env_idx == 2
   assert v._handle_custom_action(ViewerAction.NEXT_ENV, None)
   assert v.env_idx == 0
+
+
+def test_depth_camera_visualizer_uses_sensor_range():
+  v = _make_viewer()
+  sensor = MagicMock()
+  sensor.cfg.visualizer_max_range = 3.0
+
+  assert v._depth_camera_visualizer_range(sensor) == 3.0
+
+  sensor.cfg.visualizer_max_range = None
+  assert v._depth_camera_visualizer_range(sensor) == v._DEPTH_CAMERA_MAX_RANGE
+
+
+def test_other_env_geoms_hidden_until_show_all_enabled():
+  v = _make_viewer(num_envs=2)
+  v.__dict__["vd"] = object()
+  v._show_all_envs = False
+
+  v._render_other_env_geoms(cast(Any, None), cast(Any, None), cast(Any, None))

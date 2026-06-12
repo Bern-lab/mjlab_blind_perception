@@ -55,7 +55,7 @@ def _add_target_flat_patch_sampling(
   for name, sub_cfg in terrain_cfg.sub_terrains.items():
     if "stairs" in name or "slope" in name:
       target_sampling = FlatPatchSamplingCfg(
-        num_patches=128,
+        num_patches=600,
         patch_radius=0.20,
         max_height_diff=0.02,
         x_range=(3.0, 5.0),
@@ -64,7 +64,7 @@ def _add_target_flat_patch_sampling(
       )
     else:
       target_sampling = FlatPatchSamplingCfg(
-        num_patches=128,
+        num_patches=600,
         patch_radius=0.20,
         max_height_diff=0.02,
         x_range=(0.5, 7.5),
@@ -381,18 +381,3 @@ def unitree_g1_blind_rough_teacherkl_env_cfg(
     configure_blind_teacherkl_play_visualization(cfg)
 
   return cfg
-
-
-def unitree_g1_blind_rough_target_navigation_slow_latent_env_cfg(
-  play: bool = False,
-  actor_history_length: int = 5,  # 历史帧
-) -> ManagerBasedRlEnvCfg:
-  """Compatibility wrapper for the dedicated slow-latent task config."""
-  from .blind_rough_slow_latent_env_cfg import (
-    unitree_g1_blind_rough_target_navigation_slow_latent_env_cfg as _make_cfg,
-  )
-
-  return _make_cfg(
-    play=play,
-    actor_history_length=actor_history_length,
-  )

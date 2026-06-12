@@ -245,6 +245,60 @@ def narrow_beams(
 
 
 @terrain_preset
+def stepping_stone_grid(
+  **overrides: Any,
+) -> terrain_gen.BoxSteppingStoneGridTerrainCfg:
+  defaults: dict[str, Any] = dict(
+    stone_size_start=0.60,
+    stone_size_end=0.30,
+    stone_height_start=0.08,
+    stone_height_end=0.30,
+    gap_start=0.16,
+    gap_end=0.40,
+    jitter_start=0.0,
+    jitter_end=0.0,
+    num_rows=8,
+    num_cols=8,
+    platform_width=0.8,
+    border_width=0.5,
+    floor_clearance=0.15,
+    inverted_rim_height_start=0.0,
+    inverted_rim_height_end=0.30,
+    inverted=False,
+    sample_goals_on_stones=True,
+  )
+  defaults.update(overrides)
+  return terrain_gen.BoxSteppingStoneGridTerrainCfg(**defaults)
+
+
+@terrain_preset
+def stepping_stone_grid_inv(
+  **overrides: Any,
+) -> terrain_gen.BoxSteppingStoneGridTerrainCfg:
+  defaults: dict[str, Any] = dict(
+    stone_size_start=0.60,
+    stone_size_end=0.30,
+    stone_height_start=0.08,
+    stone_height_end=0.30,
+    gap_start=0.16,
+    gap_end=0.40,
+    jitter_start=0.0,
+    jitter_end=0.0,
+    num_rows=8,
+    num_cols=8,
+    platform_width=0.8,
+    border_width=0.5,
+    floor_clearance=0.15,
+    inverted_rim_height_start=0.0,
+    inverted_rim_height_end=0.30,
+    inverted=True,
+    sample_goals_on_stones=True,
+  )
+  defaults.update(overrides)
+  return terrain_gen.BoxSteppingStoneGridTerrainCfg(**defaults)
+
+
+@terrain_preset
 def nested_rings(
   **overrides: Any,
 ) -> terrain_gen.BoxNestedRingsTerrainCfg:
@@ -305,12 +359,12 @@ BLIND_HIGH_STAIRS_TERRAINS_CFG = TerrainGeneratorCfg(
   size=(8.0, 8.0),
   border_width=20.0,
   num_rows=10,
-  num_cols=5,
+  num_cols=6,
   curriculum=True,
   sub_terrains={
-    "flat": flat(proportion=0.05),
+    "flat": flat(proportion=0.0),
     "high_stairs": pyramid_stairs(
-      proportion=0.0,
+      proportion=0.3,
       step_height_range=(0.04, 0.2),
       step_width=0.30,
       step_width_range=(0.25, 0.35),
@@ -318,7 +372,7 @@ BLIND_HIGH_STAIRS_TERRAINS_CFG = TerrainGeneratorCfg(
       border_width=1.0,
     ),
     "high_stairs_inv": pyramid_stairs_inv(
-      proportion=0.75,
+      proportion=0.3,
       step_height_range=(0.04, 0.2),
       step_width=0.30,
       step_width_range=(0.25, 0.35),
@@ -326,16 +380,22 @@ BLIND_HIGH_STAIRS_TERRAINS_CFG = TerrainGeneratorCfg(
       border_width=1.0,
     ),
     "gentle_slope": hf_pyramid_slope(
-      proportion=0.10,
+      proportion=0.2,
       slope_range=(0.0, 0.25),
       platform_width=2.5,
       border_width=0.5,
     ),
     "low_rough": random_rough(
-      proportion=0.10,
+      proportion=0.20,
       noise_range=(0.005, 0.04),
       noise_step=0.01,
       border_width=0.5,
+    ),
+    "stepping_stone_grid": stepping_stone_grid(
+      proportion=0.0,
+    ),
+    "stepping_stone_grid_inv": stepping_stone_grid_inv(
+      proportion=0.0,
     ),
   },
   add_lights=True,

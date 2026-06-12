@@ -213,6 +213,7 @@ class TerrainGenerator:
 
     # Pre-allocate flat patch storage by scanning all sub-terrain configs.
     self.flat_patches: dict[str, np.ndarray] = {}
+    self.flat_patch_counts: dict[str, np.ndarray] = {}
     self.flat_patch_radii: dict[str, float] = {}
     patch_names: dict[str, int] = {}
     for sub_cfg in self.cfg.sub_terrains.values():
@@ -228,6 +229,9 @@ class TerrainGenerator:
     for name, max_num_patches in patch_names.items():
       self.flat_patches[name] = np.zeros(
         (self.cfg.num_rows, self._num_cols, max_num_patches, 3)
+      )
+      self.flat_patch_counts[name] = np.zeros(
+        (self.cfg.num_rows, self._num_cols), dtype=np.int32
       )
 
   def compile(self, spec: mujoco.MjSpec) -> None:
@@ -369,13 +373,29 @@ class TerrainGenerator:
     spawn_origin = output.origin + world_position
     for name, arr in self.flat_patches.items():
       if output.flat_patches is not None and name in output.flat_patches:
-        patches = output.flat_patches[name]
-        arr[sub_row, sub_col, : len(patches)] = patches + world_position
-        arr[sub_row, sub_col, len(patches) :] = spawn_origin
+        patches = np.asarray(output.flat_patches[name], dtype=np.float64)
+        if patches.ndim != 2 or patches.shape[1] != 3:
+          raise ValueError(
+            "TerrainOutput.flat_patches entries must have shape [N, 3], got "
+            f"{patches.shape} for '{name}'."
+          )
+
+        count = min(len(patches), arr.shape[2])
+        self.flat_patch_counts[name][sub_row, sub_col] = count
+        if count == 0:
+          arr[sub_row, sub_col] = spawn_origin
+          continue
+
+        valid_patches = patches[:count] + world_position
+        arr[sub_row, sub_col, :count] = valid_patches
+        if count < arr.shape[2]:
+          repeat_ids = np.arange(arr.shape[2] - count) % count
+          arr[sub_row, sub_col, count:] = valid_patches[repeat_ids]
       else:
         # Sub-terrain didn't produce patches: fill with spawn origin so that
         # every slot contains a valid position for reset_root_state_from_flat_patches.
         arr[sub_row, sub_col] = spawn_origin
+        self.flat_patch_counts[name][sub_row, sub_col] = 1
 
     if output.step_boundaries is not None and len(output.step_boundaries) > 0:
       boundaries = np.asarray(output.step_boundaries, dtype=np.float32).copy()
@@ -480,7 +500,7 @@ class TerrainGenerator:
       type=mujoco.mjtGeom.mjGEOM_BOX,
       size=size,
       pos=center,
-      quat=quat,
+      quat=quat.tolist(),
     )
 
   def _finalize_step_boundaries(self) -> None:
