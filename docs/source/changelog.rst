@@ -105,6 +105,8 @@ Changed
 Fixed
 ^^^^^
 
+- G1 perception stair danger-zone rewards now read the current terrain tile's
+  step-boundary geometry instead of seeing no boundaries and returning zero.
 - G1 perception TeacherKL tasks now keep the frozen teacher's depth camera
   observation separate from the student's stacked depth input, fixing teacher
   checkpoint loading when the student uses eight-frame camera stacks.

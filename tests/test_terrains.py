@@ -2,6 +2,7 @@
 
 import mujoco
 import numpy as np
+import torch
 
 from mjlab.terrains.primitive_terrains import (
   BoxInvertedPyramidStairsTerrainCfg,
@@ -9,6 +10,7 @@ from mjlab.terrains.primitive_terrains import (
   BoxSteppingStoneGridTerrainCfg,
   BoxSteppingStonesTerrainCfg,
 )
+from mjlab.terrains.terrain_entity import TerrainEntity, TerrainEntityCfg
 from mjlab.terrains.terrain_generator import (
   StepDangerVisualizationCfg,
   TerrainGenerator,
@@ -314,6 +316,42 @@ def test_terrain_generator_pads_step_boundaries_by_tile():
   np.testing.assert_allclose(
     generator.step_boundaries_by_tile[0, 0, 0, 0:3], [-3.0, 3.0, 0.1]
   )
+
+
+def test_terrain_entity_exposes_current_step_boundaries():
+  cfg = TerrainEntityCfg(
+    terrain_type="generator",
+    num_envs=4,
+    max_init_terrain_level=1,
+    terrain_generator=TerrainGeneratorCfg(
+      size=(8.0, 8.0),
+      num_rows=2,
+      num_cols=1,
+      seed=0,
+      sub_terrains={
+        "stairs": BoxPyramidStairsTerrainCfg(
+          step_height_range=(0.1, 0.1),
+          step_width=0.3,
+          platform_width=3.0,
+          border_width=1.0,
+        )
+      },
+    ),
+  )
+  terrain = TerrainEntity(cfg, device="cpu")
+
+  assert terrain.step_boundaries.shape == (cfg.num_envs, 24, 11)
+  assert terrain.step_boundaries_valid.shape == (cfg.num_envs, 24)
+  assert terrain.step_boundaries_valid.dtype is torch.bool
+
+  for env_id in range(cfg.num_envs):
+    level = terrain.terrain_levels[env_id]
+    terrain_type = terrain.terrain_types[env_id]
+    assert torch.allclose(
+      terrain.step_boundaries[env_id],
+      terrain.step_boundaries_by_tile[level, terrain_type],
+    )
+    assert terrain.step_boundaries_valid[env_id].all()
 
 
 def test_step_danger_visualization_adds_non_colliding_geoms():

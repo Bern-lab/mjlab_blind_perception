@@ -208,6 +208,32 @@ class TerrainEntity(Entity):
   def step_boundary_counts(self) -> torch.Tensor:
     return self._step_boundary_counts
 
+  @property
+  def step_boundaries(self) -> torch.Tensor:
+    """Step-boundary geometry for each environment's current terrain tile."""
+    if (
+      self._step_boundaries_by_tile.numel() == 0
+      or not hasattr(self, "terrain_levels")
+      or not hasattr(self, "terrain_types")
+    ):
+      return self._step_boundaries_by_tile.new_zeros((self.cfg.num_envs, 0, 11))
+    return self._step_boundaries_by_tile[self.terrain_levels, self.terrain_types]
+
+  @property
+  def step_boundaries_valid(self) -> torch.Tensor:
+    """Boolean mask for valid entries in :attr:`step_boundaries`."""
+    if (
+      self._step_boundary_counts.numel() == 0
+      or not hasattr(self, "terrain_levels")
+      or not hasattr(self, "terrain_types")
+    ):
+      return torch.zeros((self.cfg.num_envs, 0), device=self._device, dtype=torch.bool)
+
+    counts = self._step_boundary_counts[self.terrain_levels, self.terrain_types]
+    num_boundaries = self._step_boundaries_by_tile.shape[2]
+    boundary_ids = torch.arange(num_boundaries, device=self._device)
+    return boundary_ids[None, :] < counts[:, None]
+
   # Terrain origin management.
 
   def configure_env_origins(

@@ -320,6 +320,10 @@ class _StepBoundaryFootVolume:
     p0: torch.Tensor,
     p1: torch.Tensor,
   ) -> torch.Tensor:
+    if p0.dim() == 3:
+      num_feet = points.shape[1]
+      p0 = p0[:, None, :, :].expand(-1, num_feet, -1, -1)
+      p1 = p1[:, None, :, :].expand(-1, num_feet, -1, -1)
     segment = p1 - p0
     segment_len_sq = torch.sum(torch.square(segment), dim=-1).clamp_min(1e-12)
     point_delta = points[:, :, :, None, :] - p0[:, :, None, :, :]
@@ -405,7 +409,11 @@ class _StepBoundaryFootVolume:
     z_high = boundaries[..., 10]
 
     distances = self._point_to_segment_distance(points, p0, p1)
-    valid = valid_boundaries[:, :, None, :]
+    if valid_boundaries.dim() == 2:
+      valid = valid_boundaries[:, None, None, :]
+      z_high = z_high[:, None, :]
+    else:
+      valid = valid_boundaries[:, :, None, :]
     if edge_height_band is not None and edge_height_band > 0.0:
       height_ok = points[:, :, :, None, 2] >= z_high[:, :, None, :] - edge_height_band
       valid = valid & height_ok
@@ -545,9 +553,7 @@ class foot_step_lip_volume_penalty(_StepBoundaryFootVolume):
     if not bool(torch.any(finite).item()):
       return torch.zeros(env.num_envs, device=env.device)
 
-    in_radius = min_dist < edge_radius
-    in_radius_flat = in_radius.reshape(env.num_envs, -1)
-    penetration = edge_radius - min_dist
+    penetration = torch.relu(edge_radius - min_dist)
 
     if contact_sensor_name is not None:
       foot_xy_speed = torch.norm(
@@ -557,7 +563,7 @@ class foot_step_lip_volume_penalty(_StepBoundaryFootVolume):
         dim=-1,
       )
       moving = foot_xy_speed > support_speed_floor
-      support_mask = moving[:, :, None].expand_as(in_radius_flat)
+      support_mask = moving[:, :, None].expand_as(penetration)
       penetration = penetration * support_mask.float()
 
     flat_weights = self._flat_point_weights(env.num_envs, 2)
@@ -1129,37 +1135,8 @@ class heel_step_riser_clearance_penalty(_StepBoundaryFootVolume):
     if selected_idx is None:
       expanded_boundaries = boundaries[:, None, :, :].expand(num_envs, num_feet, -1, -1)
       expanded_valid = base_valid[:, None, :].expand(num_envs, num_feet, -1)
-      point_penalty, active, _, _ = self._riser_slab_point_penalty(
-        heel_points,
-        heel_vel,
-        expanded_boundaries,
-        expanded_valid,
-        heel_clearance,
-        u_margin,
-        v_margin,
-        0.0,  # No speed threshold for clearance
-        surface_tol,
-      )
-    else:
-      selected_boundaries = self._gather_by_foot(boundaries, selected_idx)
-      selected_valid = self._gather_mask_by_foot(base_valid, selected_idx)
-      point_penalty, active, _, _ = self._riser_slab_point_penalty(
-        heel_points,
-        heel_vel,
-        selected_boundaries,
-        selected_valid,
-        heel_clearance,
-        u_margin,
-        v_margin,
-        0.0,
-        surface_tol,
-      )
-      if bool(torch.any(fallback).item()):
-        expanded_boundaries = boundaries[:, None, :, :].expand(
-          num_envs, num_feet, -1, -1
-        )
-        expanded_valid = base_valid[:, None, :].expand(num_envs, num_feet, -1)
-        full_penalty, full_active, _, _ = self._riser_slab_point_penalty(
+      point_penalty, active, _impact_speed, _point_layers = (
+        self._riser_slab_point_penalty(
           heel_points,
           heel_vel,
           expanded_boundaries,
@@ -1167,8 +1144,44 @@ class heel_step_riser_clearance_penalty(_StepBoundaryFootVolume):
           heel_clearance,
           u_margin,
           v_margin,
+          0.0,  # No speed threshold for clearance
+          surface_tol,
+        )
+      )
+    else:
+      assert fallback is not None
+      selected_boundaries = self._gather_by_foot(boundaries, selected_idx)
+      selected_valid = self._gather_mask_by_foot(base_valid, selected_idx)
+      point_penalty, active, _impact_speed, _point_layers = (
+        self._riser_slab_point_penalty(
+          heel_points,
+          heel_vel,
+          selected_boundaries,
+          selected_valid,
+          heel_clearance,
+          u_margin,
+          v_margin,
           0.0,
           surface_tol,
+        )
+      )
+      if bool(torch.any(fallback).item()):
+        expanded_boundaries = boundaries[:, None, :, :].expand(
+          num_envs, num_feet, -1, -1
+        )
+        expanded_valid = base_valid[:, None, :].expand(num_envs, num_feet, -1)
+        full_penalty, full_active, _full_impact, _full_layers = (
+          self._riser_slab_point_penalty(
+            heel_points,
+            heel_vel,
+            expanded_boundaries,
+            expanded_valid,
+            heel_clearance,
+            u_margin,
+            v_margin,
+            0.0,
+            surface_tol,
+          )
         )
         fallback_mask = fallback[:, :, None]
         point_penalty = torch.where(fallback_mask, full_penalty, point_penalty)
@@ -1345,7 +1358,7 @@ class shank_step_lip_proximity_penalty(_StepBoundaryFootVolume):
       return torch.zeros(env.num_envs, device=env.device)
 
     # Get shank volume points in world frame
-    points_w, _ = self._foot_points_w(env, asset_cfg)
+    points_w, _point_vel_w = self._foot_points_w(env, asset_cfg)
     num_envs, num_feet = points_w.shape[:2]
 
     # Compute min distance to step lips
@@ -1618,7 +1631,11 @@ def feet_clearance(
       raise ValueError("feet_clearance requires both min_height and max_height.")
     if min_height > max_height:
       raise ValueError("feet_clearance min_height must be <= max_height.")
-    delta = torch.relu(min_height - foot_height) + torch.relu(foot_height - max_height)
+    min_height_t = foot_height.new_tensor(min_height)
+    max_height_t = foot_height.new_tensor(max_height)
+    delta = torch.relu(min_height_t - foot_height) + torch.relu(
+      foot_height - max_height_t
+    )
   else:
     if target_height is None:
       raise ValueError("feet_clearance requires target_height or min/max height.")
