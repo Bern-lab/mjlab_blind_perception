@@ -46,6 +46,10 @@ Added
 - Added live toe-riser contact markers to goal-pyramid velocity play
   evaluation, drawing red dots at newly detected G1 toe/stair-riser
   collision points for the current episode.
+- Added ``Mjlab-Velocity-Blind-Rough-TargetNavigation-StepDanger-TeacherKL-Unitree-G1``,
+  a non-latent G1 target-navigation Teacher-KL task with local foot-lip danger
+  parameters and an integrated toe-riser probe shaping reward that neutralizes
+  slab cost only for state-machine-validated first/second-riser probing contacts.
 
 Changed
 ^^^^^^^

@@ -274,6 +274,118 @@ class G1SlowLatentEnvParams:
   """Play-only viewer/debug visualization settings."""
 
 
+def configure_g1_step_danger_rewards(
+  cfg: ManagerBasedRlEnvCfg,
+  params: G1SlowLatentRewardParams | None = None,
+) -> None:
+  """Apply the full SlowLatent step-boundary danger reward set."""
+  params = params or G1SlowLatentRewardParams()
+
+  def foot_asset_cfg() -> SceneEntityCfg:
+    return SceneEntityCfg(
+      "robot",
+      body_names=("left_ankle_roll_link", "right_ankle_roll_link"),
+    )
+
+  cfg.rewards["foot_step_lip_volume_penalty"] = RewardTermCfg(
+    func=mdp.foot_step_lip_volume_penalty,
+    weight=params.foot_lip_weight,
+    params={
+      "edge_radius": params.foot_lip_edge_radius,
+      "edge_height_band": params.foot_lip_edge_height_band,
+      "support_speed_floor": params.foot_lip_support_speed_floor,
+      "ignore_boundary_layers": params.foot_lip_ignore_boundary_layers,
+      "nearest_boundaries": params.nearest_boundaries,
+      "contact_sensor_name": "feet_ground_contact",
+      "min_terrain_level": params.min_terrain_level,
+      "asset_cfg": foot_asset_cfg(),
+    },
+  )
+  cfg.rewards["toe_step_riser_slab_penalty"] = RewardTermCfg(
+    func=mdp.toe_step_riser_slab_penalty,
+    weight=params.toe_slab_weight,
+    params={
+      "slab_depth": params.toe_slab_depth,
+      "u_margin": params.toe_slab_u_margin,
+      "v_margin": params.toe_slab_v_margin,
+      "toe_x_min": params.toe_x_min,
+      "toe_v_threshold": params.toe_v_threshold,
+      "approach_speed_floor": params.toe_approach_speed_floor,
+      "surface_tol": params.surface_tol,
+      "nearest_boundaries": params.nearest_boundaries,
+      "min_terrain_level": params.min_terrain_level,
+      "contact_sensor_name": TOE_TERRAIN_CONTACT_SENSOR,
+      "contact_penalty_scale": params.toe_contact_penalty_scale,
+      "contact_time_scale": params.toe_contact_time_scale,
+      "contact_force_threshold": params.toe_contact_force_threshold,
+      "contact_force_scale": params.toe_contact_force_scale,
+      "contact_vertical_normal_z_max": params.toe_contact_vertical_normal_z_max,
+      "contact_forward_velocity_threshold": (
+        params.toe_contact_forward_velocity_threshold
+      ),
+      "probe_contact_count": params.toe_probe_contact_count,
+      "probe_slab_reward_scale": params.toe_probe_slab_reward_scale,
+      "probe_contact_reward": params.toe_probe_contact_reward,
+      "probe_min_progress": params.toe_probe_min_progress,
+      "probe_max_safe_force": params.toe_probe_max_safe_force,
+      "probe_cooldown_time": params.toe_probe_cooldown_time,
+      "second_layer_attraction_reward": params.toe_second_layer_attraction_reward,
+      "second_layer_attraction_distance": params.toe_second_layer_attraction_distance,
+      "second_layer_attraction_u_margin": params.toe_second_layer_attraction_u_margin,
+      "second_layer_attraction_v_margin": params.toe_second_layer_attraction_v_margin,
+      "min_ascent_height": params.toe_probe_min_ascent_height,
+      "ascent_velocity_threshold": params.toe_probe_ascent_velocity_threshold,
+      "asset_cfg": foot_asset_cfg(),
+    },
+  )
+
+
+def configure_g1_step_danger_play_visualization(
+  cfg: ManagerBasedRlEnvCfg,
+  params: G1SlowLatentPlayVisualizationParams | None = None,
+  rewards: G1SlowLatentRewardParams | None = None,
+) -> None:
+  """Configure play-only debug views for the step-boundary danger zones."""
+  params = params or G1SlowLatentPlayVisualizationParams()
+  rewards = rewards or G1SlowLatentRewardParams()
+
+  cfg.viewer.show_depth_camera_visualizers = params.show_depth_camera_visualizers
+
+  for sensor in cfg.scene.sensors or ():
+    if isinstance(sensor, RayCastSensorCfg):
+      sensor.debug_vis = params.show_raycast_debug_visualizers
+
+  if cfg.scene.terrain is None or cfg.scene.terrain.terrain_generator is None:
+    return
+
+  cfg.scene.terrain.terrain_generator.step_danger_visualization = (
+    StepDangerVisualizationCfg(
+      enabled=params.show_step_danger_zones,
+      lip_radius=(
+        rewards.foot_lip_edge_radius
+        if params.danger_lip_radius is None
+        else params.danger_lip_radius
+      ),
+      slab_depth=(
+        rewards.toe_slab_depth
+        if params.danger_slab_depth is None
+        else params.danger_slab_depth
+      ),
+      slab_u_margin=(
+        rewards.toe_slab_u_margin
+        if params.danger_slab_u_margin is None
+        else params.danger_slab_u_margin
+      ),
+      slab_v_margin=(
+        rewards.toe_slab_v_margin
+        if params.danger_slab_v_margin is None
+        else params.danger_slab_v_margin
+      ),
+      geom_group=params.danger_geom_group,
+    )
+  )
+
+
 def _configure_target_command(
   cfg: ManagerBasedRlEnvCfg,
   params: G1SlowLatentTargetCommandParams,
@@ -314,12 +426,6 @@ def _configure_slow_latent_rewards(
 ) -> None:
   def torso_body_cfg() -> SceneEntityCfg:
     return SceneEntityCfg("robot", body_names=("torso_link",))
-
-  def foot_asset_cfg() -> SceneEntityCfg:
-    return SceneEntityCfg(
-      "robot",
-      body_names=("left_ankle_roll_link", "right_ankle_roll_link"),
-    )
 
   def foot_site_cfg() -> SceneEntityCfg:
     return SceneEntityCfg("robot", site_names=("left_foot", "right_foot"))
@@ -449,57 +555,7 @@ def _configure_slow_latent_rewards(
   )
   cfg.rewards["target_reached_bonus"].weight = params.target_reached_bonus_weight
 
-  cfg.rewards["foot_step_lip_volume_penalty"] = RewardTermCfg(
-    func=mdp.foot_step_lip_volume_penalty,
-    weight=params.foot_lip_weight,
-    params={
-      "edge_radius": params.foot_lip_edge_radius,
-      "edge_height_band": params.foot_lip_edge_height_band,
-      "support_speed_floor": params.foot_lip_support_speed_floor,
-      "ignore_boundary_layers": params.foot_lip_ignore_boundary_layers,
-      "nearest_boundaries": params.nearest_boundaries,
-      "contact_sensor_name": "feet_ground_contact",
-      "min_terrain_level": params.min_terrain_level,
-      "asset_cfg": foot_asset_cfg(),
-    },
-  )
-  cfg.rewards["toe_step_riser_slab_penalty"] = RewardTermCfg(
-    func=mdp.toe_step_riser_slab_penalty,
-    weight=params.toe_slab_weight,
-    params={
-      "slab_depth": params.toe_slab_depth,
-      "u_margin": params.toe_slab_u_margin,
-      "v_margin": params.toe_slab_v_margin,
-      "toe_x_min": params.toe_x_min,
-      "toe_v_threshold": params.toe_v_threshold,
-      "approach_speed_floor": params.toe_approach_speed_floor,
-      "surface_tol": params.surface_tol,
-      "nearest_boundaries": params.nearest_boundaries,
-      "min_terrain_level": params.min_terrain_level,
-      "contact_sensor_name": TOE_TERRAIN_CONTACT_SENSOR,
-      "contact_penalty_scale": params.toe_contact_penalty_scale,
-      "contact_time_scale": params.toe_contact_time_scale,
-      "contact_force_threshold": params.toe_contact_force_threshold,
-      "contact_force_scale": params.toe_contact_force_scale,
-      "contact_vertical_normal_z_max": params.toe_contact_vertical_normal_z_max,
-      "contact_forward_velocity_threshold": (
-        params.toe_contact_forward_velocity_threshold
-      ),
-      "probe_contact_count": params.toe_probe_contact_count,
-      "probe_slab_reward_scale": params.toe_probe_slab_reward_scale,
-      "probe_contact_reward": params.toe_probe_contact_reward,
-      "probe_min_progress": params.toe_probe_min_progress,
-      "probe_max_safe_force": params.toe_probe_max_safe_force,
-      "probe_cooldown_time": params.toe_probe_cooldown_time,
-      "second_layer_attraction_reward": params.toe_second_layer_attraction_reward,
-      "second_layer_attraction_distance": params.toe_second_layer_attraction_distance,
-      "second_layer_attraction_u_margin": params.toe_second_layer_attraction_u_margin,
-      "second_layer_attraction_v_margin": params.toe_second_layer_attraction_v_margin,
-      "min_ascent_height": params.toe_probe_min_ascent_height,
-      "ascent_velocity_threshold": params.toe_probe_ascent_velocity_threshold,
-      "asset_cfg": foot_asset_cfg(),
-    },
-  )
+  configure_g1_step_danger_rewards(cfg, params)
 
 
 def _configure_latent_observations(
@@ -556,41 +612,7 @@ def _configure_slow_latent_play_visualization(
   params: G1SlowLatentPlayVisualizationParams,
   rewards: G1SlowLatentRewardParams,
 ) -> None:
-  cfg.viewer.show_depth_camera_visualizers = params.show_depth_camera_visualizers
-
-  for sensor in cfg.scene.sensors or ():
-    if isinstance(sensor, RayCastSensorCfg):
-      sensor.debug_vis = params.show_raycast_debug_visualizers
-
-  if cfg.scene.terrain is None or cfg.scene.terrain.terrain_generator is None:
-    return
-
-  cfg.scene.terrain.terrain_generator.step_danger_visualization = (
-    StepDangerVisualizationCfg(
-      enabled=params.show_step_danger_zones,
-      lip_radius=(
-        rewards.foot_lip_edge_radius
-        if params.danger_lip_radius is None
-        else params.danger_lip_radius
-      ),
-      slab_depth=(
-        rewards.toe_slab_depth
-        if params.danger_slab_depth is None
-        else params.danger_slab_depth
-      ),
-      slab_u_margin=(
-        rewards.toe_slab_u_margin
-        if params.danger_slab_u_margin is None
-        else params.danger_slab_u_margin
-      ),
-      slab_v_margin=(
-        rewards.toe_slab_v_margin
-        if params.danger_slab_v_margin is None
-        else params.danger_slab_v_margin
-      ),
-      geom_group=params.danger_geom_group,
-    )
-  )
+  configure_g1_step_danger_play_visualization(cfg, params, rewards)
 
 
 def unitree_g1_blind_rough_target_navigation_slow_latent_env_cfg(

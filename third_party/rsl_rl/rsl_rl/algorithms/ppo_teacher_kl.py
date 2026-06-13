@@ -341,9 +341,33 @@ class PPOTeacherKL(PPO):
                 "teacher_guidance_enabled": 0.0,
             }
 
-        aux_loss, aux_logs = self._compute_slow_latent_aux_loss(batch)
+        if self._actor_has_slow_latent_aux():
+            aux_loss, aux_logs = self._compute_slow_latent_aux_loss(batch)
+        else:
+            aux_loss = torch.zeros((), device=self.device)
+            aux_logs = {}
         log_dict.update(aux_logs)
         return teacher_loss + aux_loss, log_dict
+
+    def _actor_has_slow_latent_aux(self) -> bool:
+        """Return whether the actor exposes slow-latent auxiliary heads."""
+        return callable(getattr(self.actor, "get_aux_outputs", None)) or callable(
+            getattr(self.actor, "get_slow_latent_diagnostics", None)
+        )
+
+    @staticmethod
+    def _hidden_state_shapes(
+        batch: RolloutStorage.Batch,
+    ) -> list[tuple[int, ...] | str]:
+        """Summarize actor hidden-state shapes without assuming recurrence."""
+        if batch.hidden_states is None or batch.hidden_states[0] is None:
+            return []
+        actor_hidden = batch.hidden_states[0]
+        hidden_items = actor_hidden if isinstance(actor_hidden, tuple) else (actor_hidden,)
+        return [
+            tuple(h.shape) if hasattr(h, "shape") else type(h).__name__
+            for h in hidden_items
+        ]
 
     def _compute_future_collision_labels(
         self,
@@ -444,10 +468,7 @@ class PPOTeacherKL(PPO):
                 "\n  masks_shape=",
                 tuple(batch.masks.shape) if batch.masks is not None else None,
                 "\n  hidden_state_shapes=",
-                [
-                    tuple(h.shape) if hasattr(h, "shape") else type(h).__name__
-                    for h in (batch.hidden_states[0] if batch.hidden_states is not None else [])
-                ],
+                self._hidden_state_shapes(batch),
                 "\n",
                 flush=True,
             )

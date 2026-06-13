@@ -13,10 +13,16 @@
 ```text
 Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1
 Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1
+Mjlab-Velocity-Blind-Rough-TargetNavigation-StepDanger-TeacherKL-Unitree-G1
 Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1
 ```
 
-其中 `TeacherKL` 表示 student 使用 PPO 训练，同时通过 frozen teacher 的动作分布进行 guidance。`SlowLatent` 在 teacher-student 基础上引入慢变 latent 变量，提高策略稳定性。
+其中 `TeacherKL` 表示 student 使用 PPO 训练，同时通过 frozen teacher
+的动作分布进行 guidance。`StepDanger` 继承普通 target-navigation
+TeacherKL，但在独立配置文件中使用一体化 toe-riser probe shaping
+reward：只保护状态机确认的第一/第二层试探接触，并把其他 riser/slab
+危险区继续按惩罚处理。`SlowLatent` 在 teacher-student 基础上引入慢变
+latent 变量，提高策略稳定性。
 
 本分支同时包含离线评估工具（`scripts/velocity_eval/`），用于：
 - 标准化地形评测（flat, upstairs_10cm/15cm/20cm）
@@ -67,6 +73,14 @@ uv run train Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1 \
 
 ```bash
 uv run train Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1 \
+  --env.scene.num-envs 4096 \
+  --agent.logger tensorboard
+```
+
+训练带完整 step danger reward 的 target navigation Teacher-KL：
+
+```bash
+uv run train Mjlab-Velocity-Blind-Rough-TargetNavigation-StepDanger-TeacherKL-Unitree-G1 \
   --env.scene.num-envs 4096 \
   --agent.logger tensorboard
 ```

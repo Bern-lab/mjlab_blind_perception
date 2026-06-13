@@ -9,6 +9,7 @@ from mjlab.tasks.registry import list_tasks, load_env_cfg
 
 MAIN_BRANCH_TASK_IDS = (
   "Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1",
+  "Mjlab-Velocity-Blind-Rough-TargetNavigation-StepDanger-TeacherKL-Unitree-G1",
   "Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1",
   "Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1",
 )
@@ -21,7 +22,7 @@ def all_task_ids() -> list[str]:
 
 
 def test_only_main_branch_tasks_registered(all_task_ids: list[str]) -> None:
-  """This branch intentionally exposes only the three main TeacherKL tasks."""
+  """This branch intentionally exposes only the main TeacherKL tasks."""
   assert all_task_ids == sorted(MAIN_BRANCH_TASK_IDS)
 
 
@@ -160,35 +161,47 @@ def test_step_boundary_rewards_scoped_to_target_stair_tasks(
   all_task_ids: list[str],
 ) -> None:
   """Step-boundary danger rewards should stay scoped to stair target tasks."""
-  step_reward_names = {
-    "foot_step_lip_volume_penalty",
-    "toe_step_riser_slab_penalty",
-  }
   target_navigation_task = (
     "Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1"
+  )
+  step_danger_task = (
+    "Mjlab-Velocity-Blind-Rough-TargetNavigation-StepDanger-TeacherKL-Unitree-G1"
   )
   slow_latent_task = (
     "Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1"
   )
   allowed_tasks = {
     target_navigation_task,
+    step_danger_task,
     slow_latent_task,
   }
   for task_id in all_task_ids:
     cfg = load_env_cfg(task_id)
-    present = step_reward_names.intersection(cfg.rewards)
     if task_id in allowed_tasks:
-      assert present == step_reward_names
+      assert "foot_step_lip_volume_penalty" in cfg.rewards
       assert (
         cfg.rewards["foot_step_lip_volume_penalty"].params["min_terrain_level"] == 3
       )
       assert (
         cfg.rewards["foot_step_lip_volume_penalty"].params["nearest_boundaries"] == 4
       )
-      assert cfg.rewards["toe_step_riser_slab_penalty"].params["min_terrain_level"] == 3
-      assert (
-        cfg.rewards["toe_step_riser_slab_penalty"].params["nearest_boundaries"] == 4
-      )
-      assert cfg.rewards["toe_step_riser_slab_penalty"].params["slab_depth"] == 0.10
+      if task_id == step_danger_task:
+        assert "toe_step_riser_slab_penalty" not in cfg.rewards
+        assert "toe_step_riser_probe_shaping_reward" in cfg.rewards
+        probe_params = cfg.rewards["toe_step_riser_probe_shaping_reward"].params
+        assert probe_params["min_terrain_level"] == 3
+        assert probe_params["nearest_boundaries"] == 4
+        assert probe_params["slab_depth"] == 0.10
+      else:
+        assert "toe_step_riser_slab_penalty" in cfg.rewards
+        slab_params = cfg.rewards["toe_step_riser_slab_penalty"].params
+        assert slab_params["min_terrain_level"] == 3
+        assert slab_params["nearest_boundaries"] == 4
+        assert slab_params["slab_depth"] == 0.10
     else:
-      assert not present, f"{task_id} unexpectedly enables {sorted(present)}"
+      unexpected = {
+        "foot_step_lip_volume_penalty",
+        "toe_step_riser_slab_penalty",
+        "toe_step_riser_probe_shaping_reward",
+      }.intersection(cfg.rewards)
+      assert not unexpected, f"{task_id} unexpectedly enables {sorted(unexpected)}"

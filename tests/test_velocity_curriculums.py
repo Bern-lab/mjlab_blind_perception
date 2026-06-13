@@ -3,11 +3,15 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
 import torch
 
 from mjlab.envs.mdp.events import randomize_terrain
 from mjlab.tasks.velocity.mdp.curriculums import terrain_levels_vel
-from mjlab.tasks.velocity.mdp.rewards import toe_step_riser_slab_penalty
+from mjlab.tasks.velocity.mdp.rewards import (
+  toe_step_riser_probe_shaping_reward,
+  toe_step_riser_slab_penalty,
+)
 
 
 class _FakeScene:
@@ -60,14 +64,24 @@ class _FakeCommandManager:
     assert name == "twist"
     return self._term
 
+  def get_command(self, name: str):
+    assert name == "twist"
+    return self._term.command
+
 
 def _make_env(root_xy: torch.Tensor, command_term, num_levels: int = 10):
   num_envs = root_xy.shape[0]
   root_pos = torch.cat([root_xy, torch.zeros(num_envs, 1)], dim=1)
-  asset = SimpleNamespace(data=SimpleNamespace(root_link_pos_w=root_pos))
+  root_quat = torch.zeros(num_envs, 4)
+  root_quat[:, 0] = 1.0
+  asset = SimpleNamespace(
+    data=SimpleNamespace(root_link_pos_w=root_pos, root_link_quat_w=root_quat)
+  )
   terrain = _FakeTerrain(num_envs, num_levels=num_levels)
   scene = _FakeScene(asset, terrain, terrain.env_origins)
   env = SimpleNamespace(
+    num_envs=num_envs,
+    device="cpu",
     scene=scene,
     command_manager=_FakeCommandManager(command_term),
     max_episode_length_s=20.0,
@@ -211,3 +225,118 @@ def test_toe_probe_boundary_layers_use_actual_stair_layers() -> None:
   )
 
   assert layers.tolist() == [[1, 2, 0, 0], [1, 2, 0, 0]]
+
+
+def test_toe_probe_forward_layers_use_geometry_not_height_sign() -> None:
+  boundaries = torch.zeros(2, 3, 11)
+  boundaries[:, :, 0] = torch.tensor([1.0, 2.0, 3.0])
+  boundaries[:, :, 1] = -0.5
+  boundaries[:, :, 3] = boundaries[:, :, 0]
+  boundaries[:, :, 4] = 0.5
+  boundaries[:, :, 6] = -1.0
+  boundaries[0, :, 9] = torch.tensor([0.0, 0.1, 0.2])
+  boundaries[0, :, 10] = torch.tensor([0.1, 0.2, 0.3])
+  boundaries[1, :, 9] = torch.tensor([-0.1, -0.2, -0.3])
+  boundaries[1, :, 10] = torch.tensor([0.0, -0.1, -0.2])
+  valid = torch.ones(2, 3, dtype=torch.bool)
+
+  command_term = SimpleNamespace(command=torch.tensor([[1.0, 0.0, 0.0]] * 2))
+  env, _ = _make_env(torch.zeros(2, 2), command_term)
+  asset = env.scene["robot"]
+
+  layers, command_active, root_s = (
+    toe_step_riser_probe_shaping_reward._forward_boundary_layers(
+      cast(Any, env),
+      asset,
+      boundaries,
+      valid,
+      command_name="twist",
+      forward_velocity_threshold=0.05,
+      forward_tol=0.05,
+      low_side_margin=0.02,
+      merge_riser_eps=0.04,
+    )
+  )
+
+  assert command_active.tolist() == [True, True]
+  assert torch.all(root_s > 0.0)
+  assert layers.tolist() == [[1, 2, 0], [1, 2, 0]]
+
+
+def test_toe_probe_reach_uses_current_position_as_progress_baseline() -> None:
+  root_xy = torch.tensor([[0.0, 0.0]])
+  toe_xy = torch.tensor([[0.3, 0.0]])
+  p0_xy = torch.tensor([[1.0, -0.5]])
+  p1_xy = torch.tensor([[1.0, 0.5]])
+  normal_xy = torch.tensor([[-1.0, 0.0]])
+  probe_side = torch.tensor([1.0])
+
+  current_reach = toe_step_riser_probe_shaping_reward._boundary_reach(
+    root_xy,
+    toe_xy,
+    p0_xy,
+    p1_xy,
+    normal_xy,
+    probe_side,
+  )
+  later_reach = toe_step_riser_probe_shaping_reward._boundary_reach(
+    root_xy,
+    torch.tensor([[0.4, 0.0]]),
+    p0_xy,
+    p1_xy,
+    normal_xy,
+    probe_side,
+  )
+
+  assert current_reach.item() == torch.tensor(0.3).item()
+  assert torch.relu(current_reach - current_reach).item() == 0.0
+  assert torch.relu(later_reach - current_reach).item() == pytest.approx(0.1)
+
+
+def test_toe_probe_root_segment_gate_filters_lateral_misalignment() -> None:
+  p0_xy = torch.tensor([[1.0, -0.5], [1.0, -0.5]])
+  p1_xy = torch.tensor([[1.0, 0.5], [1.0, 0.5]])
+  points_xy = torch.tensor([[0.0, 0.0], [0.0, 0.8]])
+
+  gate, _u, _segment_len, _tangent = (
+    toe_step_riser_probe_shaping_reward._segment_range_gate(
+      points_xy,
+      p0_xy,
+      p1_xy,
+      margin=0.2,
+    )
+  )
+
+  assert gate.tolist() == [True, False]
+
+
+def test_toe_probe_side_eps_rejects_boundary_ambiguous_root_side() -> None:
+  side, valid = toe_step_riser_probe_shaping_reward._side_from_signed_distance(
+    torch.tensor([0.02, 0.04, -0.04]),
+    side_eps=0.03,
+  )
+
+  assert side.tolist() == [1.0, 1.0, -1.0]
+  assert valid.tolist() == [False, True, True]
+
+
+def test_toe_probe_force_sign_flips_blocking_force_convention() -> None:
+  force_xy = torch.tensor([[-10.0, 0.0]])
+  normal_xy = torch.tensor([[-1.0, 0.0]])
+  side = torch.tensor([1.0])
+
+  positive = toe_step_riser_probe_shaping_reward._blocking_force_along_normal(
+    force_xy,
+    normal_xy,
+    side,
+    force_sign=1.0,
+  )
+  negative = toe_step_riser_probe_shaping_reward._blocking_force_along_normal(
+    force_xy,
+    normal_xy,
+    side,
+    force_sign=-1.0,
+  )
+
+  assert positive.item() == torch.tensor(10.0).item()
+  assert negative.item() == torch.tensor(-10.0).item()

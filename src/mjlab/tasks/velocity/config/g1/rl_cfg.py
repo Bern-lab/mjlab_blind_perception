@@ -275,9 +275,9 @@ def unitree_g1_blind_rough_teacherkl_runner_cfg() -> RslRlTeacherKLRunnerCfg:
         imitation_loss_coef=1.0,
         checkpoint_path=G1_TEACHER_KL_CHECKPOINT,
         loss_type="mean_huber",
-        lambda_start=0.03,
+        lambda_start=0.05,
         lambda_end=0.0,
-        warmup_iters=1000,
+        warmup_iters=0,
         constant_iters=0,
         anneal_iters=10000,
         schedule="cosine",
@@ -308,6 +308,15 @@ def unitree_g1_blind_rough_target_navigation_teacherkl_runner_cfg() -> (
   """Create Teacher-KL config for blind rough target-navigation training."""
   cfg = unitree_g1_blind_rough_teacherkl_runner_cfg()
   cfg.experiment_name = "g1_blind_rough_target_navigation_teacherkl"
+  return cfg
+
+
+def unitree_g1_blind_rough_target_navigation_step_danger_teacherkl_runner_cfg() -> (
+  RslRlTeacherKLRunnerCfg
+):
+  """Create Teacher-KL config for target navigation with full step danger rewards."""
+  cfg = unitree_g1_blind_rough_target_navigation_teacherkl_runner_cfg()
+  cfg.experiment_name = "g1_blind_rough_target_navigation_step_danger_teacherkl"
   return cfg
 
 
@@ -421,6 +430,6 @@ def unitree_g1_blind_rough_lstm_teacherkl_runner_cfg(
   cfg = unitree_g1_blind_rough_teacherkl_runner_cfg()
   cfg.actor = _unitree_g1_lstm_policy_model_cfg()
   cfg.num_steps_per_env = num_steps_per_env
-  cfg.save_interval = 200
+  cfg.save_interval = 1000
   cfg.experiment_name = "g1_blind_rough_lstm_teacherkl"
   return cfg

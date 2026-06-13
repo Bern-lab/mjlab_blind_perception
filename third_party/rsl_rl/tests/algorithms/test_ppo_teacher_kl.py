@@ -142,6 +142,42 @@ def test_disabled_guidance_runs_without_teacher() -> None:
     assert logs["teacher_guidance_enabled"] == 0.0
 
 
+def test_mlp_actor_skips_slow_latent_aux_path() -> None:
+    """Feedforward actors should not enter the slow-latent auxiliary path."""
+    alg = _build_teacher_kl({"enabled": False})
+    called = False
+
+    def _raise_if_called(batch: RolloutStorage.Batch) -> tuple[torch.Tensor, dict]:
+        nonlocal called
+        called = True
+        raise AssertionError("MLP actor should not compute slow-latent aux loss")
+
+    cast(Any, alg)._compute_slow_latent_aux_loss = _raise_if_called
+
+    loss, logs = alg._compute_additional_loss(
+        batch=RolloutStorage.Batch(hidden_states=(None, None)),
+        original_batch_size=0,
+        distribution_params=(),
+    )
+
+    assert called is False
+    assert loss.item() == 0.0
+    assert logs["teacher_guidance_enabled"] == 0.0
+
+
+def test_slow_latent_aux_debug_handles_missing_actor_hidden_state() -> None:
+    """Slow-latent debug logging should tolerate feedforward-style batches."""
+    alg = _build_teacher_kl({"enabled": False})
+    cast(Any, alg.actor).get_aux_outputs = lambda: {}
+
+    loss, logs = alg._compute_slow_latent_aux_loss(
+        RolloutStorage.Batch(observations=_build_obs(), hidden_states=(None, None))
+    )
+
+    assert loss.item() == 0.0
+    assert logs["slow_latent_debug_empty_aux_outputs"] == 1.0
+
+
 def test_teacher_forward_chunking_matches_full_batch() -> None:
     """Chunked teacher inference should preserve distribution parameters."""
     alg = _build_teacher_kl({"teacher_forward_chunk_size": 3})

@@ -21,6 +21,14 @@ from mjlab.tasks.velocity.config.g1.blind_rough_slow_latent_env_cfg import (
   G1SlowLatentTerrainReplayParams,
   unitree_g1_blind_rough_target_navigation_slow_latent_env_cfg,
 )
+from mjlab.tasks.velocity.config.g1.blind_rough_step_danger_env_cfg import (
+  G1StepDangerEnvParams,
+  G1StepDangerFootLipRewardParams,
+  G1StepDangerPlayVisualizationParams,
+  G1StepDangerRewardParams,
+  G1StepDangerToeRiserProbeRewardParams,
+  unitree_g1_blind_rough_target_navigation_step_danger_env_cfg,
+)
 from mjlab.tasks.velocity.config.g1.rl_cfg import (
   G1SlowLatentPolicyModelParams,
   G1SlowLatentRunnerParams,
@@ -37,6 +45,7 @@ from mjlab.terrains.primitive_terrains import (
 
 MAIN_BRANCH_VELOCITY_TASK_IDS = (
   "Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1",
+  "Mjlab-Velocity-Blind-Rough-TargetNavigation-StepDanger-TeacherKL-Unitree-G1",
   "Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1",
   "Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1",
 )
@@ -357,10 +366,72 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert actor_cfg.aux_future_collision_coef == 0.05
 
 
+def test_step_danger_target_navigation_uses_local_geometric_danger_rewards() -> None:
+  task_id = (
+    "Mjlab-Velocity-Blind-Rough-TargetNavigation-StepDanger-TeacherKL-Unitree-G1"
+  )
+  env_cfg = load_env_cfg(task_id)
+  rl_cfg = cast(RslRlTeacherKLRunnerCfg, load_rl_cfg(task_id))
+
+  assert isinstance(env_cfg.commands["twist"], TeacherTargetHeadingVelocityCommandCfg)
+  assert "latent" not in env_cfg.observations
+  assert "latent_labels" not in env_cfg.observations
+  assert "reset_stair_latent_cache" not in env_cfg.events
+  assert rl_cfg.obs_groups == {
+    "actor": ("actor",),
+    "critic": ("critic",),
+    "teacher": ("teacher", "camera"),
+  }
+  assert not isinstance(rl_cfg.actor, RslRlGatedStairLatentModelCfg)
+  assert rl_cfg.num_steps_per_env == 24
+  assert rl_cfg.experiment_name == (
+    "g1_blind_rough_target_navigation_step_danger_teacherkl"
+  )
+
+  foot_params = env_cfg.rewards["foot_step_lip_volume_penalty"].params
+  toe_reward = env_cfg.rewards["toe_step_riser_probe_shaping_reward"]
+  toe_params = toe_reward.params
+  assert env_cfg.rewards["foot_step_lip_volume_penalty"].weight == -3.2
+  assert "toe_step_riser_slab_penalty" not in env_cfg.rewards
+  assert toe_reward.weight == 1.0
+  assert foot_params["edge_radius"] == 0.07
+  assert "ignore_boundary_layers" not in foot_params
+  assert toe_params["slab_weight"] == 4.2
+  assert toe_params["slab_depth"] == 0.10
+  assert toe_params["v_margin"] == 0.05
+  assert toe_params["toe_x_min"] == 0.08
+  assert toe_params["toe_v_threshold"] == 0.02
+  assert toe_params["contact_sensor_name"] == "toe_terrain_contact"
+  assert toe_params["progress_weight"] == 0.3
+  assert toe_params["second_hit_weight"] == 1.5
+  assert toe_params["cos_heading_tol"] == 0.5
+  assert toe_params["lateral_margin"] == 0.10
+  assert toe_params["root_lateral_margin"] == 0.20
+  assert toe_params["side_eps"] == 0.03
+  assert toe_params["hard_timeout_s"] == 1.2
+  assert toe_params["force_sign"] == 1.0
+  assert "probe_contact_count" not in toe_params
+  assert "second_layer_attraction_reward" not in toe_params
+  assert foot_params["asset_cfg"] is not toe_params["asset_cfg"]
+  assert "toe_terrain_contact" in env_cfg.observations["critic"].terms
+  assert "toe_terrain_contact_forces" in env_cfg.observations["critic"].terms
+
+  play_cfg = load_env_cfg(task_id, play=True)
+  assert play_cfg.scene.terrain is not None
+  assert play_cfg.scene.terrain.terrain_generator is not None
+  vis = play_cfg.scene.terrain.terrain_generator.step_danger_visualization
+  assert vis.enabled is True
+  assert vis.lip_radius == 0.07
+  assert vis.slab_depth == 0.10
+  assert vis.slab_u_margin == 0.02
+  assert vis.slab_v_margin == 0.05
+
+
 def test_blind_teacherkl_play_hides_exteroceptive_visualizers() -> None:
   task_ids = (
     "Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1",
     "Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1",
+    "Mjlab-Velocity-Blind-Rough-TargetNavigation-StepDanger-TeacherKL-Unitree-G1",
     "Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1",
   )
 
@@ -487,6 +558,65 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
   assert actor_cfg.aux_stair_coef == 0.7
 
 
+def test_step_danger_explicit_param_interfaces_drive_configs() -> None:
+  env_params = G1StepDangerEnvParams(
+    rewards=G1StepDangerRewardParams(
+      foot_lip=G1StepDangerFootLipRewardParams(edge_radius=0.08),
+      toe_riser_probe=G1StepDangerToeRiserProbeRewardParams(
+        weight=0.8,
+        slab_weight=1.3,
+        slab_depth=0.12,
+        v_margin=0.07,
+        toe_x_min=0.10,
+        toe_v_threshold=0.04,
+        progress_weight=0.45,
+        second_hit_weight=1.9,
+        root_lateral_margin=0.25,
+        side_eps=0.04,
+        hard_timeout_s=1.4,
+        force_sign=-1.0,
+      ),
+    ),
+    play_visualization=G1StepDangerPlayVisualizationParams(
+      danger_lip_radius=0.09,
+      danger_slab_depth=0.11,
+      danger_geom_group=5,
+    ),
+  )
+  env_cfg = unitree_g1_blind_rough_target_navigation_step_danger_env_cfg(
+    play=True,
+    params=env_params,
+  )
+
+  foot_params = env_cfg.rewards["foot_step_lip_volume_penalty"].params
+  toe_reward = env_cfg.rewards["toe_step_riser_probe_shaping_reward"]
+  toe_params = toe_reward.params
+  assert foot_params["edge_radius"] == 0.08
+  assert "ignore_boundary_layers" not in foot_params
+  assert "toe_step_riser_slab_penalty" not in env_cfg.rewards
+  assert toe_reward.weight == 0.8
+  assert toe_params["slab_weight"] == 1.3
+  assert toe_params["slab_depth"] == 0.12
+  assert toe_params["v_margin"] == 0.07
+  assert toe_params["toe_x_min"] == 0.10
+  assert toe_params["toe_v_threshold"] == 0.04
+  assert toe_params["progress_weight"] == 0.45
+  assert toe_params["second_hit_weight"] == 1.9
+  assert toe_params["root_lateral_margin"] == 0.25
+  assert toe_params["side_eps"] == 0.04
+  assert toe_params["hard_timeout_s"] == 1.4
+  assert toe_params["force_sign"] == -1.0
+  assert "contact_penalty_scale" not in toe_params
+  assert "probe_contact_count" not in toe_params
+  assert "second_layer_attraction_reward" not in toe_params
+  assert env_cfg.scene.terrain is not None
+  assert env_cfg.scene.terrain.terrain_generator is not None
+  vis = env_cfg.scene.terrain.terrain_generator.step_danger_visualization
+  assert vis.lip_radius == 0.09
+  assert vis.slab_depth == 0.11
+  assert vis.geom_group == 5
+
+
 def test_blind_rough_variants_share_toe_riser_contact_penalty() -> None:
   """Blind-rough variants should use the shared toe-riser contact penalty config."""
   # Non-target TeacherKL variant keeps the old penalty.
@@ -519,8 +649,14 @@ def test_teacherkl_uses_delayed_mean_huber_guidance() -> None:
     RslRlTeacherKLRunnerCfg,
     load_rl_cfg("Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1"),
   )
+  step_danger_cfg = cast(
+    RslRlTeacherKLRunnerCfg,
+    load_rl_cfg(
+      "Mjlab-Velocity-Blind-Rough-TargetNavigation-StepDanger-TeacherKL-Unitree-G1"
+    ),
+  )
 
-  for cfg in (velocity_cfg, target_cfg):
+  for cfg in (velocity_cfg, target_cfg, step_danger_cfg):
     algorithm_cfg = cast(RslRlPpoTeacherKLAlgorithmCfg, cfg.algorithm)
     teacher_cfg = algorithm_cfg.teacher_kl_cfg
     assert cfg.obs_groups["teacher"] == ("teacher", "camera")
