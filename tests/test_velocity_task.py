@@ -347,11 +347,11 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert toe_reward_params["temporal_probe_first_reward"] == 0.05
   assert toe_reward_params["temporal_probe_confirm_reward"] == 0.20
   assert toe_reward_params["temporal_probe_lift_reward"] == 0.15
-  assert toe_reward_params["temporal_probe_forward_reward"] == 0.15
-  assert toe_reward_params["temporal_probe_min_lift"] == 0.03
+  assert toe_reward_params["temporal_probe_forward_reward"] == 0.2
+  assert toe_reward_params["temporal_probe_min_lift"] == 0.15
   assert toe_reward_params["temporal_probe_lift_scale"] == 0.08
-  assert toe_reward_params["temporal_probe_min_forward"] == 0.08
-  assert toe_reward_params["temporal_probe_forward_scale"] == 0.20
+  assert toe_reward_params["temporal_probe_min_forward"] == 0.15
+  assert toe_reward_params["temporal_probe_forward_scale"] == 0.30
   assert toe_reward_params["temporal_probe_timeout"] == 0.80
   assert toe_reward_params["temporal_probe_max_forward_vel"] == 0.45
   assert toe_reward_params["temporal_probe_overspeed_penalty"] == 0.10
@@ -646,8 +646,8 @@ def test_blind_rough_variants_share_toe_riser_contact_penalty() -> None:
   assert "toe_terrain_contact_forces" in cfg.observations["critic"].terms
 
 
-def test_teacherkl_uses_delayed_mean_huber_guidance() -> None:
-  """Teacher-KL variants should use delayed weak action-mean guidance."""
+def test_teacherkl_uses_mean_huber_guidance() -> None:
+  """Teacher-KL variants should use weak action-mean guidance."""
   velocity_cfg = cast(
     RslRlTeacherKLRunnerCfg,
     load_rl_cfg("Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1"),
@@ -671,9 +671,9 @@ def test_teacherkl_uses_delayed_mean_huber_guidance() -> None:
     assert teacher_cfg.imitation_only is False
     assert teacher_cfg.imitation_loss_coef == 1.0
     assert teacher_cfg.loss_type == "mean_huber"
-    assert teacher_cfg.lambda_start == 0.03
+    assert teacher_cfg.lambda_start == 0.05
     assert teacher_cfg.lambda_end == 0.0
-    assert teacher_cfg.warmup_iters == 1000
+    assert teacher_cfg.warmup_iters == 0
     assert teacher_cfg.anneal_iters == 10000
     assert teacher_cfg.huber_delta == 0.5
     assert teacher_cfg.max_teacher_loss is None
