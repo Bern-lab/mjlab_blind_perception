@@ -176,22 +176,23 @@ class G1SlowLatentRewardParams:
   toe_contact_vertical_normal_z_max: float = 0.4
   toe_contact_forward_velocity_threshold: float = 0.05
 
-  # Probe logic:
-  # first contact on layer 1 and layer 2 is rewarded once;
-  # later layers are normally penalized.
+  # Temporal foot-specific stair probing.
+  # The first valid layer-1 toe-riser contact opens a short probing phase for
+  # the opposite foot. During that phase, only the target foot can receive
+  # lift/forward/confirm rewards and temporary slab/contact protection.
   toe_probe_contact_count: int = 2
-  toe_probe_slab_reward_scale: float = 0.0
-  toe_probe_contact_reward: float = 0.20
-  toe_probe_min_progress: float = 0.0
-  toe_probe_max_safe_force: float | None = None
   toe_probe_cooldown_time: float = 0.20
-
-  # After the first layer is probed but before the second layer is probed,
-  # encourage the toes to actively reach toward the second riser.
-  toe_second_layer_attraction_reward: float = 0.15
-  toe_second_layer_attraction_distance: float = 0.55
-  toe_second_layer_attraction_u_margin: float = 0.08
-  toe_second_layer_attraction_v_margin: float = 0.12
+  toe_temporal_probe_first_reward: float = 0.05
+  toe_temporal_probe_confirm_reward: float = 0.20
+  toe_temporal_probe_lift_reward: float = 0.15
+  toe_temporal_probe_forward_reward: float = 0.2
+  toe_temporal_probe_min_lift: float = 0.15
+  toe_temporal_probe_lift_scale: float = 0.08
+  toe_temporal_probe_min_forward: float = 0.15
+  toe_temporal_probe_forward_scale: float = 0.30
+  toe_temporal_probe_timeout: float = 0.80
+  toe_temporal_probe_max_forward_vel: float = 0.45
+  toe_temporal_probe_overspeed_penalty: float = 0.10
 
   toe_probe_min_ascent_height: float = 0.03
   toe_probe_ascent_velocity_threshold: float = 0.03
