@@ -2043,17 +2043,21 @@ def idle_penalty(
   velocity_threshold: float = 0.1,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-  """Penalize standing nearly still when a clear velocity command is given."""
+  """Penalize failing to move along a clear commanded velocity."""
   asset: Entity = env.scene[asset_cfg.name]
   command = env.command_manager.get_command(command_name)
   assert command is not None
 
   commanded_speed = torch.norm(command[:, :2], dim=1)
-  actual_speed = torch.norm(asset.data.root_link_lin_vel_b[:, :2], dim=1)
+  command_direction = command[:, :2] / commanded_speed.clamp_min(1e-6).unsqueeze(1)
+  command_aligned_speed = torch.sum(
+    asset.data.root_link_lin_vel_b[:, :2] * command_direction,
+    dim=1,
+  )
 
-  penalty = (
-    (commanded_speed > command_threshold) & (actual_speed < velocity_threshold)
-  ).float()
+  has_clear_command = commanded_speed > command_threshold
+  is_too_slow_along_command = command_aligned_speed < velocity_threshold
+  penalty = (has_clear_command & is_too_slow_along_command).float()
 
   env.extras["log"]["Metrics/idle_penalty_ratio"] = torch.mean(penalty)
   return penalty

@@ -13,6 +13,7 @@ from mjlab.envs.mdp.rewards import electrical_power_cost, joint_torques_l2
 from mjlab.managers.reward_manager import RewardManager, RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sim.sim import Simulation, SimulationCfg
+from mjlab.tasks.velocity.mdp.rewards import idle_penalty
 
 PARTIALLY_ACTUATED_ROBOT_XML = """
 <mujoco>
@@ -329,6 +330,44 @@ def test_reward_scaling_default_is_enabled(mock_env):
 
   # Default (scaling enabled): reward = 1.0 * 1.0 * 0.01 = 0.01
   assert torch.allclose(rewards, torch.full((4,), 0.01))
+
+
+def test_idle_penalty_uses_command_aligned_velocity(mock_env):
+  """Idle penalty should catch standing still, sideways motion, and reversing."""
+  mock_env.num_envs = 5
+  mock_env.extras = {"log": {}}
+  mock_env.command_manager.get_command = Mock(
+    return_value=torch.tensor(
+      [
+        [0.5, 0.0, 0.0],  # clear forward command, standing still.
+        [0.5, 0.0, 0.0],  # clear forward command, too slow.
+        [0.5, 0.0, 0.0],  # clear forward command, reversing.
+        [0.5, 0.0, 0.0],  # clear forward command, moving sideways.
+        [0.5, 0.0, 0.0],  # clear forward command, moving forward enough.
+      ]
+    )
+  )
+  mock_env.scene["robot"].data.root_link_lin_vel_b = torch.tensor(
+    [
+      [0.0, 0.0, 0.0],
+      [0.05, 0.0, 0.0],
+      [-0.5, 0.0, 0.0],
+      [0.0, 0.5, 0.0],
+      [0.11, 0.0, 0.0],
+    ]
+  )
+
+  penalty = idle_penalty(
+    mock_env,
+    command_name="twist",
+    command_threshold=0.2,
+    velocity_threshold=0.1,
+  )
+
+  expected = torch.tensor([1.0, 1.0, 1.0, 1.0, 0.0])
+  assert torch.allclose(penalty, expected)
+  idle_ratio = mock_env.extras["log"]["Metrics/idle_penalty_ratio"].item()
+  assert idle_ratio == pytest.approx(0.8)
 
 
 def test_joint_torques_l2_with_actuator_ids(mock_env):

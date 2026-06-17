@@ -142,12 +142,12 @@ class G1PerceptionRewardParams:
   track_linear_velocity_weight: float = 2.0
   track_linear_velocity_std: float = math.sqrt(0.25)
   track_angular_velocity_weight: float = 2.0
-  track_angular_velocity_std: float = math.sqrt(0.5)
+  track_angular_velocity_std: float = math.sqrt(0.25)
   upright_weight: float = 1.0
   upright_std: float = math.sqrt(0.2)
   pose_weight: float = 1.0
   foot_clearance_weight: float = -2.0
-  foot_swing_height_weight: float = -0.25
+  foot_swing_height_weight: float = -0.75
   foot_swing_height_command_threshold: float = 0.01
   foot_slip_weight: float = -0.2
   soft_landing_weight: float = -2e-5

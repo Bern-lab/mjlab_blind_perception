@@ -55,6 +55,8 @@ Added
 Changed
 ^^^^^^^
 
+- ``idle_penalty`` now penalizes low command-aligned velocity, so moving
+  sideways or backward under a clear forward command is treated as idle.
 - G1 perception PPO now uses target-navigation commands for both training and
   play. Its student depth camera now uses the G1 D435i 42.4 degree mounting
   angle from vertical with a 55.2 degree vertical FOV, and play visualizes the
