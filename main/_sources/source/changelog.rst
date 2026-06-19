@@ -50,10 +50,21 @@ Added
   a non-latent G1 target-navigation Teacher-KL task with local foot-lip danger
   parameters and an integrated toe-riser probe shaping reward that neutralizes
   slab cost only for state-machine-validated first/second-riser probing contacts.
+- Added privileged stair-shape supervision for slow latent memory and a stage-2
+  safe-tread landing reward based on ground-truth tread geometry. Predicted
+  geometry is not fed back into reward computation.
 
 Changed
 ^^^^^^^
 
+- Slow-latent stair probing now starts directly from a valid first-riser toe
+  contact, measures target-foot progress along the world-frame stair ascent
+  direction, and uses a probe-specific support/swing gait until the second-riser
+  confirmation or timeout. Fast approaches no longer earn progress or collision
+  protection and receive an explicit overspeed penalty.
+- Slow-latent second-riser confirmation now checks ascent direction and boundary
+  geometry, while stage-2 landing shaping starts at stair layer three and rejects
+  toe-slab or foot-lip danger-zone touchdowns.
 - G1 high-stair curriculum tasks now enable mixed terrain replay after
   reaching high levels, sampling low/mid/high stair rows at a 20/30/50 ratio.
 - G1 high-stair terrains now randomize stair step depth per tile from

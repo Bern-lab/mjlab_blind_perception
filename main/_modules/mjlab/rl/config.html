@@ -56,7 +56,7 @@
     <link rel="search" title="Search" href="../../../search.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-    <meta name="docbuild:last-update" content="Jun 13, 2026"/>
+    <meta name="docbuild:last-update" content="Jun 19, 2026"/>
   </head>
   
   
@@ -469,7 +469,7 @@ document.write(`
 
 <span class="sd">  Same architecture as RslRlSlowLatentModelCfg but with:</span>
 <span class="sd">    - Gated update (fast/write/hold) controlled by an internal state machine</span>
-<span class="sd">    - Three auxiliary heads: event_head, stair_state_head, future_collision_head</span>
+<span class="sd">    - Auxiliary event, stair-state, future-collision, and stair-shape heads</span>
 <span class="sd">    - Separate latent observation group (deployable proprioceptive features only)</span>
 <span class="sd">  &quot;&quot;&quot;</span>
 
@@ -511,6 +511,10 @@ document.write(`
 <span class="w">  </span><span class="sd">&quot;&quot;&quot;Weight for current toe-riser event BCE loss.&quot;&quot;&quot;</span>
   <span class="n">aux_stair_coef</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span>
 <span class="w">  </span><span class="sd">&quot;&quot;&quot;Weight for stair state BCE loss (0.0 = disabled in v1).&quot;&quot;&quot;</span>
+  <span class="n">aux_stair_shape_coef</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.03</span>
+<span class="w">  </span><span class="sd">&quot;&quot;&quot;Weight for masked tread-depth/riser-height Huber loss.&quot;&quot;&quot;</span>
+  <span class="n">stair_shape_huber_delta</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.05</span>
+<span class="w">  </span><span class="sd">&quot;&quot;&quot;Huber transition point for stair geometry labels, in meters.&quot;&quot;&quot;</span>
   <span class="n">future_collision_horizon</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">20</span>
 <span class="w">  </span><span class="sd">&quot;&quot;&quot;Future window (steps) for the collision prediction label.&quot;&quot;&quot;</span>
 
@@ -767,7 +771,7 @@ By The mjlab Developers
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Jun 13, 2026.
+  Last updated on Jun 19, 2026.
   <br/>
 </p>
   </div>

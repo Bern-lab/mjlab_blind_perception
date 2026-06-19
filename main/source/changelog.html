@@ -58,7 +58,7 @@
     <link rel="prev" title="Research" href="research.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-    <meta name="docbuild:last-update" content="Jun 13, 2026"/>
+    <meta name="docbuild:last-update" content="Jun 19, 2026"/>
   </head>
   
   
@@ -545,11 +545,22 @@ collision points for the current episode.</p></li>
 a non-latent G1 target-navigation Teacher-KL task with local foot-lip danger
 parameters and an integrated toe-riser probe shaping reward that neutralizes
 slab cost only for state-machine-validated first/second-riser probing contacts.</p></li>
+<li><p>Added privileged stair-shape supervision for slow latent memory and a stage-2
+safe-tread landing reward based on ground-truth tread geometry. Predicted
+geometry is not fed back into reward computation.</p></li>
 </ul>
 </section>
 <section id="changed">
 <h3>Changed<a class="headerlink" href="#changed" title="Link to this heading">#</a></h3>
 <ul class="simple">
+<li><p>Slow-latent stair probing now starts directly from a valid first-riser toe
+contact, measures target-foot progress along the world-frame stair ascent
+direction, and uses a probe-specific support/swing gait until the second-riser
+confirmation or timeout. Fast approaches no longer earn progress or collision
+protection and receive an explicit overspeed penalty.</p></li>
+<li><p>Slow-latent second-riser confirmation now checks ascent direction and boundary
+geometry, while stage-2 landing shaping starts at stair layer three and rejects
+toe-slab or foot-lip danger-zone touchdowns.</p></li>
 <li><p>G1 high-stair curriculum tasks now enable mixed terrain replay after
 reaching high levels, sampling low/mid/high stair rows at a 20/30/50 ratio.</p></li>
 <li><p>G1 high-stair terrains now randomize stair step depth per tile from
@@ -1040,7 +1051,7 @@ By The mjlab Developers
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Jun 13, 2026.
+  Last updated on Jun 19, 2026.
   <br/>
 </p>
   </div>
