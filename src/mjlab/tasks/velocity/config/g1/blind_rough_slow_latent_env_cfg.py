@@ -132,6 +132,7 @@ class G1SlowLatentRewardParams:
   foot_gait_offset: tuple[float, float] = (0.0, 0.5)
   foot_gait_threshold: float = 0.56
   foot_gait_command_threshold: float = 0.1
+  probe_gait_support_speed_scale: float = 0.20
   base_height_above_support_weight: float = -0.5
   base_height_above_support_min_height: float = 0.74
   base_height_above_support_error_scale: float = 10.0
@@ -185,17 +186,35 @@ class G1SlowLatentRewardParams:
   toe_temporal_probe_first_reward: float = 0.05
   toe_temporal_probe_confirm_reward: float = 0.20
   toe_temporal_probe_lift_reward: float = 0.15
-  toe_temporal_probe_forward_reward: float = 0.2
+  toe_temporal_probe_forward_reward: float = 0.4  # Increased from 0.2.
   toe_temporal_probe_min_lift: float = 0.15
   toe_temporal_probe_lift_scale: float = 0.08
-  toe_temporal_probe_min_forward: float = 0.15
+  toe_temporal_probe_min_forward: float = 0.18
   toe_temporal_probe_forward_scale: float = 0.30
   toe_temporal_probe_timeout: float = 0.80
+  toe_temporal_probe_min_forward_vel: float = 0.03
   toe_temporal_probe_max_forward_vel: float = 0.45
+  toe_temporal_probe_boundary_normal_cos: float = 0.90
+  toe_temporal_probe_boundary_distance_tolerance: float = 0.12
+  toe_temporal_probe_shallow_depth: float = 0.025
   toe_temporal_probe_overspeed_penalty: float = 0.10
 
   toe_probe_min_ascent_height: float = 0.03
   toe_probe_ascent_velocity_threshold: float = 0.03
+
+  # Stage-2 privileged-geometry landing shaping.
+  stair_tread_landing_weight: float = 0.5
+  stair_tread_landing_bias: float = 0.60
+  stair_tread_landing_sigma_fraction: float = 0.15
+  stair_tread_landing_min_sigma: float = 0.03
+  stair_tread_landing_back_margin: float = 0.06
+  stair_tread_landing_front_margin: float = 0.08
+  stair_tread_landing_lateral_margin: float = 0.03
+  stair_tread_landing_height_tolerance: float = 0.08
+  stair_tread_landing_short_penalty_scale: float = 0.40
+  stair_tread_landing_over_front_penalty_scale: float = 0.60
+  stair_tread_landing_min_layer: int = 3
+  stair_tread_landing_lip_margin: float = 0.01
 
 
 @dataclass(frozen=True)
@@ -205,6 +224,7 @@ class G1SlowLatentLabelParams:
   toe_event_force_threshold: float = 15.0
   toe_event_vertical_normal_z_max: float = 0.4
   stair_state_min_terrain_level: int = 3
+  stair_shape_min_probe_stage: int = 2
 
 
 @dataclass(frozen=True)
@@ -335,13 +355,49 @@ def configure_g1_step_danger_rewards(
       "temporal_probe_min_forward": params.toe_temporal_probe_min_forward,
       "temporal_probe_forward_scale": params.toe_temporal_probe_forward_scale,
       "temporal_probe_timeout": params.toe_temporal_probe_timeout,
+      "temporal_probe_min_forward_vel": (params.toe_temporal_probe_min_forward_vel),
       "temporal_probe_max_forward_vel": params.toe_temporal_probe_max_forward_vel,
-      "temporal_probe_overspeed_penalty": (
-        params.toe_temporal_probe_overspeed_penalty
+      "temporal_probe_boundary_normal_cos": (
+        params.toe_temporal_probe_boundary_normal_cos
       ),
+      "temporal_probe_boundary_distance_tolerance": (
+        params.toe_temporal_probe_boundary_distance_tolerance
+      ),
+      "temporal_probe_shallow_depth": params.toe_temporal_probe_shallow_depth,
+      "temporal_probe_overspeed_penalty": (params.toe_temporal_probe_overspeed_penalty),
       "min_ascent_height": params.toe_probe_min_ascent_height,
       "ascent_velocity_threshold": params.toe_probe_ascent_velocity_threshold,
       "asset_cfg": foot_asset_cfg(),
+    },
+  )
+  cfg.rewards["stair_tread_landing_reward"] = RewardTermCfg(
+    func=mdp.stair_tread_landing_reward,
+    weight=params.stair_tread_landing_weight,
+    params={
+      "ground_contact_sensor_name": "feet_ground_contact",
+      "toe_contact_sensor_name": TOE_TERRAIN_CONTACT_SENSOR,
+      "landing_bias": params.stair_tread_landing_bias,
+      "sigma_fraction": params.stair_tread_landing_sigma_fraction,
+      "min_sigma": params.stair_tread_landing_min_sigma,
+      "back_margin": params.stair_tread_landing_back_margin,
+      "front_margin": params.stair_tread_landing_front_margin,
+      "lateral_margin": params.stair_tread_landing_lateral_margin,
+      "height_tolerance": params.stair_tread_landing_height_tolerance,
+      "short_penalty_scale": params.stair_tread_landing_short_penalty_scale,
+      "over_front_penalty_scale": (params.stair_tread_landing_over_front_penalty_scale),
+      "vertical_normal_z_max": params.toe_contact_vertical_normal_z_max,
+      "min_terrain_level": params.min_terrain_level,
+      "min_landing_layer": params.stair_tread_landing_min_layer,
+      "lip_edge_radius": params.foot_lip_edge_radius,
+      "lip_margin": params.stair_tread_landing_lip_margin,
+      "lip_edge_height_band": params.foot_lip_edge_height_band,
+      "slab_depth": params.toe_slab_depth,
+      "slab_u_margin": params.toe_slab_u_margin,
+      "slab_v_margin": params.toe_slab_v_margin,
+      "toe_x_min": params.toe_x_min,
+      "surface_tol": params.surface_tol,
+      "asset_cfg": SceneEntityCfg("robot", site_names=("left_foot", "right_foot")),
+      "foot_body_cfg": foot_asset_cfg(),
     },
   )
 
@@ -436,6 +492,12 @@ def _configure_slow_latent_rewards(
   def foot_site_cfg() -> SceneEntityCfg:
     return SceneEntityCfg("robot", site_names=("left_foot", "right_foot"))
 
+  def foot_body_cfg() -> SceneEntityCfg:
+    return SceneEntityCfg(
+      "robot",
+      body_names=("left_ankle_roll_link", "right_ankle_roll_link"),
+    )
+
   cfg.rewards["track_linear_velocity"].weight = params.track_linear_velocity_weight
   cfg.rewards["track_linear_velocity"].params.update(
     {
@@ -516,6 +578,7 @@ def _configure_slow_latent_rewards(
     }
   )
   cfg.rewards["foot_gait"].weight = params.foot_gait_weight
+  cfg.rewards["foot_gait"].func = mdp.probe_aware_feet_gait
   cfg.rewards["foot_gait"].params.update(
     {
       "command_name": "twist",
@@ -524,6 +587,8 @@ def _configure_slow_latent_rewards(
       "period": params.foot_gait_period,
       "offset": list(params.foot_gait_offset),
       "threshold": params.foot_gait_threshold,
+      "support_speed_scale": params.probe_gait_support_speed_scale,
+      "asset_cfg": foot_body_cfg(),
     }
   )
   cfg.rewards[
@@ -598,6 +663,13 @@ def _configure_latent_observations(
           params={
             "min_terrain_level": params.labels.stair_state_min_terrain_level,
             "sensor_name": TOE_TERRAIN_CONTACT_SENSOR,
+          },
+        ),
+        "stair_shape": ObservationTermCfg(
+          func=mdp.stair_shape_label,
+          params={
+            "min_terrain_level": params.labels.stair_state_min_terrain_level,
+            "min_probe_stage": params.labels.stair_shape_min_probe_stage,
           },
         ),
       },

@@ -9,6 +9,9 @@ from mjlab.sensor import CameraSensor, ContactSensor
 from mjlab.sensor.terrain_height_sensor import TerrainHeightSensor
 from mjlab.utils.lab_api.math import quat_apply, quat_apply_inverse
 
+from .rewards import _current_step_boundaries, _terrain_level_active
+from .stair_geometry import PROBE_STAGE_KEY, cached_stair_shape
+
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
 
@@ -435,6 +438,37 @@ def stair_state_label(
     return torch.zeros(env.num_envs, 1, device=env.device)
   levels = terrain.terrain_levels
   return (levels >= min_terrain_level).float().unsqueeze(-1)
+
+
+def stair_shape_label(
+  env: ManagerBasedRlEnv,
+  min_terrain_level: int = 3,
+  min_probe_stage: int = 2,
+) -> torch.Tensor:
+  """Privileged ``[tread_depth, riser_height, valid]`` supervision label.
+
+  The geometry comes from simulation-only step boundaries and is never exposed
+  to the actor or latent observation groups. By default, supervision starts
+  only after the second-riser confirmation makes tread geometry observable.
+  """
+  boundaries, valid_boundaries = _current_step_boundaries(env)
+  if boundaries is None or valid_boundaries is None:
+    return torch.zeros(env.num_envs, 3, device=env.device)
+
+  tread_depth, riser_height, shape_valid = cached_stair_shape(
+    env, boundaries, valid_boundaries
+  )
+  level_active = _terrain_level_active(env, min_terrain_level)
+  probe_stage = env.extras.get(PROBE_STAGE_KEY)
+  if probe_stage is None:
+    stage_active = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+  else:
+    stage_active = probe_stage >= min_probe_stage
+  label_valid = shape_valid & level_active & stage_active
+  return torch.stack(
+    [tread_depth, riser_height, label_valid.float()],
+    dim=-1,
+  )
 
 
 # ======================================================================

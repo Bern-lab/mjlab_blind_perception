@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import cast
 
 import onnx
+import pytest
 import torch
+from rsl_rl.algorithms.ppo_teacher_kl import PPOTeacherKL
 from tensordict import TensorDict
 
 from mjlab.rl.slow_latent_model import LSTMSlowLatentMLPModel
@@ -71,13 +73,40 @@ def test_slow_latent_actor_forward_updates_state_and_aux_outputs() -> None:
   assert aux["event_logit"].shape == (4, 1)
   assert aux["stair_logit"].shape == (4, 1)
   assert aux["future_collision_logit"].shape == (4, 1)
+  assert aux["stair_shape"].shape == (4, 2)
   diagnostics = model.get_slow_latent_diagnostics()
   assert diagnostics["event_prob"].shape == (4, 1)
   assert diagnostics["stair_prob"].shape == (4, 1)
   assert diagnostics["future_prob"].shape == (4, 1)
+  assert diagnostics["stair_shape"].shape == (4, 2)
   assert diagnostics["z_norm"].shape == (4, 1)
   assert diagnostics["gate_mode"].shape == (4, 1)
   assert diagnostics["alpha"].shape == (4, 1)
+
+
+def test_stair_shape_huber_ignores_invalid_labels() -> None:
+  predictions = torch.tensor([[0.40, 0.10], [10.0, 10.0]])
+  labels = torch.tensor([[0.30, 0.10], [0.30, 0.10]])
+  valid = torch.tensor([[1.0], [0.0]])
+
+  loss = PPOTeacherKL._compute_stair_shape_loss(
+    predictions,
+    labels,
+    valid,
+    huber_delta=0.05,
+  )
+
+  assert loss.item() == pytest.approx(0.0375)
+
+  mae, huber = PPOTeacherKL._compute_stair_shape_component_errors(
+    predictions,
+    labels,
+    valid,
+    huber_delta=0.05,
+  )
+
+  assert mae.tolist() == pytest.approx([0.1, 0.0])
+  assert huber.tolist() == pytest.approx([0.075, 0.0])
 
 
 def test_reset_done_env_clears_recurrent_latent_and_gate_state() -> None:

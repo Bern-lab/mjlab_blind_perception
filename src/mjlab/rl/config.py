@@ -66,7 +66,7 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
 
   Same architecture as RslRlSlowLatentModelCfg but with:
     - Gated update (fast/write/hold) controlled by an internal state machine
-    - Three auxiliary heads: event_head, stair_state_head, future_collision_head
+    - Auxiliary event, stair-state, future-collision, and stair-shape heads
     - Separate latent observation group (deployable proprioceptive features only)
   """
 
@@ -108,6 +108,10 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """Weight for current toe-riser event BCE loss."""
   aux_stair_coef: float = 0.0
   """Weight for stair state BCE loss (0.0 = disabled in v1)."""
+  aux_stair_shape_coef: float = 0.03
+  """Weight for masked tread-depth/riser-height Huber loss."""
+  stair_shape_huber_delta: float = 0.05
+  """Huber transition point for stair geometry labels, in meters."""
   future_collision_horizon: int = 20
   """Future window (steps) for the collision prediction label."""
 

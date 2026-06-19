@@ -364,10 +364,7 @@ class PPOTeacherKL(PPO):
             return []
         actor_hidden = batch.hidden_states[0]
         hidden_items = actor_hidden if isinstance(actor_hidden, tuple) else (actor_hidden,)
-        return [
-            tuple(h.shape) if hasattr(h, "shape") else type(h).__name__
-            for h in hidden_items
-        ]
+        return [tuple(h.shape) if hasattr(h, "shape") else type(h).__name__ for h in hidden_items]
 
     def _compute_future_collision_labels(
         self,
@@ -395,6 +392,44 @@ class PPOTeacherKL(PPO):
             future = future * masks.unsqueeze(-1).to(future.dtype)
         return future
 
+    @staticmethod
+    def _compute_stair_shape_loss(
+        predictions: torch.Tensor,
+        labels: torch.Tensor,
+        valid: torch.Tensor,
+        huber_delta: float,
+    ) -> torch.Tensor:
+        """Compute a valid-mask-normalized Huber loss for stair geometry."""
+        shape_error = functional.smooth_l1_loss(
+            predictions,
+            labels,
+            reduction="none",
+            beta=huber_delta,
+        ).mean(dim=-1, keepdim=True)
+        valid_count = valid.sum().clamp_min(1.0)
+        return (shape_error * valid).sum() / valid_count
+
+    @staticmethod
+    def _compute_stair_shape_component_errors(
+        predictions: torch.Tensor,
+        labels: torch.Tensor,
+        valid: torch.Tensor,
+        huber_delta: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute valid-mask-normalized MAE and Huber for each shape component."""
+        valid_count = valid.sum().clamp_min(1.0)
+        absolute_error = torch.abs(predictions - labels)
+        huber_error = functional.smooth_l1_loss(
+            predictions,
+            labels,
+            reduction="none",
+            beta=huber_delta,
+        )
+        reduce_dims = tuple(range(predictions.dim() - 1))
+        component_mae = (absolute_error * valid).sum(dim=reduce_dims) / valid_count
+        component_huber = (huber_error * valid).sum(dim=reduce_dims) / valid_count
+        return component_mae, component_huber
+
     def _compute_slow_latent_aux_loss(
         self,
         batch: RolloutStorage.Batch,
@@ -419,6 +454,7 @@ class PPOTeacherKL(PPO):
         event_coef = float(getattr(self.actor, "aux_event_coef", 0.0))
         stair_coef = float(getattr(self.actor, "aux_stair_coef", 0.0))
         future_coef = float(getattr(self.actor, "aux_future_collision_coef", 0.0))
+        shape_coef = float(getattr(self.actor, "aux_stair_shape_coef", 0.0))
 
         observations = batch.observations
         obs_keys = []
@@ -458,6 +494,7 @@ class PPOTeacherKL(PPO):
                     "event": event_coef,
                     "stair": stair_coef,
                     "future": future_coef,
+                    "shape": shape_coef,
                 },
                 "\n  batch_has_observations=",
                 observations is not None,
@@ -482,7 +519,7 @@ class PPOTeacherKL(PPO):
             logs["slow_latent_debug_empty_aux_outputs"] = 1.0
             return torch.zeros((), device=self.device), logs
 
-        if event_coef == 0.0 and stair_coef == 0.0 and future_coef == 0.0:
+        if event_coef == 0.0 and stair_coef == 0.0 and future_coef == 0.0 and shape_coef == 0.0:
             logs["slow_latent_debug_all_aux_coef_zero"] = 1.0
             return torch.zeros((), device=self.device), logs
 
@@ -495,8 +532,14 @@ class PPOTeacherKL(PPO):
         labels = batch.observations["latent_labels"]
         if labels.shape[-1] < 2:
             raise RuntimeError("Slow-latent 'latent_labels' must contain event and stair labels.")
+        if shape_coef != 0.0 and labels.shape[-1] < 5:
+            raise RuntimeError(
+                "Slow-latent stair-shape loss requires labels [event, stair, tread_depth, riser_height, shape_valid]."
+            )
         event_labels_padded = labels[..., 0:1].float()
         stair_labels_padded = labels[..., 1:2].float()
+        shape_labels_padded = labels[..., 2:4].float()
+        shape_valid_padded = labels[..., 4:5].float()
         future_horizon = int(getattr(self.actor, "future_collision_horizon", 20))
         future_labels_padded = self._compute_future_collision_labels(
             event_labels_padded,
@@ -508,10 +551,14 @@ class PPOTeacherKL(PPO):
             event_labels = cast(torch.Tensor, unpad_trajectories(event_labels_padded, batch.masks))
             stair_labels = cast(torch.Tensor, unpad_trajectories(stair_labels_padded, batch.masks))
             future_labels = cast(torch.Tensor, unpad_trajectories(future_labels_padded, batch.masks))
+            shape_labels = cast(torch.Tensor, unpad_trajectories(shape_labels_padded, batch.masks))
+            shape_valid = cast(torch.Tensor, unpad_trajectories(shape_valid_padded, batch.masks))
         else:
             event_labels = event_labels_padded
             stair_labels = stair_labels_padded
             future_labels = future_labels_padded
+            shape_labels = shape_labels_padded
+            shape_valid = shape_valid_padded
 
         total_loss = torch.zeros((), device=self.device)
         logs: dict[str, float] = {}
@@ -542,6 +589,30 @@ class PPOTeacherKL(PPO):
             total_loss = total_loss + future_loss
             logs["slow_latent_future_bce"] = self._distributed_mean_scalar(future_loss_raw).item()
             logs["slow_latent_future_loss"] = self._distributed_mean_scalar(future_loss).item()
+        if shape_coef != 0.0 and "stair_shape" in aux_outputs:
+            huber_delta = float(getattr(self.actor, "stair_shape_huber_delta", 0.05))
+            shape_predictions = aux_outputs["stair_shape"]
+            shape_loss_raw = self._compute_stair_shape_loss(
+                shape_predictions,
+                shape_labels,
+                shape_valid,
+                huber_delta,
+            )
+            shape_mae, shape_huber = self._compute_stair_shape_component_errors(
+                shape_predictions,
+                shape_labels,
+                shape_valid,
+                huber_delta,
+            )
+            shape_loss = shape_coef * shape_loss_raw
+            total_loss = total_loss + shape_loss
+            logs["slow_latent_shape_huber"] = self._distributed_mean_scalar(shape_loss_raw).item()
+            logs["slow_latent_shape_loss"] = self._distributed_mean_scalar(shape_loss).item()
+            logs["slow_latent_shape_valid_ratio"] = self._distributed_mean_scalar(shape_valid.mean()).item()
+            logs["slow_latent_tread_depth_mae"] = self._distributed_mean_scalar(shape_mae[0]).item()
+            logs["slow_latent_riser_height_mae"] = self._distributed_mean_scalar(shape_mae[1]).item()
+            logs["slow_latent_tread_depth_huber"] = self._distributed_mean_scalar(shape_huber[0]).item()
+            logs["slow_latent_riser_height_huber"] = self._distributed_mean_scalar(shape_huber[1]).item()
         logs["slow_latent_aux_loss"] = self._distributed_mean_scalar(total_loss).item()
         logs.update(self._compute_slow_latent_diagnostic_logs())
         return total_loss, logs
@@ -567,6 +638,11 @@ class PPOTeacherKL(PPO):
         add_mean("slow_latent_stair_prob_mean", diagnostics.get("stair_prob"))
         add_mean("slow_latent_future_prob_mean", diagnostics.get("future_prob"))
         add_mean("slow_latent_z_norm_mean", diagnostics.get("z_norm"))
+
+        stair_shape = diagnostics.get("stair_shape")
+        if stair_shape is not None and stair_shape.numel() > 0:
+            add_mean("slow_latent_tread_depth_pred_mean", stair_shape[..., 0])
+            add_mean("slow_latent_riser_height_pred_mean", stair_shape[..., 1])
 
         z_norm = diagnostics.get("z_norm")
         if z_norm is not None and z_norm.numel() > 0:

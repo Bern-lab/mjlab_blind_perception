@@ -34,7 +34,7 @@ from mjlab.tasks.velocity.config.g1.rl_cfg import (
   G1SlowLatentRunnerParams,
   unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg,
 )
-from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
+from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg, probe_aware_feet_gait
 from mjlab.tasks.velocity.mdp.teacher_target_heading_command import (
   TeacherTargetHeadingVelocityCommandCfg,
 )
@@ -329,6 +329,7 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert set(env_cfg.observations["latent_labels"].terms) == {
     "toe_riser_event",
     "stair_state",
+    "stair_shape",
   }
   assert "reset_stair_latent_cache" in env_cfg.events
   assert rl_cfg.obs_groups["actor"] == ("actor",)
@@ -347,14 +348,35 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert toe_reward_params["temporal_probe_first_reward"] == 0.05
   assert toe_reward_params["temporal_probe_confirm_reward"] == 0.20
   assert toe_reward_params["temporal_probe_lift_reward"] == 0.15
-  assert toe_reward_params["temporal_probe_forward_reward"] == 0.2
+  assert toe_reward_params["temporal_probe_forward_reward"] == 0.4
   assert toe_reward_params["temporal_probe_min_lift"] == 0.15
   assert toe_reward_params["temporal_probe_lift_scale"] == 0.08
-  assert toe_reward_params["temporal_probe_min_forward"] == 0.15
+  assert toe_reward_params["temporal_probe_min_forward"] == 0.18
   assert toe_reward_params["temporal_probe_forward_scale"] == 0.30
   assert toe_reward_params["temporal_probe_timeout"] == 0.80
+  assert toe_reward_params["temporal_probe_min_forward_vel"] == 0.03
   assert toe_reward_params["temporal_probe_max_forward_vel"] == 0.45
+  assert toe_reward_params["temporal_probe_boundary_normal_cos"] == 0.90
+  assert toe_reward_params["temporal_probe_boundary_distance_tolerance"] == 0.12
+  assert toe_reward_params["temporal_probe_shallow_depth"] == 0.025
   assert toe_reward_params["temporal_probe_overspeed_penalty"] == 0.10
+  foot_gait = env_cfg.rewards["foot_gait"]
+  assert foot_gait.func is probe_aware_feet_gait
+  assert foot_gait.params["support_speed_scale"] == 0.20
+  landing_reward = env_cfg.rewards["stair_tread_landing_reward"]
+  assert landing_reward.weight == 0.5
+  assert landing_reward.params["landing_bias"] == 0.60
+  assert landing_reward.params["min_landing_layer"] == 3
+  assert landing_reward.params["lip_edge_radius"] == 0.07
+  assert landing_reward.params["lip_margin"] == 0.01
+  assert landing_reward.params["foot_body_cfg"].body_names == (
+    "left_ankle_roll_link",
+    "right_ankle_roll_link",
+  )
+  assert landing_reward.params["short_penalty_scale"] == 0.40
+  assert landing_reward.params["over_front_penalty_scale"] == 0.60
+  shape_label = env_cfg.observations["latent_labels"].terms["stair_shape"]
+  assert shape_label.params["min_probe_stage"] == 2
   toe_sensor_cfg = cast(
     ContactSensorCfg,
     next(
@@ -368,9 +390,12 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert actor_cfg.latent_dim == 16
   assert actor_cfg.latent_hidden_dim == 128
   assert actor_cfg.mlp_encoder_dims == (128, 128)
+  assert actor_cfg.alpha_hold == 0.01
   assert actor_cfg.aux_event_coef == 0.03
   assert actor_cfg.aux_stair_coef == 0.02
   assert actor_cfg.aux_future_collision_coef == 0.05
+  assert actor_cfg.aux_stair_shape_coef == 0.03
+  assert actor_cfg.stair_shape_huber_delta == 0.05
 
 
 def test_step_danger_target_navigation_uses_local_geometric_danger_rewards() -> None:

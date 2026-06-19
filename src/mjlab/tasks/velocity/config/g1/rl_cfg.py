@@ -55,7 +55,7 @@ class G1SlowLatentPolicyModelParams:
   """EMA update rate in normal fast-update mode."""
   alpha_write: float = 0.8
   """EMA update rate while writing stair evidence into memory."""
-  alpha_hold: float = 0.01  # 原本0.02
+  alpha_hold: float = 0.01
   """EMA update rate while holding stair memory."""
   write_steps: int = 2
   """Number of steps spent in write mode after an event trigger."""
@@ -77,6 +77,10 @@ class G1SlowLatentPolicyModelParams:
   """BCE loss weight for current stair-state prediction."""
   aux_future_collision_coef: float = 0.05
   """BCE loss weight for future toe-riser collision prediction."""
+  aux_stair_shape_coef: float = 0.03
+  """Huber loss weight for privileged stair geometry prediction."""
+  stair_shape_huber_delta: float = 0.05
+  """Huber transition point for shape prediction, in meters."""
   future_collision_horizon: int = 20
   """Future window length, in policy steps, for collision labels."""
   latent_obs_set: str = "latent"
@@ -140,7 +144,7 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
   mlp_encoder_dims: tuple[int, ...] = (128, 128),
   alpha_fast: float = 0.3,
   alpha_write: float = 0.8,
-  alpha_hold: float = 0.02,
+  alpha_hold: float = 0.01,
   write_steps: int = 2,
   min_stair_steps: int = 50,
   exit_steps: int = 100,
@@ -151,6 +155,8 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
   aux_event_coef: float = 0.03,
   aux_stair_coef: float = 0.02,
   aux_future_collision_coef: float = 0.05,
+  aux_stair_shape_coef: float = 0.03,
+  stair_shape_huber_delta: float = 0.05,
   future_collision_horizon: int = 20,
   latent_obs_set: str = "latent",
 ) -> RslRlGatedStairLatentModelCfg:
@@ -179,6 +185,8 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
     aux_event_coef=aux_event_coef,
     aux_stair_coef=aux_stair_coef,
     aux_future_collision_coef=aux_future_collision_coef,
+    aux_stair_shape_coef=aux_stair_shape_coef,
+    stair_shape_huber_delta=stair_shape_huber_delta,
     future_collision_horizon=future_collision_horizon,
     latent_obs_set=latent_obs_set,
     rnn_type="lstm",
@@ -327,7 +335,7 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
   mlp_encoder_dims: tuple[int, ...] = (128, 128),
   alpha_fast: float = 0.3,
   alpha_write: float = 0.8,
-  alpha_hold: float = 0.02,
+  alpha_hold: float = 0.01,
   write_steps: int = 2,
   min_stair_steps: int = 50,
   exit_steps: int = 100,
@@ -338,6 +346,8 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
   aux_event_coef: float = 0.03,
   aux_stair_coef: float = 0.02,
   aux_future_collision_coef: float = 0.05,
+  aux_stair_shape_coef: float = 0.03,
+  stair_shape_huber_delta: float = 0.05,
   future_collision_horizon: int = 20,
   latent_obs_set: str = "latent",
   params: G1SlowLatentRunnerParams | None = None,
@@ -379,6 +389,8 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
     aux_event_coef = model_params.aux_event_coef
     aux_stair_coef = model_params.aux_stair_coef
     aux_future_collision_coef = model_params.aux_future_collision_coef
+    aux_stair_shape_coef = model_params.aux_stair_shape_coef
+    stair_shape_huber_delta = model_params.stair_shape_huber_delta
     future_collision_horizon = model_params.future_collision_horizon
     latent_obs_set = model_params.latent_obs_set
 
@@ -405,6 +417,8 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
     aux_event_coef=aux_event_coef,
     aux_stair_coef=aux_stair_coef,
     aux_future_collision_coef=aux_future_collision_coef,
+    aux_stair_shape_coef=aux_stair_shape_coef,
+    stair_shape_huber_delta=stair_shape_huber_delta,
     future_collision_horizon=future_collision_horizon,
     latent_obs_set=latent_obs_set,
   )

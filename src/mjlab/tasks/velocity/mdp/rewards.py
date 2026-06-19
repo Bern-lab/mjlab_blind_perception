@@ -640,7 +640,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     contact_pos_w: torch.Tensor,
     boundaries: torch.Tensor,
     probe_boundary_layers: torch.Tensor,
-  ) -> torch.Tensor:
+  ) -> tuple[torch.Tensor, torch.Tensor]:
     p0 = boundaries[:, :, 0:3]
     p1 = boundaries[:, :, 3:6]
     segment = p1 - p0
@@ -667,11 +667,12 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       dim=-1,
       index=nearest_idx[..., None],
     ).squeeze(-1)
-    return torch.where(
+    nearest_layers = torch.where(
       torch.isfinite(nearest_dist),
       nearest_layers,
       torch.zeros_like(nearest_layers),
     )
+    return nearest_layers, nearest_idx
 
   def _contact_probe_terms(
     self,
@@ -692,6 +693,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     contact_time_scale: float,
     probe_contact_reward: float,
     probe_cooldown_time: float,
+    event_gate: torch.Tensor | None = None,
   ) -> dict[str, torch.Tensor]:
     sensor = env.scene[sensor_name]
     assert isinstance(sensor, ContactSensor), (
@@ -759,8 +761,10 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       & is_forward_sweep
       & (hit_strength > 0.0)
     )
+    if event_gate is None:
+      event_gate = active_gate
     hit_by_foot = torch.any(toe_riser_hit, dim=-1)
-    current_hit_by_foot = hit_by_foot & active_gate[:, None]
+    current_hit_by_foot = hit_by_foot & event_gate[:, None]
     new_hit_by_foot = current_hit_by_foot & (self._probe_hit_cooldown <= 0.0)
 
     if bool(torch.any(new_hit_by_foot).item()):
@@ -772,14 +776,15 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
 
     current_hit_env = torch.any(current_hit_by_foot, dim=-1)
     new_hit_env = torch.any(new_hit_by_foot, dim=-1)
-    contact_layers = self._contact_probe_layers(
+    contact_layers, contact_boundary_idx = self._contact_probe_layers(
       contact_pos_w,
       boundaries,
       probe_boundary_layers,
     )
-    active_toe_hit = toe_riser_hit & active_gate[:, None, None]
-    probe_layer_contact = active_toe_hit & (contact_layers > 0)
-    non_probe_contact = active_toe_hit & ~probe_layer_contact
+    event_toe_hit = toe_riser_hit & event_gate[:, None, None]
+    probe_layer_contact = event_toe_hit & (contact_layers > 0)
+    penalty_toe_hit = toe_riser_hit & active_gate[:, None, None]
+    non_probe_contact = penalty_toe_hit & ~probe_layer_contact
     non_probe_hit_by_foot = torch.any(non_probe_contact, dim=-1)
     non_probe_hit_env = torch.any(non_probe_hit_by_foot, dim=-1)
 
@@ -899,6 +904,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       new_hit_by_foot=new_hit_by_foot,
       current_hit_by_foot=current_hit_by_foot,
       contact_layers=contact_layers,
+      contact_boundary_idx=contact_boundary_idx,
       hit_strength=hit_strength,
       foot_forward_vel=foot_forward_vel,
       foot_forward_xy=foot_forward_xy,
@@ -1043,9 +1049,41 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     second_layer_attraction_v_margin: float = 0.08,
     min_ascent_height: float = 0.03,
     ascent_velocity_threshold: float = 0.03,
+    temporal_probe_first_reward: float = 0.05,
+    temporal_probe_confirm_reward: float = 0.20,
+    temporal_probe_lift_reward: float = 0.15,
+    temporal_probe_forward_reward: float = 0.15,
+    temporal_probe_min_lift: float = 0.03,
+    temporal_probe_lift_scale: float = 0.08,
+    temporal_probe_min_forward: float = 0.08,
+    temporal_probe_forward_scale: float = 0.20,
+    temporal_probe_timeout: float = 0.80,
+    temporal_probe_min_forward_vel: float = 0.03,
+    temporal_probe_max_forward_vel: float = 0.45,
+    temporal_probe_boundary_normal_cos: float = 0.90,
+    temporal_probe_boundary_distance_tolerance: float = 0.12,
+    temporal_probe_shallow_depth: float = 0.025,
+    temporal_probe_overspeed_penalty: float = 0.10,
     asset_cfg: SceneEntityCfg = _DEFAULT_FOOT_BODY_CFG,
     **_: object,
   ) -> torch.Tensor:
+    del (
+      temporal_probe_first_reward,
+      temporal_probe_confirm_reward,
+      temporal_probe_lift_reward,
+      temporal_probe_forward_reward,
+      temporal_probe_min_lift,
+      temporal_probe_lift_scale,
+      temporal_probe_min_forward,
+      temporal_probe_forward_scale,
+      temporal_probe_timeout,
+      temporal_probe_min_forward_vel,
+      temporal_probe_max_forward_vel,
+      temporal_probe_boundary_normal_cos,
+      temporal_probe_boundary_distance_tolerance,
+      temporal_probe_shallow_depth,
+      temporal_probe_overspeed_penalty,
+    )
     boundaries, valid_boundaries = _current_step_boundaries(env)
     if boundaries is None or valid_boundaries is None:
       return torch.zeros(env.num_envs, device=env.device)

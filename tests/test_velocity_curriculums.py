@@ -12,6 +12,10 @@ from mjlab.tasks.velocity.mdp.rewards import (
   toe_step_riser_probe_shaping_reward,
   toe_step_riser_slab_penalty,
 )
+from mjlab.tasks.velocity.mdp.stair_geometry import stair_shape_from_boundaries
+from mjlab.tasks.velocity.mdp.temporal_stair_rewards import (
+  toe_step_riser_slab_penalty as temporal_toe_step_riser_slab_penalty,
+)
 
 
 class _FakeScene:
@@ -340,3 +344,52 @@ def test_toe_probe_force_sign_flips_blocking_force_convention() -> None:
 
   assert positive.item() == torch.tensor(10.0).item()
   assert negative.item() == torch.tensor(-10.0).item()
+
+
+def test_temporal_probe_progress_uses_world_ascent_direction() -> None:
+  start = torch.tensor([[0.2, 0.1, 0.0], [0.2, 0.1, 0.0]])
+  current = torch.tensor([[0.5, 0.3, 0.0], [0.5, 0.3, 0.0]])
+  ascent_dir = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+
+  progress = temporal_toe_step_riser_slab_penalty._ascent_progress(
+    current,
+    start,
+    ascent_dir,
+  )
+
+  assert progress.tolist() == pytest.approx([0.3, 0.2])
+
+
+def test_temporal_probe_velocity_guard_blocks_fast_riser_approach() -> None:
+  velocity = torch.tensor([[0.4, 0.0, 0.0], [0.6, 0.0, 0.0]])
+  ascent_dir = torch.tensor([[1.0, 0.0], [1.0, 0.0]])
+
+  forward_vel, safe, overspeed = temporal_toe_step_riser_slab_penalty._velocity_guard(
+    velocity,
+    ascent_dir,
+    max_forward_vel=0.45,
+  )
+
+  assert forward_vel.tolist() == pytest.approx([0.4, 0.6])
+  assert safe.tolist() == [True, False]
+  assert overspeed.tolist() == pytest.approx([0.0, 0.15])
+
+
+def test_stair_shape_uses_parallel_boundary_spacing_and_riser_height() -> None:
+  boundaries = torch.tensor(
+    [
+      [
+        [0.0, 0.0, 0.10, 1.0, 0.0, 0.10, 0.0, -1.0, 0.0, 0.0, 0.10],
+        [0.0, 0.30, 0.20, 1.0, 0.30, 0.20, 0.0, -1.0, 0.0, 0.10, 0.20],
+      ]
+    ]
+  )
+  valid = torch.tensor([[True, True]])
+
+  tread_depth, riser_height, shape_valid = stair_shape_from_boundaries(
+    boundaries, valid
+  )
+
+  assert tread_depth.tolist() == pytest.approx([0.30])
+  assert riser_height.tolist() == pytest.approx([0.10])
+  assert shape_valid.tolist() == [True]
