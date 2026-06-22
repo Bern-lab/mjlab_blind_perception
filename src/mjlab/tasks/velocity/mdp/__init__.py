@@ -14,5 +14,5 @@ toe_step_riser_slab_penalty: Any = _temporal_stair_rewards.toe_step_riser_slab_p
 toe_step_riser_approach_penalty: Any = (
   _temporal_stair_rewards.toe_step_riser_approach_penalty
 )
-probe_aware_feet_gait = _temporal_stair_rewards.probe_aware_feet_gait
+stair_aware_feet_gait = _temporal_stair_rewards.stair_aware_feet_gait
 stair_tread_landing_reward = _temporal_stair_rewards.stair_tread_landing_reward

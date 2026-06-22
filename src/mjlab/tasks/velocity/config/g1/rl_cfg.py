@@ -47,6 +47,8 @@ class G1SlowLatentPolicyModelParams:
   """Distribution std parameterization passed to RSL-RL."""
   latent_dim: int = 16
   """Dimension of the persistent slow latent memory z_t."""
+  state_latent_dim: int = 8
+  """Leading latent channels assigned to stair state and timing."""
   latent_hidden_dim: int = 128
   """LSTM hidden size for the latent encoder and recurrent rollout storage."""
   mlp_encoder_dims: tuple[int, ...] = (128, 128)
@@ -55,8 +57,10 @@ class G1SlowLatentPolicyModelParams:
   """EMA update rate in normal fast-update mode."""
   alpha_write: float = 0.8
   """EMA update rate while writing stair evidence into memory."""
-  alpha_hold: float = 0.01
-  """EMA update rate while holding stair memory."""
+  alpha_hold_state: float = 0.01
+  """Hold update rate for stable stair-state and timing channels."""
+  alpha_hold_shape: float = 0.05
+  """Hold update rate for geometry and safe-stride channels."""
   write_steps: int = 2
   """Number of steps spent in write mode after an event trigger."""
   min_stair_steps: int = 50
@@ -79,8 +83,12 @@ class G1SlowLatentPolicyModelParams:
   """BCE loss weight for future toe-riser collision prediction."""
   aux_stair_shape_coef: float = 0.03
   """Huber loss weight for privileged stair geometry prediction."""
+  aux_safe_stride_coef: float = 0.03
+  """Huber loss weight for the safe-tread lower-bound prediction."""
   stair_shape_huber_delta: float = 0.05
   """Huber transition point for shape prediction, in meters."""
+  safe_stride_huber_delta: float = 0.05
+  """Huber transition point for safe-stride prediction, in meters."""
   future_collision_horizon: int = 20
   """Future window length, in policy steps, for collision labels."""
   latent_obs_set: str = "latent"
@@ -140,11 +148,13 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
   action_std_init: float = 1.0,
   action_std_type: str = "scalar",
   latent_dim: int = 16,
+  state_latent_dim: int = 8,
   latent_hidden_dim: int = 128,
   mlp_encoder_dims: tuple[int, ...] = (128, 128),
   alpha_fast: float = 0.3,
   alpha_write: float = 0.8,
-  alpha_hold: float = 0.01,
+  alpha_hold_state: float = 0.01,
+  alpha_hold_shape: float = 0.05,
   write_steps: int = 2,
   min_stair_steps: int = 50,
   exit_steps: int = 100,
@@ -156,7 +166,9 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
   aux_stair_coef: float = 0.02,
   aux_future_collision_coef: float = 0.05,
   aux_stair_shape_coef: float = 0.03,
+  aux_safe_stride_coef: float = 0.03,
   stair_shape_huber_delta: float = 0.05,
+  safe_stride_huber_delta: float = 0.05,
   future_collision_horizon: int = 20,
   latent_obs_set: str = "latent",
 ) -> RslRlGatedStairLatentModelCfg:
@@ -170,11 +182,13 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
       "std_type": action_std_type,
     },
     latent_dim=latent_dim,
+    state_latent_dim=state_latent_dim,
     latent_hidden_dim=latent_hidden_dim,
     mlp_encoder_dims=mlp_encoder_dims,
     alpha_fast=alpha_fast,
     alpha_write=alpha_write,
-    alpha_hold=alpha_hold,
+    alpha_hold_state=alpha_hold_state,
+    alpha_hold_shape=alpha_hold_shape,
     write_steps=write_steps,
     min_stair_steps=min_stair_steps,
     exit_steps=exit_steps,
@@ -186,7 +200,9 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
     aux_stair_coef=aux_stair_coef,
     aux_future_collision_coef=aux_future_collision_coef,
     aux_stair_shape_coef=aux_stair_shape_coef,
+    aux_safe_stride_coef=aux_safe_stride_coef,
     stair_shape_huber_delta=stair_shape_huber_delta,
+    safe_stride_huber_delta=safe_stride_huber_delta,
     future_collision_horizon=future_collision_horizon,
     latent_obs_set=latent_obs_set,
     rnn_type="lstm",
@@ -331,11 +347,13 @@ def unitree_g1_blind_rough_target_navigation_step_danger_teacherkl_runner_cfg() 
 def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
   num_steps_per_env: int = 64,
   latent_dim: int = 16,
+  state_latent_dim: int = 8,
   latent_hidden_dim: int = 128,
   mlp_encoder_dims: tuple[int, ...] = (128, 128),
   alpha_fast: float = 0.3,
   alpha_write: float = 0.8,
-  alpha_hold: float = 0.01,
+  alpha_hold_state: float = 0.01,
+  alpha_hold_shape: float = 0.05,
   write_steps: int = 2,
   min_stair_steps: int = 50,
   exit_steps: int = 100,
@@ -347,7 +365,9 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
   aux_stair_coef: float = 0.02,
   aux_future_collision_coef: float = 0.05,
   aux_stair_shape_coef: float = 0.03,
+  aux_safe_stride_coef: float = 0.03,
   stair_shape_huber_delta: float = 0.05,
+  safe_stride_huber_delta: float = 0.05,
   future_collision_horizon: int = 20,
   latent_obs_set: str = "latent",
   params: G1SlowLatentRunnerParams | None = None,
@@ -374,11 +394,13 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
     action_std_init = model_params.action_std_init
     action_std_type = model_params.action_std_type
     latent_dim = model_params.latent_dim
+    state_latent_dim = model_params.state_latent_dim
     latent_hidden_dim = model_params.latent_hidden_dim
     mlp_encoder_dims = model_params.mlp_encoder_dims
     alpha_fast = model_params.alpha_fast
     alpha_write = model_params.alpha_write
-    alpha_hold = model_params.alpha_hold
+    alpha_hold_state = model_params.alpha_hold_state
+    alpha_hold_shape = model_params.alpha_hold_shape
     write_steps = model_params.write_steps
     min_stair_steps = model_params.min_stair_steps
     exit_steps = model_params.exit_steps
@@ -390,7 +412,9 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
     aux_stair_coef = model_params.aux_stair_coef
     aux_future_collision_coef = model_params.aux_future_collision_coef
     aux_stair_shape_coef = model_params.aux_stair_shape_coef
+    aux_safe_stride_coef = model_params.aux_safe_stride_coef
     stair_shape_huber_delta = model_params.stair_shape_huber_delta
+    safe_stride_huber_delta = model_params.safe_stride_huber_delta
     future_collision_horizon = model_params.future_collision_horizon
     latent_obs_set = model_params.latent_obs_set
 
@@ -402,11 +426,13 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
     action_std_init=action_std_init,
     action_std_type=action_std_type,
     latent_dim=latent_dim,
+    state_latent_dim=state_latent_dim,
     latent_hidden_dim=latent_hidden_dim,
     mlp_encoder_dims=mlp_encoder_dims,
     alpha_fast=alpha_fast,
     alpha_write=alpha_write,
-    alpha_hold=alpha_hold,
+    alpha_hold_state=alpha_hold_state,
+    alpha_hold_shape=alpha_hold_shape,
     write_steps=write_steps,
     min_stair_steps=min_stair_steps,
     exit_steps=exit_steps,
@@ -418,7 +444,9 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
     aux_stair_coef=aux_stair_coef,
     aux_future_collision_coef=aux_future_collision_coef,
     aux_stair_shape_coef=aux_stair_shape_coef,
+    aux_safe_stride_coef=aux_safe_stride_coef,
     stair_shape_huber_delta=stair_shape_huber_delta,
+    safe_stride_huber_delta=safe_stride_huber_delta,
     future_collision_horizon=future_collision_horizon,
     latent_obs_set=latent_obs_set,
   )

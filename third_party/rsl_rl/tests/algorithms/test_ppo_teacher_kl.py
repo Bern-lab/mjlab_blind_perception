@@ -86,7 +86,9 @@ def test_slow_latent_diagnostics_are_logged() -> None:
             "future_prob": torch.tensor([[0.4], [0.6]]),
             "z_norm": torch.tensor([[1.0], [3.0]]),
             "gate_mode": torch.tensor([[0.0], [1.0], [2.0], [2.0]]),
-            "alpha": torch.tensor([[0.3], [0.8], [0.02]]),
+            "alpha": torch.tensor([[0.3, 0.3], [0.8, 0.8], [0.01, 0.05]]),
+            "alpha_state": torch.tensor([[0.3], [0.8], [0.01]]),
+            "alpha_shape": torch.tensor([[0.3], [0.8], [0.05]]),
         }
 
     cast(Any, alg.actor).get_slow_latent_diagnostics = _diagnostics
@@ -101,8 +103,43 @@ def test_slow_latent_diagnostics_are_logged() -> None:
     assert logs["slow_latent_mode_normal_count"] == pytest.approx(1.0)
     assert logs["slow_latent_mode_write_count"] == pytest.approx(1.0)
     assert logs["slow_latent_mode_memory_count"] == pytest.approx(2.0)
-    assert logs["slow_latent_alpha_min"] == pytest.approx(0.02)
+    assert logs["slow_latent_alpha_min"] == pytest.approx(0.01)
     assert logs["slow_latent_alpha_max"] == pytest.approx(0.8)
+    assert logs["slow_latent_alpha_state_mean"] == pytest.approx(0.37)
+    assert logs["slow_latent_alpha_shape_mean"] == pytest.approx(0.3833333)
+
+
+def test_safe_stride_aux_loss_uses_seventh_label_as_valid_mask() -> None:
+    """Safe-stride supervision should use label 5 and validity mask 6."""
+    alg = _build_teacher_kl({"enabled": False})
+    actor = cast(Any, alg.actor)
+    actor.aux_event_coef = 0.0
+    actor.aux_stair_coef = 0.0
+    actor.aux_future_collision_coef = 0.0
+    actor.aux_stair_shape_coef = 0.0
+    actor.aux_safe_stride_coef = 0.5
+    actor.safe_stride_huber_delta = 0.05
+    actor.get_aux_outputs = lambda: {"safe_stride": torch.tensor([[0.35], [10.0], [0.20], [10.0]])}
+    actor.get_slow_latent_diagnostics = lambda: {}
+    labels = torch.tensor([
+        [0.0, 1.0, 0.30, 0.18, 1.0, 0.25, 1.0],
+        [0.0, 1.0, 0.30, 0.18, 1.0, 0.25, 0.0],
+        [0.0, 1.0, 0.30, 0.18, 1.0, 0.20, 1.0],
+        [0.0, 1.0, 0.30, 0.18, 1.0, 0.25, 0.0],
+    ])
+    observations = TensorDict(
+        {"latent_labels": labels},
+        batch_size=[NUM_ENVS],
+    )
+
+    loss, logs = alg._compute_slow_latent_aux_loss(
+        RolloutStorage.Batch(observations=observations, hidden_states=(None, None))
+    )
+
+    assert logs["slow_latent_safe_stride_huber"] == pytest.approx(0.0375)
+    assert logs["slow_latent_safe_stride_valid_ratio"] == pytest.approx(0.5)
+    assert logs["slow_latent_safe_stride_mae"] == pytest.approx(0.05)
+    assert loss.item() == pytest.approx(0.01875)
 
 
 def test_mean_huber_guidance_applies_loss_cap() -> None:

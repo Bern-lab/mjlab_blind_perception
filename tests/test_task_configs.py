@@ -185,23 +185,14 @@ def test_step_boundary_rewards_scoped_to_target_stair_tasks(
       assert (
         cfg.rewards["foot_step_lip_volume_penalty"].params["nearest_boundaries"] == 4
       )
-      if task_id == step_danger_task:
-        assert "toe_step_riser_slab_penalty" not in cfg.rewards
-        assert "toe_step_riser_probe_shaping_reward" in cfg.rewards
-        probe_params = cfg.rewards["toe_step_riser_probe_shaping_reward"].params
-        assert probe_params["min_terrain_level"] == 3
-        assert probe_params["nearest_boundaries"] == 4
-        assert probe_params["slab_depth"] == 0.10
-      else:
-        assert "toe_step_riser_slab_penalty" in cfg.rewards
-        slab_params = cfg.rewards["toe_step_riser_slab_penalty"].params
-        assert slab_params["min_terrain_level"] == 3
-        assert slab_params["nearest_boundaries"] == 4
-        assert slab_params["slab_depth"] == 0.10
+      assert "toe_step_riser_slab_penalty" in cfg.rewards
+      slab_params = cfg.rewards["toe_step_riser_slab_penalty"].params
+      assert slab_params["min_terrain_level"] == 3
+      assert slab_params["nearest_boundaries"] == 4
+      assert slab_params["slab_depth"] == 0.10
     else:
       unexpected = {
         "foot_step_lip_volume_penalty",
         "toe_step_riser_slab_penalty",
-        "toe_step_riser_probe_shaping_reward",
       }.intersection(cfg.rewards)
       assert not unexpected, f"{task_id} unexpectedly enables {sorted(unexpected)}"

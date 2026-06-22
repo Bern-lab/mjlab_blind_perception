@@ -26,7 +26,7 @@ from mjlab.tasks.velocity.config.g1.blind_rough_step_danger_env_cfg import (
   G1StepDangerFootLipRewardParams,
   G1StepDangerPlayVisualizationParams,
   G1StepDangerRewardParams,
-  G1StepDangerToeRiserProbeRewardParams,
+  G1StepDangerToeRiserSlabPenaltyParams,
   unitree_g1_blind_rough_target_navigation_step_danger_env_cfg,
 )
 from mjlab.tasks.velocity.config.g1.rl_cfg import (
@@ -34,7 +34,7 @@ from mjlab.tasks.velocity.config.g1.rl_cfg import (
   G1SlowLatentRunnerParams,
   unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg,
 )
-from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg, probe_aware_feet_gait
+from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg, stair_aware_feet_gait
 from mjlab.tasks.velocity.mdp.teacher_target_heading_command import (
   TeacherTargetHeadingVelocityCommandCfg,
 )
@@ -326,11 +326,12 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert "latent" in env_cfg.observations
   assert "stair_latent" in env_cfg.observations["latent"].terms
   assert "latent_labels" in env_cfg.observations
-  assert set(env_cfg.observations["latent_labels"].terms) == {
+  assert tuple(env_cfg.observations["latent_labels"].terms) == (
     "toe_riser_event",
     "stair_state",
     "stair_shape",
-  }
+    "safe_stride",
+  )
   assert "reset_stair_latent_cache" in env_cfg.events
   assert rl_cfg.obs_groups["actor"] == ("actor",)
   assert rl_cfg.obs_groups["latent"] == ("latent",)
@@ -344,28 +345,24 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   )
   assert toe_reward_params["contact_sensor_name"] == "toe_terrain_contact"
   assert toe_reward_params["contact_penalty_scale"] == 0.5
-  assert toe_reward_params["probe_contact_count"] == 2
-  assert toe_reward_params["temporal_probe_first_reward"] == 0.05
-  assert toe_reward_params["temporal_probe_confirm_reward"] == 0.20
-  assert toe_reward_params["temporal_probe_lift_reward"] == 0.15
-  assert toe_reward_params["temporal_probe_forward_reward"] == 0.4
-  assert toe_reward_params["temporal_probe_min_lift"] == 0.15
-  assert toe_reward_params["temporal_probe_lift_scale"] == 0.08
-  assert toe_reward_params["temporal_probe_min_forward"] == 0.18
-  assert toe_reward_params["temporal_probe_forward_scale"] == 0.30
-  assert toe_reward_params["temporal_probe_timeout"] == 0.80
-  assert toe_reward_params["temporal_probe_min_forward_vel"] == 0.03
-  assert toe_reward_params["temporal_probe_max_forward_vel"] == 0.45
-  assert toe_reward_params["temporal_probe_boundary_normal_cos"] == 0.90
-  assert toe_reward_params["temporal_probe_boundary_distance_tolerance"] == 0.12
-  assert toe_reward_params["temporal_probe_shallow_depth"] == 0.025
-  assert toe_reward_params["temporal_probe_overspeed_penalty"] == 0.10
+  assert toe_reward_params["stair_entry_timeout"] == 1.20
+  assert toe_reward_params["stair_heading_cos"] == 0.70
+  assert toe_reward_params["stair_touchdown_height_tolerance"] == 0.08
+  assert toe_reward_params["stair_touchdown_lateral_margin"] == 0.03
+  assert toe_reward_params["stair_safe_support_fraction"] == 0.60
+  assert toe_reward_params["stair_min_safe_stride"] == 0.10
+  assert toe_reward_params["stair_touchdown_lip_clearance"] == 0.02
+  assert toe_reward_params["stair_touchdown_lip_height_band"] == 0.06
+  assert toe_reward_params["stair_following_timeout"] == 1.50
+  assert not any("probe" in name for name in toe_reward_params)
+  assert toe_reward_params["ground_contact_sensor_name"] == "feet_ground_contact"
   foot_gait = env_cfg.rewards["foot_gait"]
-  assert foot_gait.func is probe_aware_feet_gait
-  assert foot_gait.params["support_speed_scale"] == 0.20
+  assert foot_gait.func is stair_aware_feet_gait
+  assert foot_gait.params["heading_cos"] == 0.70
   landing_reward = env_cfg.rewards["stair_tread_landing_reward"]
   assert landing_reward.weight == 0.5
-  assert landing_reward.params["landing_bias"] == 0.60
+  assert landing_reward.params["landing_lead"] == 0.04
+  assert landing_reward.params["heading_cos"] == 0.70
   assert landing_reward.params["min_landing_layer"] == 3
   assert landing_reward.params["lip_edge_radius"] == 0.07
   assert landing_reward.params["lip_margin"] == 0.01
@@ -375,8 +372,8 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   )
   assert landing_reward.params["short_penalty_scale"] == 0.40
   assert landing_reward.params["over_front_penalty_scale"] == 0.60
-  shape_label = env_cfg.observations["latent_labels"].terms["stair_shape"]
-  assert shape_label.params["min_probe_stage"] == 2
+  latent_labels = env_cfg.observations["latent_labels"]
+  assert all(term.params == {} for term in latent_labels.terms.values())
   toe_sensor_cfg = cast(
     ContactSensorCfg,
     next(
@@ -388,14 +385,18 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert toe_sensor_cfg.track_air_time is True
   actor_cfg = cast(RslRlGatedStairLatentModelCfg, rl_cfg.actor)
   assert actor_cfg.latent_dim == 16
+  assert actor_cfg.state_latent_dim == 8
   assert actor_cfg.latent_hidden_dim == 128
   assert actor_cfg.mlp_encoder_dims == (128, 128)
-  assert actor_cfg.alpha_hold == 0.01
+  assert actor_cfg.alpha_hold_state == 0.01
+  assert actor_cfg.alpha_hold_shape == 0.05
   assert actor_cfg.aux_event_coef == 0.03
   assert actor_cfg.aux_stair_coef == 0.02
   assert actor_cfg.aux_future_collision_coef == 0.05
   assert actor_cfg.aux_stair_shape_coef == 0.03
+  assert actor_cfg.aux_safe_stride_coef == 0.03
   assert actor_cfg.stair_shape_huber_delta == 0.05
+  assert actor_cfg.safe_stride_huber_delta == 0.05
 
 
 def test_step_danger_target_navigation_uses_local_geometric_danger_rewards() -> None:
@@ -421,29 +422,19 @@ def test_step_danger_target_navigation_uses_local_geometric_danger_rewards() -> 
   )
 
   foot_params = env_cfg.rewards["foot_step_lip_volume_penalty"].params
-  toe_reward = env_cfg.rewards["toe_step_riser_probe_shaping_reward"]
+  toe_reward = env_cfg.rewards["toe_step_riser_slab_penalty"]
   toe_params = toe_reward.params
   assert env_cfg.rewards["foot_step_lip_volume_penalty"].weight == -3.2
-  assert "toe_step_riser_slab_penalty" not in env_cfg.rewards
-  assert toe_reward.weight == 1.0
+  assert "toe_step_riser_probe_shaping_reward" not in env_cfg.rewards
+  assert toe_reward.weight == -4.2
   assert foot_params["edge_radius"] == 0.07
   assert "ignore_boundary_layers" not in foot_params
-  assert toe_params["slab_weight"] == 4.2
   assert toe_params["slab_depth"] == 0.10
   assert toe_params["v_margin"] == 0.05
   assert toe_params["toe_x_min"] == 0.08
   assert toe_params["toe_v_threshold"] == 0.02
-  assert toe_params["contact_sensor_name"] == "toe_terrain_contact"
-  assert toe_params["progress_weight"] == 0.3
-  assert toe_params["second_hit_weight"] == 1.5
-  assert toe_params["cos_heading_tol"] == 0.5
-  assert toe_params["lateral_margin"] == 0.10
-  assert toe_params["root_lateral_margin"] == 0.20
-  assert toe_params["side_eps"] == 0.03
-  assert toe_params["hard_timeout_s"] == 1.2
-  assert toe_params["force_sign"] == 1.0
-  assert "probe_contact_count" not in toe_params
-  assert "second_layer_attraction_reward" not in toe_params
+  assert not any("probe" in name for name in toe_params)
+  assert "contact_sensor_name" not in toe_params
   assert foot_params["asset_cfg"] is not toe_params["asset_cfg"]
   assert "toe_terrain_contact" in env_cfg.observations["critic"].terms
   assert "toe_terrain_contact_forces" in env_cfg.observations["critic"].terms
@@ -507,10 +498,9 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
       foot_lip_ignore_boundary_layers=1,
       toe_slab_depth=0.12,
       toe_contact_penalty_scale=0.7,
-      toe_probe_contact_count=3,
-      toe_temporal_probe_first_reward=0.5,
-      toe_temporal_probe_lift_reward=0.11,
-      toe_temporal_probe_timeout=0.42,
+      toe_stair_entry_timeout=0.42,
+      toe_stair_min_safe_stride=0.14,
+      toe_stair_following_timeout=1.8,
     ),
     terrain_replay=G1SlowLatentTerrainReplayParams(
       start_level=7,
@@ -547,10 +537,9 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
   assert env_cfg.rewards["toe_step_riser_slab_penalty"].params["slab_depth"] == 0.12
   toe_params = env_cfg.rewards["toe_step_riser_slab_penalty"].params
   assert toe_params["contact_penalty_scale"] == 0.7
-  assert toe_params["probe_contact_count"] == 3
-  assert toe_params["temporal_probe_first_reward"] == 0.5
-  assert toe_params["temporal_probe_lift_reward"] == 0.11
-  assert toe_params["temporal_probe_timeout"] == 0.42
+  assert toe_params["stair_entry_timeout"] == 0.42
+  assert toe_params["stair_min_safe_stride"] == 0.14
+  assert toe_params["stair_following_timeout"] == 1.8
   replay_params = train_env_cfg.curriculum["terrain_levels"].params
   assert replay_params["mixed_replay_start_level"] == 7
   assert replay_params["mixed_replay_level_ranges"] == ((0, 1), (2, 4), (5, 9))
@@ -570,9 +559,13 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
     model=G1SlowLatentPolicyModelParams(
       hidden_dims=(256, 128),
       latent_dim=8,
+      state_latent_dim=4,
       latent_hidden_dim=64,
       mlp_encoder_dims=(64,),
+      alpha_hold_state=0.006,
+      alpha_hold_shape=0.07,
       aux_stair_coef=0.7,
+      aux_safe_stride_coef=0.11,
     ),
   )
   rl_cfg = unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
@@ -585,28 +578,25 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
   assert rl_cfg.experiment_name == "slow_latent_custom"
   assert actor_cfg.hidden_dims == (256, 128)
   assert actor_cfg.latent_dim == 8
+  assert actor_cfg.state_latent_dim == 4
   assert actor_cfg.latent_hidden_dim == 64
   assert actor_cfg.mlp_encoder_dims == (64,)
+  assert actor_cfg.alpha_hold_state == 0.006
+  assert actor_cfg.alpha_hold_shape == 0.07
   assert actor_cfg.aux_stair_coef == 0.7
+  assert actor_cfg.aux_safe_stride_coef == 0.11
 
 
 def test_step_danger_explicit_param_interfaces_drive_configs() -> None:
   env_params = G1StepDangerEnvParams(
     rewards=G1StepDangerRewardParams(
       foot_lip=G1StepDangerFootLipRewardParams(edge_radius=0.08),
-      toe_riser_probe=G1StepDangerToeRiserProbeRewardParams(
-        weight=0.8,
-        slab_weight=1.3,
+      toe_riser_slab=G1StepDangerToeRiserSlabPenaltyParams(
+        weight=-0.8,
         slab_depth=0.12,
         v_margin=0.07,
         toe_x_min=0.10,
         toe_v_threshold=0.04,
-        progress_weight=0.45,
-        second_hit_weight=1.9,
-        root_lateral_margin=0.25,
-        side_eps=0.04,
-        hard_timeout_s=1.4,
-        force_sign=-1.0,
       ),
     ),
     play_visualization=G1StepDangerPlayVisualizationParams(
@@ -621,26 +611,18 @@ def test_step_danger_explicit_param_interfaces_drive_configs() -> None:
   )
 
   foot_params = env_cfg.rewards["foot_step_lip_volume_penalty"].params
-  toe_reward = env_cfg.rewards["toe_step_riser_probe_shaping_reward"]
+  toe_reward = env_cfg.rewards["toe_step_riser_slab_penalty"]
   toe_params = toe_reward.params
   assert foot_params["edge_radius"] == 0.08
   assert "ignore_boundary_layers" not in foot_params
-  assert "toe_step_riser_slab_penalty" not in env_cfg.rewards
-  assert toe_reward.weight == 0.8
-  assert toe_params["slab_weight"] == 1.3
+  assert "toe_step_riser_probe_shaping_reward" not in env_cfg.rewards
+  assert toe_reward.weight == -0.8
   assert toe_params["slab_depth"] == 0.12
   assert toe_params["v_margin"] == 0.07
   assert toe_params["toe_x_min"] == 0.10
   assert toe_params["toe_v_threshold"] == 0.04
-  assert toe_params["progress_weight"] == 0.45
-  assert toe_params["second_hit_weight"] == 1.9
-  assert toe_params["root_lateral_margin"] == 0.25
-  assert toe_params["side_eps"] == 0.04
-  assert toe_params["hard_timeout_s"] == 1.4
-  assert toe_params["force_sign"] == -1.0
   assert "contact_penalty_scale" not in toe_params
-  assert "probe_contact_count" not in toe_params
-  assert "second_layer_attraction_reward" not in toe_params
+  assert not any("probe" in name for name in toe_params)
   assert env_cfg.scene.terrain is not None
   assert env_cfg.scene.terrain.terrain_generator is not None
   vis = env_cfg.scene.terrain.terrain_generator.step_danger_visualization

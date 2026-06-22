@@ -6,13 +6,20 @@ from typing import Any, cast
 import pytest
 import torch
 
+import mjlab.tasks.velocity.mdp.observations as velocity_observations
 from mjlab.envs.mdp.events import randomize_terrain
 from mjlab.tasks.velocity.mdp.curriculums import terrain_levels_vel
-from mjlab.tasks.velocity.mdp.rewards import (
-  toe_step_riser_probe_shaping_reward,
-  toe_step_riser_slab_penalty,
+from mjlab.tasks.velocity.mdp.stair_geometry import (
+  SAFE_STRIDE_VALID_KEY,
+  SAFE_TREAD_LOWER_BOUND_KEY,
+  STAIR_ENTRY_EVENT_KEY,
+  STAIR_PHASE_KEY,
+  stair_shape_from_boundaries,
 )
-from mjlab.tasks.velocity.mdp.stair_geometry import stair_shape_from_boundaries
+from mjlab.tasks.velocity.mdp.temporal_stair_rewards import (
+  stair_aware_feet_gait,
+  stair_tread_landing_reward,
+)
 from mjlab.tasks.velocity.mdp.temporal_stair_rewards import (
   toe_step_riser_slab_penalty as temporal_toe_step_riser_slab_penalty,
 )
@@ -210,143 +217,7 @@ def test_randomize_terrain_can_sample_weighted_level_buckets() -> None:
   assert terrain.terrain_types.tolist() == [1] * num_envs
 
 
-def test_toe_probe_boundary_layers_use_actual_stair_layers() -> None:
-  boundaries = torch.zeros(2, 4, 11)
-  boundaries[:, :, 0] = torch.arange(4, dtype=torch.float32)
-  boundaries[:, :, 3] = boundaries[:, :, 0]
-  boundaries[:, :, 4] = 1.0
-
-  boundaries[0, :, 9] = torch.tensor([0.0, 0.1, 0.2, 0.3])
-  boundaries[0, :, 10] = torch.tensor([0.1, 0.2, 0.3, 0.4])
-  boundaries[1, :, 9] = torch.tensor([-0.1, -0.2, -0.3, -0.4])
-  boundaries[1, :, 10] = torch.tensor([0.0, -0.1, -0.2, -0.3])
-  valid = torch.ones(2, 4, dtype=torch.bool)
-
-  layers = toe_step_riser_slab_penalty._probe_boundary_layers(
-    boundaries,
-    valid,
-    max_probe_layers=2,
-  )
-
-  assert layers.tolist() == [[1, 2, 0, 0], [1, 2, 0, 0]]
-
-
-def test_toe_probe_forward_layers_use_geometry_not_height_sign() -> None:
-  boundaries = torch.zeros(2, 3, 11)
-  boundaries[:, :, 0] = torch.tensor([1.0, 2.0, 3.0])
-  boundaries[:, :, 1] = -0.5
-  boundaries[:, :, 3] = boundaries[:, :, 0]
-  boundaries[:, :, 4] = 0.5
-  boundaries[:, :, 6] = -1.0
-  boundaries[0, :, 9] = torch.tensor([0.0, 0.1, 0.2])
-  boundaries[0, :, 10] = torch.tensor([0.1, 0.2, 0.3])
-  boundaries[1, :, 9] = torch.tensor([-0.1, -0.2, -0.3])
-  boundaries[1, :, 10] = torch.tensor([0.0, -0.1, -0.2])
-  valid = torch.ones(2, 3, dtype=torch.bool)
-
-  command_term = SimpleNamespace(command=torch.tensor([[1.0, 0.0, 0.0]] * 2))
-  env, _ = _make_env(torch.zeros(2, 2), command_term)
-  asset = env.scene["robot"]
-
-  layers, command_active, root_s = (
-    toe_step_riser_probe_shaping_reward._forward_boundary_layers(
-      cast(Any, env),
-      asset,
-      boundaries,
-      valid,
-      command_name="twist",
-      forward_velocity_threshold=0.05,
-      forward_tol=0.05,
-      low_side_margin=0.02,
-      merge_riser_eps=0.04,
-    )
-  )
-
-  assert command_active.tolist() == [True, True]
-  assert torch.all(root_s > 0.0)
-  assert layers.tolist() == [[1, 2, 0], [1, 2, 0]]
-
-
-def test_toe_probe_reach_uses_current_position_as_progress_baseline() -> None:
-  root_xy = torch.tensor([[0.0, 0.0]])
-  toe_xy = torch.tensor([[0.3, 0.0]])
-  p0_xy = torch.tensor([[1.0, -0.5]])
-  p1_xy = torch.tensor([[1.0, 0.5]])
-  normal_xy = torch.tensor([[-1.0, 0.0]])
-  probe_side = torch.tensor([1.0])
-
-  current_reach = toe_step_riser_probe_shaping_reward._boundary_reach(
-    root_xy,
-    toe_xy,
-    p0_xy,
-    p1_xy,
-    normal_xy,
-    probe_side,
-  )
-  later_reach = toe_step_riser_probe_shaping_reward._boundary_reach(
-    root_xy,
-    torch.tensor([[0.4, 0.0]]),
-    p0_xy,
-    p1_xy,
-    normal_xy,
-    probe_side,
-  )
-
-  assert current_reach.item() == torch.tensor(0.3).item()
-  assert torch.relu(current_reach - current_reach).item() == 0.0
-  assert torch.relu(later_reach - current_reach).item() == pytest.approx(0.1)
-
-
-def test_toe_probe_root_segment_gate_filters_lateral_misalignment() -> None:
-  p0_xy = torch.tensor([[1.0, -0.5], [1.0, -0.5]])
-  p1_xy = torch.tensor([[1.0, 0.5], [1.0, 0.5]])
-  points_xy = torch.tensor([[0.0, 0.0], [0.0, 0.8]])
-
-  gate, _u, _segment_len, _tangent = (
-    toe_step_riser_probe_shaping_reward._segment_range_gate(
-      points_xy,
-      p0_xy,
-      p1_xy,
-      margin=0.2,
-    )
-  )
-
-  assert gate.tolist() == [True, False]
-
-
-def test_toe_probe_side_eps_rejects_boundary_ambiguous_root_side() -> None:
-  side, valid = toe_step_riser_probe_shaping_reward._side_from_signed_distance(
-    torch.tensor([0.02, 0.04, -0.04]),
-    side_eps=0.03,
-  )
-
-  assert side.tolist() == [1.0, 1.0, -1.0]
-  assert valid.tolist() == [False, True, True]
-
-
-def test_toe_probe_force_sign_flips_blocking_force_convention() -> None:
-  force_xy = torch.tensor([[-10.0, 0.0]])
-  normal_xy = torch.tensor([[-1.0, 0.0]])
-  side = torch.tensor([1.0])
-
-  positive = toe_step_riser_probe_shaping_reward._blocking_force_along_normal(
-    force_xy,
-    normal_xy,
-    side,
-    force_sign=1.0,
-  )
-  negative = toe_step_riser_probe_shaping_reward._blocking_force_along_normal(
-    force_xy,
-    normal_xy,
-    side,
-    force_sign=-1.0,
-  )
-
-  assert positive.item() == torch.tensor(10.0).item()
-  assert negative.item() == torch.tensor(-10.0).item()
-
-
-def test_temporal_probe_progress_uses_world_ascent_direction() -> None:
+def test_stair_entry_progress_uses_world_ascent_direction() -> None:
   start = torch.tensor([[0.2, 0.1, 0.0], [0.2, 0.1, 0.0]])
   current = torch.tensor([[0.5, 0.3, 0.0], [0.5, 0.3, 0.0]])
   ascent_dir = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
@@ -360,19 +231,137 @@ def test_temporal_probe_progress_uses_world_ascent_direction() -> None:
   assert progress.tolist() == pytest.approx([0.3, 0.2])
 
 
-def test_temporal_probe_velocity_guard_blocks_fast_riser_approach() -> None:
-  velocity = torch.tensor([[0.4, 0.0, 0.0], [0.6, 0.0, 0.0]])
-  ascent_dir = torch.tensor([[1.0, 0.0], [1.0, 0.0]])
+def test_stair_entry_heading_cos_uses_world_base_forward() -> None:
+  root_quat_w = torch.tensor(
+    [
+      [1.0, 0.0, 0.0, 0.0],
+      [0.70710678, 0.0, 0.0, 0.70710678],
+    ]
+  )
+  ascent_dir = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
 
-  forward_vel, safe, overspeed = temporal_toe_step_riser_slab_penalty._velocity_guard(
-    velocity,
+  heading_cos = temporal_toe_step_riser_slab_penalty._base_heading_cos(
+    root_quat_w,
     ascent_dir,
-    max_forward_vel=0.45,
   )
 
-  assert forward_vel.tolist() == pytest.approx([0.4, 0.6])
-  assert safe.tolist() == [True, False]
-  assert overspeed.tolist() == pytest.approx([0.0, 0.15])
+  assert heading_cos.tolist() == pytest.approx([1.0, 1.0], abs=1.0e-5)
+
+
+def test_stair_entry_tread_support_fraction_detects_sixty_percent() -> None:
+  sole_points_w = torch.tensor(
+    [
+      [
+        [
+          [-0.8, 0.0, 0.1],
+          [-0.6, 0.0, 0.1],
+          [-0.4, 0.0, 0.1],
+          [0.1, 0.0, 0.1],
+          [0.2, 0.0, 0.1],
+        ]
+      ]
+    ]
+  )
+  boundaries = torch.tensor(
+    [
+      [
+        [
+          0.0,
+          -0.5,
+          0.1,
+          0.0,
+          0.5,
+          0.1,
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          0.1,
+        ]
+      ]
+    ]
+  )
+
+  support_fraction = temporal_toe_step_riser_slab_penalty._tread_support_fraction(
+    sole_points_w,
+    boundaries,
+    torch.tensor([1.0]),
+  )
+
+  assert support_fraction.shape == (1, 1, 1)
+  assert support_fraction.item() == pytest.approx(0.6)
+
+
+def test_stair_following_gait_does_not_require_fixed_phase() -> None:
+  is_contact = torch.tensor([[True, False], [True, True], [False, False]])
+
+  reward = stair_aware_feet_gait._phase_free_following_reward(is_contact)
+
+  assert reward.tolist() == pytest.approx([1.0, 0.5, 0.0])
+
+
+def test_slow_latent_labels_follow_env_stair_state_machine(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  env = SimpleNamespace(
+    num_envs=2,
+    device="cpu",
+    extras={
+      STAIR_ENTRY_EVENT_KEY: torch.tensor([True, False]),
+      STAIR_PHASE_KEY: torch.tensor([1, 2]),
+      SAFE_STRIDE_VALID_KEY: torch.tensor([False, True]),
+      SAFE_TREAD_LOWER_BOUND_KEY: torch.tensor([0.0, 0.26]),
+    },
+  )
+  boundaries = torch.zeros(2, 1, 11)
+  valid_boundaries = torch.ones(2, 1, dtype=torch.bool)
+  monkeypatch.setattr(
+    velocity_observations,
+    "_current_step_boundaries",
+    lambda _env: (boundaries, valid_boundaries),
+  )
+  monkeypatch.setattr(
+    velocity_observations,
+    "cached_stair_shape",
+    lambda _env, _boundaries, _valid: (
+      torch.tensor([0.30, 0.35]),
+      torch.tensor([0.18, 0.20]),
+      torch.tensor([True, True]),
+    ),
+  )
+
+  labels = torch.cat(
+    [
+      velocity_observations.toe_riser_event_label(cast(Any, env)),
+      velocity_observations.stair_state_label(cast(Any, env)),
+      velocity_observations.stair_shape_label(cast(Any, env)),
+      velocity_observations.safe_stride_label(cast(Any, env)),
+    ],
+    dim=-1,
+  )
+
+  assert labels.shape == (2, 7)
+  torch.testing.assert_close(
+    labels,
+    torch.tensor(
+      [
+        [1.0, 1.0, 0.30, 0.18, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.35, 0.20, 1.0, 0.26, 1.0],
+      ]
+    ),
+  )
+
+
+def test_stair_landing_target_uses_safe_center_plus_bounded_lead() -> None:
+  target = stair_tread_landing_reward._safe_landing_target(
+    safe_center_s=torch.tensor([0.10, 0.28, 0.01]),
+    tread_depth=torch.tensor([0.30, 0.30, 0.30]),
+    lead=0.04,
+    back_margin=0.08,
+    front_margin=0.08,
+  )
+
+  assert target.tolist() == pytest.approx([0.14, 0.22, 0.08])
 
 
 def test_stair_shape_uses_parallel_boundary_spacing_and_riser_height() -> None:

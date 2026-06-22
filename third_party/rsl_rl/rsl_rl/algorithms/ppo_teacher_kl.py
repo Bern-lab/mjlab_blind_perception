@@ -455,6 +455,7 @@ class PPOTeacherKL(PPO):
         stair_coef = float(getattr(self.actor, "aux_stair_coef", 0.0))
         future_coef = float(getattr(self.actor, "aux_future_collision_coef", 0.0))
         shape_coef = float(getattr(self.actor, "aux_stair_shape_coef", 0.0))
+        safe_stride_coef = float(getattr(self.actor, "aux_safe_stride_coef", 0.0))
 
         observations = batch.observations
         obs_keys = []
@@ -495,6 +496,7 @@ class PPOTeacherKL(PPO):
                     "stair": stair_coef,
                     "future": future_coef,
                     "shape": shape_coef,
+                    "safe_stride": safe_stride_coef,
                 },
                 "\n  batch_has_observations=",
                 observations is not None,
@@ -519,7 +521,13 @@ class PPOTeacherKL(PPO):
             logs["slow_latent_debug_empty_aux_outputs"] = 1.0
             return torch.zeros((), device=self.device), logs
 
-        if event_coef == 0.0 and stair_coef == 0.0 and future_coef == 0.0 and shape_coef == 0.0:
+        if (
+            event_coef == 0.0
+            and stair_coef == 0.0
+            and future_coef == 0.0
+            and shape_coef == 0.0
+            and safe_stride_coef == 0.0
+        ):
             logs["slow_latent_debug_all_aux_coef_zero"] = 1.0
             return torch.zeros((), device=self.device), logs
 
@@ -536,10 +544,21 @@ class PPOTeacherKL(PPO):
             raise RuntimeError(
                 "Slow-latent stair-shape loss requires labels [event, stair, tread_depth, riser_height, shape_valid]."
             )
+        if safe_stride_coef != 0.0 and labels.shape[-1] < 7:
+            raise RuntimeError(
+                "Slow-latent safe-stride loss requires labels [event, stair, tread_depth, "
+                "riser_height, shape_valid, safe_stride, safe_stride_valid]."
+            )
         event_labels_padded = labels[..., 0:1].float()
         stair_labels_padded = labels[..., 1:2].float()
         shape_labels_padded = labels[..., 2:4].float()
         shape_valid_padded = labels[..., 4:5].float()
+        if labels.shape[-1] >= 7:
+            safe_stride_labels_padded = labels[..., 5:6].float()
+            safe_stride_valid_padded = labels[..., 6:7].float()
+        else:
+            safe_stride_labels_padded = torch.zeros_like(event_labels_padded)
+            safe_stride_valid_padded = torch.zeros_like(event_labels_padded)
         future_horizon = int(getattr(self.actor, "future_collision_horizon", 20))
         future_labels_padded = self._compute_future_collision_labels(
             event_labels_padded,
@@ -553,12 +572,22 @@ class PPOTeacherKL(PPO):
             future_labels = cast(torch.Tensor, unpad_trajectories(future_labels_padded, batch.masks))
             shape_labels = cast(torch.Tensor, unpad_trajectories(shape_labels_padded, batch.masks))
             shape_valid = cast(torch.Tensor, unpad_trajectories(shape_valid_padded, batch.masks))
+            safe_stride_labels = cast(
+                torch.Tensor,
+                unpad_trajectories(safe_stride_labels_padded, batch.masks),
+            )
+            safe_stride_valid = cast(
+                torch.Tensor,
+                unpad_trajectories(safe_stride_valid_padded, batch.masks),
+            )
         else:
             event_labels = event_labels_padded
             stair_labels = stair_labels_padded
             future_labels = future_labels_padded
             shape_labels = shape_labels_padded
             shape_valid = shape_valid_padded
+            safe_stride_labels = safe_stride_labels_padded
+            safe_stride_valid = safe_stride_valid_padded
 
         total_loss = torch.zeros((), device=self.device)
         logs: dict[str, float] = {}
@@ -613,6 +642,28 @@ class PPOTeacherKL(PPO):
             logs["slow_latent_riser_height_mae"] = self._distributed_mean_scalar(shape_mae[1]).item()
             logs["slow_latent_tread_depth_huber"] = self._distributed_mean_scalar(shape_huber[0]).item()
             logs["slow_latent_riser_height_huber"] = self._distributed_mean_scalar(shape_huber[1]).item()
+        if safe_stride_coef != 0.0 and "safe_stride" in aux_outputs:
+            safe_stride_delta = float(getattr(self.actor, "safe_stride_huber_delta", 0.05))
+            safe_stride_predictions = aux_outputs["safe_stride"]
+            safe_stride_loss_raw = self._compute_stair_shape_loss(
+                safe_stride_predictions,
+                safe_stride_labels,
+                safe_stride_valid,
+                safe_stride_delta,
+            )
+            safe_stride_mae, safe_stride_huber = self._compute_stair_shape_component_errors(
+                safe_stride_predictions,
+                safe_stride_labels,
+                safe_stride_valid,
+                safe_stride_delta,
+            )
+            safe_stride_loss = safe_stride_coef * safe_stride_loss_raw
+            total_loss = total_loss + safe_stride_loss
+            logs["slow_latent_safe_stride_huber"] = self._distributed_mean_scalar(safe_stride_loss_raw).item()
+            logs["slow_latent_safe_stride_loss"] = self._distributed_mean_scalar(safe_stride_loss).item()
+            logs["slow_latent_safe_stride_valid_ratio"] = self._distributed_mean_scalar(safe_stride_valid.mean()).item()
+            logs["slow_latent_safe_stride_mae"] = self._distributed_mean_scalar(safe_stride_mae[0]).item()
+            logs["slow_latent_safe_stride_component_huber"] = self._distributed_mean_scalar(safe_stride_huber[0]).item()
         logs["slow_latent_aux_loss"] = self._distributed_mean_scalar(total_loss).item()
         logs.update(self._compute_slow_latent_diagnostic_logs())
         return total_loss, logs
@@ -644,6 +695,10 @@ class PPOTeacherKL(PPO):
             add_mean("slow_latent_tread_depth_pred_mean", stair_shape[..., 0])
             add_mean("slow_latent_riser_height_pred_mean", stair_shape[..., 1])
 
+        safe_stride = diagnostics.get("safe_stride")
+        if safe_stride is not None and safe_stride.numel() > 0:
+            add_mean("slow_latent_safe_stride_pred_mean", safe_stride[..., 0])
+
         z_norm = diagnostics.get("z_norm")
         if z_norm is not None and z_norm.numel() > 0:
             logs["slow_latent_z_norm_max"] = self._distributed_mean_scalar(z_norm.float().max()).item()
@@ -655,6 +710,8 @@ class PPOTeacherKL(PPO):
             logs["slow_latent_alpha_std"] = self._distributed_mean_scalar(alpha.std(unbiased=False)).item()
             logs["slow_latent_alpha_min"] = self._distributed_mean_scalar(alpha.min()).item()
             logs["slow_latent_alpha_max"] = self._distributed_mean_scalar(alpha.max()).item()
+        add_mean("slow_latent_alpha_state_mean", diagnostics.get("alpha_state"))
+        add_mean("slow_latent_alpha_shape_mean", diagnostics.get("alpha_shape"))
 
         mode = diagnostics.get("gate_mode")
         if mode is not None and mode.numel() > 0:

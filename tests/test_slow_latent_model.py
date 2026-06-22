@@ -48,9 +48,12 @@ def _make_model() -> LSTMSlowLatentMLPModel:
     mlp_encoder_dims=(13,),
     latent_hidden_dim=7,
     latent_dim=5,
+    state_latent_dim=2,
     alpha_fast=0.3,
     alpha_write=0.8,
-    alpha_hold=0.02,
+    alpha_hold_state=0.01,
+    alpha_hold_shape=0.05,
+    aux_safe_stride_coef=0.03,
   )
 
 
@@ -74,14 +77,33 @@ def test_slow_latent_actor_forward_updates_state_and_aux_outputs() -> None:
   assert aux["stair_logit"].shape == (4, 1)
   assert aux["future_collision_logit"].shape == (4, 1)
   assert aux["stair_shape"].shape == (4, 2)
+  assert aux["safe_stride"].shape == (4, 1)
   diagnostics = model.get_slow_latent_diagnostics()
   assert diagnostics["event_prob"].shape == (4, 1)
   assert diagnostics["stair_prob"].shape == (4, 1)
   assert diagnostics["future_prob"].shape == (4, 1)
   assert diagnostics["stair_shape"].shape == (4, 2)
+  assert diagnostics["safe_stride"].shape == (4, 1)
   assert diagnostics["z_norm"].shape == (4, 1)
   assert diagnostics["gate_mode"].shape == (4, 1)
-  assert diagnostics["alpha"].shape == (4, 1)
+  assert diagnostics["alpha"].shape == (4, 5)
+  assert diagnostics["alpha_state"].shape == (4, 1)
+  assert diagnostics["alpha_shape"].shape == (4, 1)
+
+
+def test_stair_memory_uses_distinct_state_and_shape_hold_rates() -> None:
+  model = _make_model()
+  gate = torch.zeros(2, 5)
+  gate[:, 0] = 2.0
+
+  _next_gate, alpha = model._advance_gate_state(
+    event_prob=torch.zeros(2, 1),
+    stair_prob=torch.ones(2, 1),
+    gate_state=gate,
+  )
+
+  torch.testing.assert_close(alpha[:, :2], torch.full((2, 2), 0.01))
+  torch.testing.assert_close(alpha[:, 2:], torch.full((2, 3), 0.05))
 
 
 def test_stair_shape_huber_ignores_invalid_labels() -> None:
@@ -176,7 +198,7 @@ def test_recurrent_batch_forward_unpads_aux_outputs() -> None:
   assert model.aux_event_logits is not None
   assert model.aux_event_logits.shape == (3, 1, 1)
   diagnostics = model.get_slow_latent_diagnostics()
-  assert diagnostics["alpha"].shape == (3, 1, 1)
+  assert diagnostics["alpha"].shape == (3, 1, 5)
   assert diagnostics["gate_mode"].shape == (3, 1, 1)
 
 
@@ -217,7 +239,10 @@ def test_slow_latent_export_metadata() -> None:
 
   assert metadata["policy_has_slow_latent"] == "true"
   assert metadata["policy_slow_latent_dim"] == "5"
-  assert metadata["policy_slow_latent_alpha"] == "0.02"
+  assert metadata["policy_slow_latent_alpha"] == "0.01"
+  assert metadata["policy_slow_latent_state_dim"] == "2"
+  assert metadata["policy_slow_latent_alpha_hold_state"] == "0.01"
+  assert metadata["policy_slow_latent_alpha_hold_shape"] == "0.05"
   assert metadata["policy_latent_obs_dim"] == "11"
   assert metadata["policy_onnx_input_names"] == [
     "actor_obs",

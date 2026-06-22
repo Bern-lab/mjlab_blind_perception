@@ -82,8 +82,12 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """EMA rate in NORMAL mode (fast update, fast forget)."""
   alpha_write: float = 0.8
   """EMA rate in STAIR_WRITE mode (rapid memory acquisition)."""
-  alpha_hold: float = 0.02
-  """EMA rate in STAIR_MEMORY mode (slow forgetting)."""
+  state_latent_dim: int = 8
+  """Leading z-memory channels reserved for stair state and timing."""
+  alpha_hold_state: float = 0.01
+  """Hold update rate for stable stair-state and timing memory."""
+  alpha_hold_shape: float = 0.05
+  """Hold update rate for continuously refreshed geometry/stride memory."""
   write_steps: int = 2
   """Number of steps to stay in STAIR_WRITE mode."""
   min_stair_steps: int = 50
@@ -110,8 +114,12 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """Weight for stair state BCE loss (0.0 = disabled in v1)."""
   aux_stair_shape_coef: float = 0.03
   """Weight for masked tread-depth/riser-height Huber loss."""
+  aux_safe_stride_coef: float = 0.03
+  """Weight for masked safe-tread lower-bound Huber loss."""
   stair_shape_huber_delta: float = 0.05
   """Huber transition point for stair geometry labels, in meters."""
+  safe_stride_huber_delta: float = 0.05
+  """Huber transition point for safe-stride labels, in meters."""
   future_collision_horizon: int = 20
   """Future window (steps) for the collision prediction label."""
 

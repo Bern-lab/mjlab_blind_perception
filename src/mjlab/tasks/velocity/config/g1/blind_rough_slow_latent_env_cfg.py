@@ -132,7 +132,6 @@ class G1SlowLatentRewardParams:
   foot_gait_offset: tuple[float, float] = (0.0, 0.5)
   foot_gait_threshold: float = 0.56
   foot_gait_command_threshold: float = 0.1
-  probe_gait_support_speed_scale: float = 0.20
   base_height_above_support_weight: float = -0.5
   base_height_above_support_min_height: float = 0.74
   base_height_above_support_error_scale: float = 10.0
@@ -165,7 +164,6 @@ class G1SlowLatentRewardParams:
   toe_slab_v_margin: float = 0.05
   toe_x_min: float = 0.08
   toe_v_threshold: float = 0.02
-  toe_approach_speed_floor: float = 0.08
   surface_tol: float = 0.005
   nearest_boundaries: int = 4
   min_terrain_level: int = 3
@@ -175,36 +173,23 @@ class G1SlowLatentRewardParams:
   toe_contact_force_threshold: float = 15.0
   toe_contact_force_scale: float = 60.0
   toe_contact_vertical_normal_z_max: float = 0.4
-  toe_contact_forward_velocity_threshold: float = 0.05
 
-  # Temporal foot-specific stair probing.
-  # The first valid layer-1 toe-riser contact opens a short probing phase for
-  # the opposite foot. During that phase, only the target foot can receive
-  # lift/forward/confirm rewards and temporary slab/contact protection.
-  toe_probe_contact_count: int = 2
-  toe_probe_cooldown_time: float = 0.20
-  toe_temporal_probe_first_reward: float = 0.05
-  toe_temporal_probe_confirm_reward: float = 0.20
-  toe_temporal_probe_lift_reward: float = 0.15
-  toe_temporal_probe_forward_reward: float = 0.4  # Increased from 0.2.
-  toe_temporal_probe_min_lift: float = 0.15
-  toe_temporal_probe_lift_scale: float = 0.08
-  toe_temporal_probe_min_forward: float = 0.18
-  toe_temporal_probe_forward_scale: float = 0.30
-  toe_temporal_probe_timeout: float = 0.80
-  toe_temporal_probe_min_forward_vel: float = 0.03
-  toe_temporal_probe_max_forward_vel: float = 0.45
-  toe_temporal_probe_boundary_normal_cos: float = 0.90
-  toe_temporal_probe_boundary_distance_tolerance: float = 0.12
-  toe_temporal_probe_shallow_depth: float = 0.025
-  toe_temporal_probe_overspeed_penalty: float = 0.10
-
-  toe_probe_min_ascent_height: float = 0.03
-  toe_probe_ascent_velocity_threshold: float = 0.03
+  # Penalty-only stair entry and safe layer-2 touchdown confirmation.
+  toe_stair_entry_cooldown_time: float = 0.20
+  toe_stair_entry_timeout: float = 1.20
+  toe_stair_heading_cos: float = 0.70
+  toe_stair_touchdown_height_tolerance: float = 0.08
+  toe_stair_touchdown_lateral_margin: float = 0.03
+  toe_stair_safe_support_fraction: float = 0.60
+  toe_stair_min_safe_stride: float = 0.10
+  toe_stair_touchdown_lip_clearance: float = 0.02
+  toe_stair_touchdown_lip_height_band: float = 0.06
+  toe_stair_following_timeout: float = 1.50
+  toe_stair_command_threshold: float = 0.05
 
   # Stage-2 privileged-geometry landing shaping.
   stair_tread_landing_weight: float = 0.5
-  stair_tread_landing_bias: float = 0.60
+  stair_tread_landing_lead: float = 0.04
   stair_tread_landing_sigma_fraction: float = 0.15
   stair_tread_landing_min_sigma: float = 0.03
   stair_tread_landing_back_margin: float = 0.06
@@ -215,16 +200,6 @@ class G1SlowLatentRewardParams:
   stair_tread_landing_over_front_penalty_scale: float = 0.60
   stair_tread_landing_min_layer: int = 3
   stair_tread_landing_lip_margin: float = 0.01
-
-
-@dataclass(frozen=True)
-class G1SlowLatentLabelParams:
-  """Simulation-only labels used by slow-latent auxiliary losses."""
-
-  toe_event_force_threshold: float = 15.0
-  toe_event_vertical_normal_z_max: float = 0.4
-  stair_state_min_terrain_level: int = 3
-  stair_shape_min_probe_stage: int = 2
 
 
 @dataclass(frozen=True)
@@ -283,8 +258,6 @@ class G1SlowLatentEnvParams:
   """Target-heading command distribution and play overrides."""
   rewards: G1SlowLatentRewardParams = field(default_factory=G1SlowLatentRewardParams)
   """All slow-latent reward weights and key reward parameters."""
-  labels: G1SlowLatentLabelParams = field(default_factory=G1SlowLatentLabelParams)
-  """Auxiliary label thresholds for slow-latent training."""
   terrain_replay: G1SlowLatentTerrainReplayParams = field(
     default_factory=G1SlowLatentTerrainReplayParams
   )
@@ -331,7 +304,6 @@ def configure_g1_step_danger_rewards(
       "v_margin": params.toe_slab_v_margin,
       "toe_x_min": params.toe_x_min,
       "toe_v_threshold": params.toe_v_threshold,
-      "approach_speed_floor": params.toe_approach_speed_floor,
       "surface_tol": params.surface_tol,
       "nearest_boundaries": params.nearest_boundaries,
       "min_terrain_level": params.min_terrain_level,
@@ -341,32 +313,18 @@ def configure_g1_step_danger_rewards(
       "contact_force_threshold": params.toe_contact_force_threshold,
       "contact_force_scale": params.toe_contact_force_scale,
       "contact_vertical_normal_z_max": params.toe_contact_vertical_normal_z_max,
-      "contact_forward_velocity_threshold": (
-        params.toe_contact_forward_velocity_threshold
-      ),
-      "probe_contact_count": params.toe_probe_contact_count,
-      "probe_cooldown_time": params.toe_probe_cooldown_time,
-      "temporal_probe_first_reward": params.toe_temporal_probe_first_reward,
-      "temporal_probe_confirm_reward": params.toe_temporal_probe_confirm_reward,
-      "temporal_probe_lift_reward": params.toe_temporal_probe_lift_reward,
-      "temporal_probe_forward_reward": params.toe_temporal_probe_forward_reward,
-      "temporal_probe_min_lift": params.toe_temporal_probe_min_lift,
-      "temporal_probe_lift_scale": params.toe_temporal_probe_lift_scale,
-      "temporal_probe_min_forward": params.toe_temporal_probe_min_forward,
-      "temporal_probe_forward_scale": params.toe_temporal_probe_forward_scale,
-      "temporal_probe_timeout": params.toe_temporal_probe_timeout,
-      "temporal_probe_min_forward_vel": (params.toe_temporal_probe_min_forward_vel),
-      "temporal_probe_max_forward_vel": params.toe_temporal_probe_max_forward_vel,
-      "temporal_probe_boundary_normal_cos": (
-        params.toe_temporal_probe_boundary_normal_cos
-      ),
-      "temporal_probe_boundary_distance_tolerance": (
-        params.toe_temporal_probe_boundary_distance_tolerance
-      ),
-      "temporal_probe_shallow_depth": params.toe_temporal_probe_shallow_depth,
-      "temporal_probe_overspeed_penalty": (params.toe_temporal_probe_overspeed_penalty),
-      "min_ascent_height": params.toe_probe_min_ascent_height,
-      "ascent_velocity_threshold": params.toe_probe_ascent_velocity_threshold,
+      "stair_entry_cooldown_time": params.toe_stair_entry_cooldown_time,
+      "stair_entry_timeout": params.toe_stair_entry_timeout,
+      "stair_heading_cos": params.toe_stair_heading_cos,
+      "stair_touchdown_height_tolerance": (params.toe_stair_touchdown_height_tolerance),
+      "stair_touchdown_lateral_margin": (params.toe_stair_touchdown_lateral_margin),
+      "stair_safe_support_fraction": (params.toe_stair_safe_support_fraction),
+      "stair_min_safe_stride": params.toe_stair_min_safe_stride,
+      "stair_touchdown_lip_clearance": (params.toe_stair_touchdown_lip_clearance),
+      "stair_touchdown_lip_height_band": (params.toe_stair_touchdown_lip_height_band),
+      "stair_following_timeout": params.toe_stair_following_timeout,
+      "command_threshold": params.toe_stair_command_threshold,
+      "ground_contact_sensor_name": "feet_ground_contact",
       "asset_cfg": foot_asset_cfg(),
     },
   )
@@ -376,7 +334,7 @@ def configure_g1_step_danger_rewards(
     params={
       "ground_contact_sensor_name": "feet_ground_contact",
       "toe_contact_sensor_name": TOE_TERRAIN_CONTACT_SENSOR,
-      "landing_bias": params.stair_tread_landing_bias,
+      "landing_lead": params.stair_tread_landing_lead,
       "sigma_fraction": params.stair_tread_landing_sigma_fraction,
       "min_sigma": params.stair_tread_landing_min_sigma,
       "back_margin": params.stair_tread_landing_back_margin,
@@ -396,6 +354,7 @@ def configure_g1_step_danger_rewards(
       "slab_v_margin": params.toe_slab_v_margin,
       "toe_x_min": params.toe_x_min,
       "surface_tol": params.surface_tol,
+      "heading_cos": params.toe_stair_heading_cos,
       "asset_cfg": SceneEntityCfg("robot", site_names=("left_foot", "right_foot")),
       "foot_body_cfg": foot_asset_cfg(),
     },
@@ -578,7 +537,7 @@ def _configure_slow_latent_rewards(
     }
   )
   cfg.rewards["foot_gait"].weight = params.foot_gait_weight
-  cfg.rewards["foot_gait"].func = mdp.probe_aware_feet_gait
+  cfg.rewards["foot_gait"].func = mdp.stair_aware_feet_gait
   cfg.rewards["foot_gait"].params.update(
     {
       "command_name": "twist",
@@ -587,7 +546,7 @@ def _configure_slow_latent_rewards(
       "period": params.foot_gait_period,
       "offset": list(params.foot_gait_offset),
       "threshold": params.foot_gait_threshold,
-      "support_speed_scale": params.probe_gait_support_speed_scale,
+      "heading_cos": params.toe_stair_heading_cos,
       "asset_cfg": foot_body_cfg(),
     }
   )
@@ -652,25 +611,19 @@ def _configure_latent_observations(
       terms={
         "toe_riser_event": ObservationTermCfg(
           func=mdp.toe_riser_event_label,
-          params={
-            "sensor_name": TOE_TERRAIN_CONTACT_SENSOR,
-            "force_threshold": params.labels.toe_event_force_threshold,
-            "vertical_normal_z_max": params.labels.toe_event_vertical_normal_z_max,
-          },
+          params={},
         ),
         "stair_state": ObservationTermCfg(
           func=mdp.stair_state_label,
-          params={
-            "min_terrain_level": params.labels.stair_state_min_terrain_level,
-            "sensor_name": TOE_TERRAIN_CONTACT_SENSOR,
-          },
+          params={},
         ),
         "stair_shape": ObservationTermCfg(
           func=mdp.stair_shape_label,
-          params={
-            "min_terrain_level": params.labels.stair_state_min_terrain_level,
-            "min_probe_stage": params.labels.stair_shape_min_probe_stage,
-          },
+          params={},
+        ),
+        "safe_stride": ObservationTermCfg(
+          func=mdp.safe_stride_label,
+          params={},
         ),
       },
       concatenate_terms=True,
@@ -710,7 +663,6 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_env_cfg(
       enable_latent_obs_corruption=params.enable_latent_obs_corruption,
       target_command=params.target_command,
       rewards=params.rewards,
-      labels=params.labels,
       terrain_replay=params.terrain_replay,
       play_visualization=params.play_visualization,
     )

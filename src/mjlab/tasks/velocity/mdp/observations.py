@@ -9,8 +9,14 @@ from mjlab.sensor import CameraSensor, ContactSensor
 from mjlab.sensor.terrain_height_sensor import TerrainHeightSensor
 from mjlab.utils.lab_api.math import quat_apply, quat_apply_inverse
 
-from .rewards import _current_step_boundaries, _terrain_level_active
-from .stair_geometry import PROBE_STAGE_KEY, cached_stair_shape
+from .rewards import _current_step_boundaries
+from .stair_geometry import (
+  SAFE_STRIDE_VALID_KEY,
+  SAFE_TREAD_LOWER_BOUND_KEY,
+  STAIR_ENTRY_EVENT_KEY,
+  STAIR_PHASE_KEY,
+  cached_stair_shape,
+)
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
@@ -357,118 +363,65 @@ def _clear_foot_velocity_cache(env: ManagerBasedRlEnv, env_ids: torch.Tensor) ->
 
 
 # ======================================================================
-# Toe-riser event label (from simulation contact sensor)
+# Env-side stair state-machine labels
 # ======================================================================
 
 
 def toe_riser_event_label(
   env: ManagerBasedRlEnv,
-  sensor_name: str = "toe_terrain_contact",
-  force_threshold: float = 15.0,
-  vertical_normal_z_max: float = 0.4,
 ) -> torch.Tensor:
-  """Binary label: does the current frame contain a toe-riser collision?
-
-  Detects horizontal toe blocking forces from the contact sensor.
-  This label is used for (1) gate state machine training, (2) auxiliary
-  loss supervision, and (3) evaluation metrics.  It NEVER enters latent_obs
-  or actor_obs.
-
-  Parameters
-  ----------
-  sensor_name:
-    Name of the ``ContactSensor`` that captures toe-terrain contacts.
-  force_threshold:
-    Minimum contact force magnitude (N) to count as a collision.
-  vertical_normal_z_max:
-    Maximum z-component of the contact normal for the collision to be
-    considered "horizontal" (toe-riser vs vertical ground contact).
-
-  Returns
-  -------
-  event:
-    ``[num_envs]`` binary tensor (1 = toe-riser collision).
-  """
-  sensor: ContactSensor = env.scene[sensor_name]
-  sd = sensor.data
-
-  assert sd.force is not None, f"Contact sensor '{sensor_name}' has no force data"
-  assert sd.normal is not None, f"Contact sensor '{sensor_name}' has no normal data"
-
-  force = sd.force  # [B, max_slots, 3]
-  normal = sd.normal  # [B, max_slots, 3]
-
-  force_mag = torch.norm(force, dim=-1)  # [B, max_slots]
-  normal_z = normal[..., 2]  # [B, max_slots]
-
-  is_horizontal = normal_z.abs() < vertical_normal_z_max
-  is_strong = force_mag > force_threshold
-
-  hit_per_slot = (is_horizontal & is_strong).any(dim=-1)  # [B]
-  return hit_per_slot.float().unsqueeze(-1)
+  """One-frame label for a state-machine-accepted stair entry event."""
+  entry_event = env.extras.get(STAIR_ENTRY_EVENT_KEY)
+  if entry_event is None:
+    return torch.zeros(env.num_envs, 1, device=env.device)
+  return entry_event.float().unsqueeze(-1)
 
 
 def stair_state_label(
   env: ManagerBasedRlEnv,
-  min_terrain_level: int = 3,
-  sensor_name: str = "toe_terrain_contact",
 ) -> torch.Tensor:
-  """Label: is the robot currently in a stair-interaction state?
-
-  First version: terrain_level >= min_terrain_level AND either the robot
-  has already experienced a toe-riser event OR the terrain type contains
-  stairs.  This is a simplistic heuristic that can be improved with
-  actual terrain section metadata.
-
-  Parameters
-  ----------
-  min_terrain_level:
-    Minimum terrain difficulty level to be considered stairs.
-  sensor_name:
-    Name of the toe-terrain contact sensor (unused in this version).
-
-  Returns
-  -------
-  stair:
-    ``[num_envs]`` binary tensor.
-  """
-  del sensor_name
-  terrain = env.scene.terrain
-  if terrain is None or getattr(terrain, "terrain_levels", None) is None:
+  """Label the complete env-side stair interaction interval."""
+  stair_phase = env.extras.get(STAIR_PHASE_KEY)
+  if stair_phase is None:
     return torch.zeros(env.num_envs, 1, device=env.device)
-  levels = terrain.terrain_levels
-  return (levels >= min_terrain_level).float().unsqueeze(-1)
+  return (stair_phase >= 1).float().unsqueeze(-1)
 
 
 def stair_shape_label(
   env: ManagerBasedRlEnv,
-  min_terrain_level: int = 3,
-  min_probe_stage: int = 2,
 ) -> torch.Tensor:
   """Privileged ``[tread_depth, riser_height, valid]`` supervision label.
 
   The geometry comes from simulation-only step boundaries and is never exposed
-  to the actor or latent observation groups. By default, supervision starts
-  only after the second-riser confirmation makes tread geometry observable.
+  to the actor or latent observation groups. Supervision becomes valid only
+  after the state machine records a safe layer-2 touchdown.
   """
+  safe_stride_valid = env.extras.get(SAFE_STRIDE_VALID_KEY)
+  if safe_stride_valid is None:
+    label_valid = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+  else:
+    label_valid = safe_stride_valid.bool()
   boundaries, valid_boundaries = _current_step_boundaries(env)
   if boundaries is None or valid_boundaries is None:
-    return torch.zeros(env.num_envs, 3, device=env.device)
+    zeros = torch.zeros(env.num_envs, device=env.device)
+    return torch.stack([zeros, zeros, label_valid.float()], dim=-1)
 
-  tread_depth, riser_height, shape_valid = cached_stair_shape(
+  tread_depth, riser_height, _shape_valid = cached_stair_shape(
     env, boundaries, valid_boundaries
   )
-  level_active = _terrain_level_active(env, min_terrain_level)
-  probe_stage = env.extras.get(PROBE_STAGE_KEY)
-  if probe_stage is None:
-    stage_active = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
-  else:
-    stage_active = probe_stage >= min_probe_stage
-  label_valid = shape_valid & level_active & stage_active
   return torch.stack(
     [tread_depth, riser_height, label_valid.float()],
     dim=-1,
   )
+
+
+def safe_stride_label(env: ManagerBasedRlEnv) -> torch.Tensor:
+  """Privileged ``[safe_tread_lower_bound, valid]`` supervision label."""
+  safe_stride = env.extras.get(SAFE_TREAD_LOWER_BOUND_KEY)
+  safe_stride_valid = env.extras.get(SAFE_STRIDE_VALID_KEY)
+  if safe_stride is None or safe_stride_valid is None:
+    return torch.zeros(env.num_envs, 2, device=env.device)
+  return torch.stack([safe_stride, safe_stride_valid.float()], dim=-1)
 
 
 # ======================================================================

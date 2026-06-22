@@ -48,38 +48,40 @@ Added
   collision points for the current episode.
 - Added ``Mjlab-Velocity-Blind-Rough-TargetNavigation-StepDanger-TeacherKL-Unitree-G1``,
   a non-latent G1 target-navigation Teacher-KL task with local foot-lip danger
-  parameters and an integrated toe-riser probe shaping reward that neutralizes
-  slab cost only for state-machine-validated first/second-riser probing contacts.
+  parameters and a penalty-only toe-riser danger slab.
 - Added privileged stair-shape supervision for slow latent memory and a stage-2
   safe-tread landing reward based on ground-truth tread geometry. Predicted
   geometry is not fed back into reward computation.
+- Added reward-neutral SlowLatent stair diagnostics for approach heading,
+  layer-2 touchdown gates, and sole support coverage using the existing foot
+  volume samples.
 
 Changed
 ^^^^^^^
 
-- Slow-latent stair probing now starts directly from a valid first-riser toe
-  contact, measures target-foot progress along the world-frame stair ascent
-  direction, and uses a probe-specific support/swing gait until the second-riser
-  confirmation or timeout. Fast approaches no longer earn progress or collision
-  protection and receive an explicit overspeed penalty.
-- Slow-latent second-riser confirmation now checks ascent direction and boundary
-  geometry, while stage-2 landing shaping starts at stair layer three and rejects
-  toe-slab or foot-lip danger-zone touchdowns.
+- Slow-latent stair entry now starts from a heading-gated first-riser contact and
+  advances to stair-following only after the opposite foot safely lands on the
+  second tread with at least 60% sole support. The state machine records the
+  observed stride, validated landing center, and tread-depth lower bound, and
+  exits stale entry/following states on timeouts or after passing the last riser.
+- Removed collision exploration, first-contact protection, and entry
+  lift/forward shaping from slow-latent stair rewards. Riser, slab, and lip
+  danger penalties remain active, while heading-aligned stair entry and
+  following use the same phase-free alternating gait reward.
+- Slow-latent auxiliary labels now use the env-side stair-entry pulse, stair
+  phase, and safe-stride validity directly while retaining the existing
+  event/stair/shape ordering. Stage-2 following landings target the validated
+  landing center plus a bounded 4 cm lead from stair layer three onward.
+- Extended slow-latent supervision to seven values with a masked safe-tread
+  lower-bound head and PPO loss. The persistent latent now reserves separate
+  state/timing and geometry/stride channels, using hold update rates of 0.01
+  and 0.05 respectively in training and exported ONNX policies.
 - G1 high-stair curriculum tasks now enable mixed terrain replay after
   reaching high levels, sampling low/mid/high stair rows at a 20/30/50 ratio.
 - G1 high-stair terrains now randomize stair step depth per tile from
   25 cm to 35 cm across curriculum difficulty rows.
 - G1 high-stair play terrain randomization now uses the same low/mid/high
   level ratio as mixed replay while preserving randomized stair depth.
-- Slow-latent G1 stair navigation now rewards the first true toe/riser
-  contact once on each of the first and second stair layers. Repeated
-  contacts on those two layers are neutral, while later riser contacts keep
-  the contact-time-scaled penalty. After the first layer is contacted, a
-  progress-shaped attraction reward encourages toe motion toward the second
-  layer riser until that second-layer contact occurs. The reward now logs
-  the slab, true-contact, probe, attraction, and final raw subterms
-  separately, and the slow-latent foot-lip penalty ignores the first two
-  stair layers.
 - Actuator delay is now configured inline on any ``ActuatorCfg`` subclass
   (e.g. ``BuiltinPositionActuatorCfg(..., delay_min_lag=2, delay_max_lag=5)``)
   instead of wrapping with ``DelayedActuatorCfg``. ``DelayedActuator``,

@@ -107,18 +107,25 @@ def get_recurrent_policy_metadata(policy: Any) -> dict[str, list | str | float]:
     policy, "latent_dim", None
   )
   if slow_latent_dim is not None:
-    has_gate_state = hasattr(policy, "alpha_fast") and hasattr(policy, "alpha_hold")
+    has_gate_state = hasattr(policy, "alpha_fast") and (
+      hasattr(policy, "alpha_hold_state") or hasattr(policy, "alpha_hold")
+    )
+    alpha_hold_state = getattr(
+      policy,
+      "alpha_hold_state",
+      getattr(policy, "alpha_hold", getattr(policy, "slow_alpha", "")),
+    )
+    alpha_hold_shape = getattr(policy, "alpha_hold_shape", alpha_hold_state)
     metadata.update(
       {
         "policy_has_slow_latent": "true",
         "policy_slow_latent_dim": str(slow_latent_dim),
-        "policy_slow_latent_alpha": str(
-          getattr(
-            policy,
-            "latent_alpha",
-            getattr(policy, "alpha_hold", getattr(policy, "slow_alpha", "")),
-          )
+        "policy_slow_latent_alpha": str(alpha_hold_state),
+        "policy_slow_latent_state_dim": str(
+          getattr(policy, "state_latent_dim", slow_latent_dim)
         ),
+        "policy_slow_latent_alpha_hold_state": str(alpha_hold_state),
+        "policy_slow_latent_alpha_hold_shape": str(alpha_hold_shape),
         "policy_recurrent_state_step_rule": (
           (
             "feed h_out/c_out/z_out/gate_state_out back as next "
