@@ -430,6 +430,19 @@ class PPOTeacherKL(PPO):
         component_huber = (huber_error * valid).sum(dim=reduce_dims) / valid_count
         return component_mae, component_huber
 
+    @staticmethod
+    def _compute_label_out_of_range_ratios(
+        labels: torch.Tensor,
+        valid: torch.Tensor,
+        lower_bounds: torch.Tensor,
+        upper_bounds: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return valid-mask-normalized component ratios without altering labels."""
+        out_of_range = (labels < lower_bounds) | (labels > upper_bounds)
+        reduce_dims = tuple(range(labels.dim() - 1))
+        valid_count = valid.sum().clamp_min(1.0)
+        return (out_of_range.to(labels.dtype) * valid).sum(dim=reduce_dims) / valid_count
+
     def _compute_slow_latent_aux_loss(
         self,
         batch: RolloutStorage.Batch,
@@ -642,6 +655,26 @@ class PPOTeacherKL(PPO):
             logs["slow_latent_riser_height_mae"] = self._distributed_mean_scalar(shape_mae[1]).item()
             logs["slow_latent_tread_depth_huber"] = self._distributed_mean_scalar(shape_huber[0]).item()
             logs["slow_latent_riser_height_huber"] = self._distributed_mean_scalar(shape_huber[1]).item()
+            shape_lower_bounds = shape_labels.new_tensor([
+                float(getattr(self.actor, "tread_depth_min", 0.25)),
+                float(getattr(self.actor, "riser_height_min", 0.088)),
+            ])
+            shape_upper_bounds = shape_labels.new_tensor([
+                float(getattr(self.actor, "tread_depth_max", 0.35)),
+                float(getattr(self.actor, "riser_height_max", 0.25)),
+            ])
+            shape_out_of_range = self._compute_label_out_of_range_ratios(
+                shape_labels,
+                shape_valid,
+                shape_lower_bounds,
+                shape_upper_bounds,
+            )
+            logs["slow_latent_tread_depth_out_of_range_label_ratio"] = self._distributed_mean_scalar(
+                shape_out_of_range[0]
+            ).item()
+            logs["slow_latent_riser_height_out_of_range_label_ratio"] = self._distributed_mean_scalar(
+                shape_out_of_range[1]
+            ).item()
         if safe_stride_coef != 0.0 and "safe_stride" in aux_outputs:
             safe_stride_delta = float(getattr(self.actor, "safe_stride_huber_delta", 0.05))
             safe_stride_predictions = aux_outputs["safe_stride"]
@@ -664,6 +697,25 @@ class PPOTeacherKL(PPO):
             logs["slow_latent_safe_stride_valid_ratio"] = self._distributed_mean_scalar(safe_stride_valid.mean()).item()
             logs["slow_latent_safe_stride_mae"] = self._distributed_mean_scalar(safe_stride_mae[0]).item()
             logs["slow_latent_safe_stride_component_huber"] = self._distributed_mean_scalar(safe_stride_huber[0]).item()
+            safe_stride_lower = safe_stride_labels.new_tensor([float(getattr(self.actor, "safe_stride_min", 0.08))])
+            safe_stride_upper = safe_stride_labels.new_tensor([float(getattr(self.actor, "safe_stride_max", 0.45))])
+            safe_stride_out_of_range = self._compute_label_out_of_range_ratios(
+                safe_stride_labels,
+                safe_stride_valid,
+                safe_stride_lower,
+                safe_stride_upper,
+            )
+            logs["slow_latent_safe_stride_out_of_range_label_ratio"] = self._distributed_mean_scalar(
+                safe_stride_out_of_range[0]
+            ).item()
+        if "stair_shape" in aux_outputs and "safe_stride" in aux_outputs:
+            joint_valid = shape_valid * safe_stride_valid
+            valid_count = joint_valid.sum().clamp_min(1.0)
+            stride_gt_tread = (aux_outputs["safe_stride"][..., 0:1] > aux_outputs["stair_shape"][..., 0:1]).to(
+                joint_valid.dtype
+            )
+            violation_ratio = (stride_gt_tread * joint_valid).sum() / valid_count
+            logs["slow_latent_safe_stride_gt_tread_hat_ratio"] = self._distributed_mean_scalar(violation_ratio).item()
         logs["slow_latent_aux_loss"] = self._distributed_mean_scalar(total_loss).item()
         logs.update(self._compute_slow_latent_diagnostic_logs())
         return total_loss, logs

@@ -397,6 +397,8 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert actor_cfg.aux_safe_stride_coef == 0.03
   assert actor_cfg.stair_shape_huber_delta == 0.05
   assert actor_cfg.safe_stride_huber_delta == 0.05
+  assert actor_cfg.safe_stride_min == 0.08
+  assert actor_cfg.safe_stride_max == 0.45
 
 
 def test_step_danger_target_navigation_uses_local_geometric_danger_rewards() -> None:
@@ -566,6 +568,8 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
       alpha_hold_shape=0.07,
       aux_stair_coef=0.7,
       aux_safe_stride_coef=0.11,
+      safe_stride_min=0.10,
+      safe_stride_max=0.42,
     ),
   )
   rl_cfg = unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
@@ -585,6 +589,8 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
   assert actor_cfg.alpha_hold_shape == 0.07
   assert actor_cfg.aux_stair_coef == 0.7
   assert actor_cfg.aux_safe_stride_coef == 0.11
+  assert actor_cfg.safe_stride_min == 0.10
+  assert actor_cfg.safe_stride_max == 0.42
 
 
 def test_step_danger_explicit_param_interfaces_drive_configs() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import math
 from typing import Any, cast
 
 import torch
@@ -16,6 +17,10 @@ _GATE_STATE_DIM = 5
 _MODE_NORMAL = 0.0
 _MODE_STAIR_WRITE = 1.0
 _MODE_STAIR_MEMORY = 2.0
+_TREAD_DEPTH_MIN_M = 0.25
+_TREAD_DEPTH_MAX_M = 0.35
+_RISER_HEIGHT_MIN_M = 0.088
+_RISER_HEIGHT_MAX_M = 0.25
 GatedHiddenState = torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor] | None
 
 
@@ -69,6 +74,8 @@ class LSTMSlowLatentMLPModel(MLPModel):
     aux_safe_stride_coef: float = 0.0,
     stair_shape_huber_delta: float = 0.05,
     safe_stride_huber_delta: float = 0.05,
+    safe_stride_min: float = 0.08,
+    safe_stride_max: float = 0.45,
     future_collision_horizon: int = 20,
     latent_obs_set: str = "latent",
     **kwargs: Any,
@@ -205,6 +212,24 @@ class LSTMSlowLatentMLPModel(MLPModel):
     self.aux_safe_stride_coef = float(aux_safe_stride_coef)
     self.stair_shape_huber_delta = float(stair_shape_huber_delta)
     self.safe_stride_huber_delta = float(safe_stride_huber_delta)
+    self.tread_depth_min = _TREAD_DEPTH_MIN_M
+    self.tread_depth_max = _TREAD_DEPTH_MAX_M
+    self.riser_height_min = _RISER_HEIGHT_MIN_M
+    self.riser_height_max = _RISER_HEIGHT_MAX_M
+    self.safe_stride_min = float(safe_stride_min)
+    self.safe_stride_max = float(safe_stride_max)
+    bounds = {
+      "tread_depth": (self.tread_depth_min, self.tread_depth_max),
+      "riser_height": (self.riser_height_min, self.riser_height_max),
+      "safe_stride": (self.safe_stride_min, self.safe_stride_max),
+    }
+    for name, (minimum, maximum) in bounds.items():
+      if not math.isfinite(minimum) or not math.isfinite(maximum):
+        raise ValueError(f"{name} bounds must be finite, got [{minimum}, {maximum}].")
+      if maximum <= minimum:
+        raise ValueError(
+          f"{name}_max must be greater than {name}_min, got [{minimum}, {maximum}]."
+        )
     self.future_collision_horizon = int(future_collision_horizon)
 
     self._hidden_state: tuple[torch.Tensor, torch.Tensor] | None = None
@@ -229,6 +254,22 @@ class LSTMSlowLatentMLPModel(MLPModel):
 
   def _shape_memory(self, z: torch.Tensor) -> torch.Tensor:
     return z[..., self.state_latent_dim :]
+
+  def _decode_stair_shape(self, shape_memory: torch.Tensor) -> torch.Tensor:
+    shape01 = torch.sigmoid(self.stair_shape_head(shape_memory))
+    tread_depth = self.tread_depth_min + shape01[..., 0:1] * (
+      self.tread_depth_max - self.tread_depth_min
+    )
+    riser_height = self.riser_height_min + shape01[..., 1:2] * (
+      self.riser_height_max - self.riser_height_min
+    )
+    return torch.cat([tread_depth, riser_height], dim=-1)
+
+  def _decode_safe_stride(self, shape_memory: torch.Tensor) -> torch.Tensor:
+    stride01 = torch.sigmoid(self.safe_stride_head(shape_memory))
+    return self.safe_stride_min + stride01 * (
+      self.safe_stride_max - self.safe_stride_min
+    )
 
   def _ensure_rollout_state(self, batch_size: int, device: torch.device) -> None:
     if (
@@ -449,8 +490,8 @@ class LSTMSlowLatentMLPModel(MLPModel):
       )
       future_logit = self.future_collision_head(z_next)
       shape_memory = self._shape_memory(z_next)
-      stair_shape_prediction = self.stair_shape_head(shape_memory)
-      safe_stride_prediction = self.safe_stride_head(shape_memory)
+      stair_shape_prediction = self._decode_stair_shape(shape_memory)
+      safe_stride_prediction = self._decode_safe_stride(shape_memory)
 
       z = z_next
       gate = gate_next
@@ -683,6 +724,8 @@ class _OnnxStairLatentModel(nn.Module):
     self.event_head = copy.deepcopy(model.event_head)
     self.stair_state_head = copy.deepcopy(model.stair_state_head)
     self.future_collision_head = copy.deepcopy(model.future_collision_head)
+    self.stair_shape_head = copy.deepcopy(model.stair_shape_head)
+    self.safe_stride_head = copy.deepcopy(model.safe_stride_head)
     self.mlp = copy.deepcopy(model.mlp)
     self.deterministic_output = (
       model.distribution.as_deterministic_output_module()
@@ -695,6 +738,12 @@ class _OnnxStairLatentModel(nn.Module):
     self.z_dim = model.z_dim
     self.state_latent_dim = model.state_latent_dim
     self.latent_hidden_dim = model.latent_hidden_dim
+    self.tread_depth_min = model.tread_depth_min
+    self.tread_depth_max = model.tread_depth_max
+    self.riser_height_min = model.riser_height_min
+    self.riser_height_max = model.riser_height_max
+    self.safe_stride_min = model.safe_stride_min
+    self.safe_stride_max = model.safe_stride_max
     self.alpha_fast = model.alpha_fast
     self.alpha_write = model.alpha_write
     self.alpha_hold_state = model.alpha_hold_state
@@ -722,7 +771,25 @@ class _OnnxStairLatentModel(nn.Module):
       "event_prob",
       "stair_prob",
       "future_collision_prob",
+      "stair_shape",
+      "safe_stride",
     ]
+
+  def _decode_stair_shape(self, shape_memory: torch.Tensor) -> torch.Tensor:
+    shape01 = torch.sigmoid(self.stair_shape_head(shape_memory))
+    tread_depth = self.tread_depth_min + shape01[..., 0:1] * (
+      self.tread_depth_max - self.tread_depth_min
+    )
+    riser_height = self.riser_height_min + shape01[..., 1:2] * (
+      self.riser_height_max - self.riser_height_min
+    )
+    return torch.cat([tread_depth, riser_height], dim=-1)
+
+  def _decode_safe_stride(self, shape_memory: torch.Tensor) -> torch.Tensor:
+    stride01 = torch.sigmoid(self.safe_stride_head(shape_memory))
+    return self.safe_stride_min + stride01 * (
+      self.safe_stride_max - self.safe_stride_min
+    )
 
   def _advance_gate_state(
     self,
@@ -817,6 +884,8 @@ class _OnnxStairLatentModel(nn.Module):
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
   ]:
     actor_obs_norm = self.actor_obs_normalizer(actor_obs)
     latent_obs_norm = self.latent_obs_normalizer(latent_obs)
@@ -836,6 +905,9 @@ class _OnnxStairLatentModel(nn.Module):
       self.stair_state_head(torch.cat([h_t, z_out[:, : self.state_latent_dim]], dim=-1))
     )
     future_collision_prob = torch.sigmoid(self.future_collision_head(z_out))
+    shape_memory = z_out[:, self.state_latent_dim :]
+    stair_shape = self._decode_stair_shape(shape_memory)
+    safe_stride = self._decode_safe_stride(shape_memory)
     actor_input = torch.cat([actor_obs_norm, z_out], dim=-1)
     actions = self.deterministic_output(self.mlp(actor_input))
     return (
@@ -847,6 +919,8 @@ class _OnnxStairLatentModel(nn.Module):
       event_prob,
       stair_prob,
       future_collision_prob,
+      stair_shape,
+      safe_stride,
     )
 
   def get_dummy_inputs(self) -> tuple[torch.Tensor, ...]:

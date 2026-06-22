@@ -120,6 +120,10 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """Huber transition point for stair geometry labels, in meters."""
   safe_stride_huber_delta: float = 0.05
   """Huber transition point for safe-stride labels, in meters."""
+  safe_stride_min: float = 0.08
+  """Minimum decoded safe-stride lower bound, in meters."""
+  safe_stride_max: float = 0.45
+  """Maximum decoded safe-stride lower bound, in meters."""
   future_collision_horizon: int = 20
   """Future window (steps) for the collision prediction label."""
 

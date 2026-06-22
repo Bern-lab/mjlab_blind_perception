@@ -166,9 +166,17 @@ def get_recurrent_policy_metadata(policy: Any) -> dict[str, list | str | float]:
           "event_prob",
           "stair_prob",
           "future_collision_prob",
+          "stair_shape",
+          "safe_stride",
         ],
         "policy_recurrent_state_names": ["h", "c", "z", "gate_state"],
         "policy_latent_obs_dim": str(getattr(policy, "latent_obs_dim", "")),
+        "policy_stair_tread_depth_min": str(getattr(policy, "tread_depth_min", "")),
+        "policy_stair_tread_depth_max": str(getattr(policy, "tread_depth_max", "")),
+        "policy_stair_riser_height_min": str(getattr(policy, "riser_height_min", "")),
+        "policy_stair_riser_height_max": str(getattr(policy, "riser_height_max", "")),
+        "policy_stair_safe_stride_min": str(getattr(policy, "safe_stride_min", "")),
+        "policy_stair_safe_stride_max": str(getattr(policy, "safe_stride_max", "")),
       }
     )
   elif rnn_type == "lstm" and slow_latent_dim is not None:

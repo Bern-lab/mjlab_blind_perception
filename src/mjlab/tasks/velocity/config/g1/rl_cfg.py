@@ -89,6 +89,10 @@ class G1SlowLatentPolicyModelParams:
   """Huber transition point for shape prediction, in meters."""
   safe_stride_huber_delta: float = 0.05
   """Huber transition point for safe-stride prediction, in meters."""
+  safe_stride_min: float = 0.08
+  """Minimum decoded safe-stride estimate, in meters."""
+  safe_stride_max: float = 0.45
+  """Maximum decoded safe-stride estimate, in meters."""
   future_collision_horizon: int = 20
   """Future window length, in policy steps, for collision labels."""
   latent_obs_set: str = "latent"
@@ -169,6 +173,8 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
   aux_safe_stride_coef: float = 0.03,
   stair_shape_huber_delta: float = 0.05,
   safe_stride_huber_delta: float = 0.05,
+  safe_stride_min: float = 0.08,
+  safe_stride_max: float = 0.45,
   future_collision_horizon: int = 20,
   latent_obs_set: str = "latent",
 ) -> RslRlGatedStairLatentModelCfg:
@@ -203,6 +209,8 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
     aux_safe_stride_coef=aux_safe_stride_coef,
     stair_shape_huber_delta=stair_shape_huber_delta,
     safe_stride_huber_delta=safe_stride_huber_delta,
+    safe_stride_min=safe_stride_min,
+    safe_stride_max=safe_stride_max,
     future_collision_horizon=future_collision_horizon,
     latent_obs_set=latent_obs_set,
     rnn_type="lstm",
@@ -368,6 +376,8 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
   aux_safe_stride_coef: float = 0.03,
   stair_shape_huber_delta: float = 0.05,
   safe_stride_huber_delta: float = 0.05,
+  safe_stride_min: float = 0.08,
+  safe_stride_max: float = 0.45,
   future_collision_horizon: int = 20,
   latent_obs_set: str = "latent",
   params: G1SlowLatentRunnerParams | None = None,
@@ -415,6 +425,8 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
     aux_safe_stride_coef = model_params.aux_safe_stride_coef
     stair_shape_huber_delta = model_params.stair_shape_huber_delta
     safe_stride_huber_delta = model_params.safe_stride_huber_delta
+    safe_stride_min = model_params.safe_stride_min
+    safe_stride_max = model_params.safe_stride_max
     future_collision_horizon = model_params.future_collision_horizon
     latent_obs_set = model_params.latent_obs_set
 
@@ -447,6 +459,8 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
     aux_safe_stride_coef=aux_safe_stride_coef,
     stair_shape_huber_delta=stair_shape_huber_delta,
     safe_stride_huber_delta=safe_stride_huber_delta,
+    safe_stride_min=safe_stride_min,
+    safe_stride_max=safe_stride_max,
     future_collision_horizon=future_collision_horizon,
     latent_obs_set=latent_obs_set,
   )

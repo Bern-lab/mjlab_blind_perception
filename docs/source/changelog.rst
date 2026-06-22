@@ -59,6 +59,11 @@ Added
 Changed
 ^^^^^^^
 
+- Slow-latent stair geometry and safe-stride heads now decode to physical ranges
+  in meters and are exported as explicit ONNX outputs without changing the actor
+  control input. Stair depth is fixed to 0.25--0.35 m and riser height to the
+  bounded to 0.088--0.25 m. Label range violations are logged without clamping
+  supervision targets.
 - Slow-latent stair entry now starts from a heading-gated first-riser contact and
   advances to stair-following only after the opposite foot safely lands on the
   second tread with at least 60% sole support. The state machine records the

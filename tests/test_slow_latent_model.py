@@ -78,6 +78,14 @@ def test_slow_latent_actor_forward_updates_state_and_aux_outputs() -> None:
   assert aux["future_collision_logit"].shape == (4, 1)
   assert aux["stair_shape"].shape == (4, 2)
   assert aux["safe_stride"].shape == (4, 1)
+  assert torch.all(
+    (0.25 <= aux["stair_shape"][..., 0]) & (aux["stair_shape"][..., 0] <= 0.35)
+  )
+  assert torch.all(
+    (0.088 <= aux["stair_shape"][..., 1]) & (aux["stair_shape"][..., 1] <= 0.25)
+  )
+  assert torch.all((0.08 <= aux["safe_stride"]) & (aux["safe_stride"] <= 0.45))
+  assert model.mlp[0].in_features == model.obs_dim + model.z_dim
   diagnostics = model.get_slow_latent_diagnostics()
   assert diagnostics["event_prob"].shape == (4, 1)
   assert diagnostics["stair_prob"].shape == (4, 1)
@@ -104,6 +112,23 @@ def test_stair_memory_uses_distinct_state_and_shape_hold_rates() -> None:
 
   torch.testing.assert_close(alpha[:, :2], torch.full((2, 2), 0.01))
   torch.testing.assert_close(alpha[:, 2:], torch.full((2, 3), 0.05))
+
+
+def test_safe_stride_output_bounds_must_be_ordered() -> None:
+  obs = _make_obs()
+
+  with pytest.raises(ValueError, match="must be greater"):
+    LSTMSlowLatentMLPModel(
+      obs=obs,
+      obs_groups={"actor": ["actor"], "latent": ["latent"]},
+      obs_set="actor",
+      output_dim=3,
+      obs_normalization=False,
+      latent_dim=5,
+      state_latent_dim=2,
+      safe_stride_min=0.2,
+      safe_stride_max=0.2,
+    )
 
 
 def test_stair_shape_huber_ignores_invalid_labels() -> None:
@@ -223,6 +248,8 @@ def test_onnx_wrapper_exposes_gated_slow_latent_state() -> None:
     "event_prob",
     "stair_prob",
     "future_collision_prob",
+    "stair_shape",
+    "safe_stride",
   ]
 
   outputs = onnx_model(*onnx_model.get_dummy_inputs())
@@ -231,6 +258,11 @@ def test_onnx_wrapper_exposes_gated_slow_latent_state() -> None:
   assert outputs[2].shape == (1, 1, 7)
   assert outputs[3].shape == (1, 5)
   assert outputs[4].shape == (1, 5)
+  assert outputs[8].shape == (1, 2)
+  assert outputs[9].shape == (1, 1)
+  assert torch.all((0.25 <= outputs[8][..., 0]) & (outputs[8][..., 0] <= 0.35))
+  assert torch.all((0.088 <= outputs[8][..., 1]) & (outputs[8][..., 1] <= 0.25))
+  assert torch.all((0.08 <= outputs[9]) & (outputs[9] <= 0.45))
 
 
 def test_slow_latent_export_metadata() -> None:
@@ -244,6 +276,12 @@ def test_slow_latent_export_metadata() -> None:
   assert metadata["policy_slow_latent_alpha_hold_state"] == "0.01"
   assert metadata["policy_slow_latent_alpha_hold_shape"] == "0.05"
   assert metadata["policy_latent_obs_dim"] == "11"
+  assert metadata["policy_stair_tread_depth_min"] == "0.25"
+  assert metadata["policy_stair_tread_depth_max"] == "0.35"
+  assert metadata["policy_stair_riser_height_min"] == "0.088"
+  assert metadata["policy_stair_riser_height_max"] == "0.25"
+  assert metadata["policy_stair_safe_stride_min"] == "0.08"
+  assert metadata["policy_stair_safe_stride_max"] == "0.45"
   assert metadata["policy_onnx_input_names"] == [
     "actor_obs",
     "latent_obs",
@@ -251,6 +289,12 @@ def test_slow_latent_export_metadata() -> None:
     "c_in",
     "z_in",
     "gate_state_in",
+  ]
+  output_names = metadata["policy_onnx_output_names"]
+  assert isinstance(output_names, list)
+  assert output_names[-2:] == [
+    "stair_shape",
+    "safe_stride",
   ]
 
 

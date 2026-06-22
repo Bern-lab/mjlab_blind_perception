@@ -139,7 +139,53 @@ def test_safe_stride_aux_loss_uses_seventh_label_as_valid_mask() -> None:
     assert logs["slow_latent_safe_stride_huber"] == pytest.approx(0.0375)
     assert logs["slow_latent_safe_stride_valid_ratio"] == pytest.approx(0.5)
     assert logs["slow_latent_safe_stride_mae"] == pytest.approx(0.05)
+    assert logs["slow_latent_safe_stride_out_of_range_label_ratio"] == 0.0
     assert loss.item() == pytest.approx(0.01875)
+
+
+def test_stair_label_range_metrics_do_not_clamp_labels() -> None:
+    """Range priors should be diagnostics only, including stride/tread violations."""
+    alg = _build_teacher_kl({"enabled": False})
+    actor = cast(Any, alg.actor)
+    actor.aux_event_coef = 0.0
+    actor.aux_stair_coef = 0.0
+    actor.aux_future_collision_coef = 0.0
+    actor.aux_stair_shape_coef = 0.1
+    actor.aux_safe_stride_coef = 0.1
+    actor.tread_depth_min = 0.25
+    actor.tread_depth_max = 0.35
+    actor.riser_height_min = 0.088
+    actor.riser_height_max = 0.25
+    actor.safe_stride_min = 0.08
+    actor.safe_stride_max = 0.45
+    actor.get_aux_outputs = lambda: {
+        "stair_shape": torch.tensor([
+            [0.30, 0.18],
+            [0.35, 0.18],
+            [0.40, 0.18],
+            [0.30, 0.18],
+        ]),
+        "safe_stride": torch.tensor([[0.40], [0.20], [0.20], [0.20]]),
+    }
+    actor.get_slow_latent_diagnostics = lambda: {}
+    labels = torch.tensor([
+        [0.0, 1.0, 0.10, 0.18, 1.0, 0.50, 1.0],
+        [0.0, 1.0, 0.30, 0.30, 1.0, 0.20, 1.0],
+        [0.0, 1.0, 0.60, 0.18, 0.0, 0.50, 1.0],
+        [0.0, 1.0, 0.30, 0.18, 1.0, 0.60, 0.0],
+    ])
+    labels_before = labels.clone()
+    observations = TensorDict({"latent_labels": labels}, batch_size=[NUM_ENVS])
+
+    _loss, logs = alg._compute_slow_latent_aux_loss(
+        RolloutStorage.Batch(observations=observations, hidden_states=(None, None))
+    )
+
+    torch.testing.assert_close(labels, labels_before)
+    assert logs["slow_latent_tread_depth_out_of_range_label_ratio"] == pytest.approx(1 / 3)
+    assert logs["slow_latent_riser_height_out_of_range_label_ratio"] == pytest.approx(1 / 3)
+    assert logs["slow_latent_safe_stride_out_of_range_label_ratio"] == pytest.approx(2 / 3)
+    assert logs["slow_latent_safe_stride_gt_tread_hat_ratio"] == pytest.approx(0.5)
 
 
 def test_mean_huber_guidance_applies_loss_cap() -> None:
