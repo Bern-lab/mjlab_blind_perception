@@ -56,7 +56,7 @@
     <link rel="search" title="Search" href="../../../search.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-    <meta name="docbuild:last-update" content="Jun 22, 2026"/>
+    <meta name="docbuild:last-update" content="Jun 23, 2026"/>
   </head>
   
   
@@ -493,9 +493,9 @@ document.write(`
 <span class="w">  </span><span class="sd">&quot;&quot;&quot;Hold update rate for continuously refreshed geometry/stride memory.&quot;&quot;&quot;</span>
   <span class="n">write_steps</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">2</span>
 <span class="w">  </span><span class="sd">&quot;&quot;&quot;Number of steps to stay in STAIR_WRITE mode.&quot;&quot;&quot;</span>
-  <span class="n">min_stair_steps</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">50</span>
+  <span class="n">min_stair_steps</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">30</span>
 <span class="w">  </span><span class="sd">&quot;&quot;&quot;Minimum steps in STAIR_MEMORY before exit is allowed.&quot;&quot;&quot;</span>
-  <span class="n">exit_steps</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">100</span>
+  <span class="n">exit_steps</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">40</span>
 <span class="w">  </span><span class="sd">&quot;&quot;&quot;Consecutive no-event steps required to exit STAIR_MEMORY.&quot;&quot;&quot;</span>
   <span class="n">cooldown_steps</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">15</span>
 <span class="w">  </span><span class="sd">&quot;&quot;&quot;Cooldown steps after exiting STAIR_MEMORY before re-triggering.&quot;&quot;&quot;</span>
@@ -505,16 +505,26 @@ document.write(`
 <span class="w">  </span><span class="sd">&quot;&quot;&quot;p_event threshold to trigger STAIR_WRITE.&quot;&quot;&quot;</span>
   <span class="n">event_off_threshold</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.4</span>
 <span class="w">  </span><span class="sd">&quot;&quot;&quot;p_event threshold for no-event counting.&quot;&quot;&quot;</span>
-  <span class="n">stair_off_threshold</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.4</span>
+  <span class="n">stair_on_threshold</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.1</span>
+<span class="w">  </span><span class="sd">&quot;&quot;&quot;p_stair threshold required to confirm STAIR_WRITE into STAIR_MEMORY.&quot;&quot;&quot;</span>
+  <span class="n">stair_off_threshold</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.1</span>
 <span class="w">  </span><span class="sd">&quot;&quot;&quot;p_stair threshold to allow exit from STAIR_MEMORY.&quot;&quot;&quot;</span>
 
   <span class="c1"># ---- Auxiliary loss ----</span>
-  <span class="n">aux_future_collision_coef</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.05</span>
-<span class="w">  </span><span class="sd">&quot;&quot;&quot;Weight for future toe-riser collision BCE loss.&quot;&quot;&quot;</span>
+  <span class="n">aux_future_collision_risk_coef</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.03</span>
+<span class="w">  </span><span class="sd">&quot;&quot;&quot;Weight for continuous future collision-risk Huber loss.&quot;&quot;&quot;</span>
+  <span class="n">aux_future_safe_landing_quality_coef</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.03</span>
+<span class="w">  </span><span class="sd">&quot;&quot;&quot;Weight for continuous next-touchdown quality Huber loss.&quot;&quot;&quot;</span>
   <span class="n">aux_event_coef</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.03</span>
 <span class="w">  </span><span class="sd">&quot;&quot;&quot;Weight for current toe-riser event BCE loss.&quot;&quot;&quot;</span>
-  <span class="n">aux_stair_coef</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span>
-<span class="w">  </span><span class="sd">&quot;&quot;&quot;Weight for stair state BCE loss (0.0 = disabled in v1).&quot;&quot;&quot;</span>
+  <span class="n">aux_event_pos_weight</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">100.0</span>
+<span class="w">  </span><span class="sd">&quot;&quot;&quot;Positive-class weight for the sparse stair-entry event BCE loss.&quot;&quot;&quot;</span>
+  <span class="n">event_label_window_steps</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">5</span>
+<span class="w">  </span><span class="sd">&quot;&quot;&quot;Number of frames over which one-shot stair-entry event labels stay positive.&quot;&quot;&quot;</span>
+  <span class="n">aux_stair_coef</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.05</span>
+<span class="w">  </span><span class="sd">&quot;&quot;&quot;Weight for stair state BCE loss.&quot;&quot;&quot;</span>
+  <span class="n">aux_stair_pos_weight</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">3.0</span>
+<span class="w">  </span><span class="sd">&quot;&quot;&quot;Positive-class weight for stair-state BCE loss.&quot;&quot;&quot;</span>
   <span class="n">aux_stair_shape_coef</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.03</span>
 <span class="w">  </span><span class="sd">&quot;&quot;&quot;Weight for masked tread-depth/riser-height Huber loss.&quot;&quot;&quot;</span>
   <span class="n">aux_safe_stride_coef</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.03</span>
@@ -527,8 +537,16 @@ document.write(`
 <span class="w">  </span><span class="sd">&quot;&quot;&quot;Minimum decoded safe-stride lower bound, in meters.&quot;&quot;&quot;</span>
   <span class="n">safe_stride_max</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.45</span>
 <span class="w">  </span><span class="sd">&quot;&quot;&quot;Maximum decoded safe-stride lower bound, in meters.&quot;&quot;&quot;</span>
-  <span class="n">future_collision_horizon</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">20</span>
-<span class="w">  </span><span class="sd">&quot;&quot;&quot;Future window (steps) for the collision prediction label.&quot;&quot;&quot;</span>
+  <span class="n">future_risk_weight_scale</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">2.0</span>
+<span class="w">  </span><span class="sd">&quot;&quot;&quot;Extra Huber weight applied in proportion to the risk label.&quot;&quot;&quot;</span>
+  <span class="n">future_quality_weight_scale</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">2.0</span>
+<span class="w">  </span><span class="sd">&quot;&quot;&quot;Extra Huber weight applied in proportion to the quality label.&quot;&quot;&quot;</span>
+  <span class="n">future_risk_huber_delta</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.1</span>
+<span class="w">  </span><span class="sd">&quot;&quot;&quot;Huber transition point for normalized future risk.&quot;&quot;&quot;</span>
+  <span class="n">future_quality_huber_delta</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.1</span>
+<span class="w">  </span><span class="sd">&quot;&quot;&quot;Huber transition point for normalized next-touchdown quality.&quot;&quot;&quot;</span>
+  <span class="n">future_horizon</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">20</span>
+<span class="w">  </span><span class="sd">&quot;&quot;&quot;Future window for maximum risk and first-touchdown quality labels.&quot;&quot;&quot;</span>
 
   <span class="c1"># ---- MLP encoder ----</span>
   <span class="n">mlp_encoder_dims</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="mi">128</span><span class="p">,</span> <span class="mi">128</span><span class="p">)</span>
@@ -783,7 +801,7 @@ By The mjlab Developers
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Jun 22, 2026.
+  Last updated on Jun 23, 2026.
   <br/>
 </p>
   </div>

@@ -61,9 +61,12 @@ Changed
 
 - Slow-latent stair geometry and safe-stride heads now decode to physical ranges
   in meters and are exported as explicit ONNX outputs without changing the actor
-  control input. Stair depth is fixed to 0.25--0.35 m and riser height to the
-  bounded to 0.088--0.25 m. Label range violations are logged without clamping
-  supervision targets.
+  control input. Stair depth is fixed to 0.25--0.35 m and riser height is bounded
+  to 0.088--0.25 m. Label range violations are logged without clamping targets.
+- Replaced the slow-latent future-entry proxy with independent continuous
+  collision-risk and next-touchdown-quality heads. Stage-2 landing shaping now
+  increases smoothly with sole support, landing-center accuracy, and edge
+  clearance while retaining the 60% state-machine memory-valid threshold.
 - Slow-latent stair entry now starts from a heading-gated first-riser contact and
   advances to stair-following only after the opposite foot safely lands on the
   second tread with at least 60% sole support. The state machine records the
@@ -81,6 +84,15 @@ Changed
   lower-bound head and PPO loss. The persistent latent now reserves separate
   state/timing and geometry/stride channels, using hold update rates of 0.01
   and 0.05 respectively in training and exported ONNX policies.
+- Added slow-latent stair/env phase mismatch diagnostics, trajectory-level
+  write/memory entry metrics, and shorter default memory-exit timing for
+  diagnosing stale stair memory after leaving stairs.
+- Slow-latent stair memory now requires stair-state confirmation before
+  promoting a sparse entry event from write mode into persistent memory,
+  reducing false stair-memory holds on flat ground.
+- Slow-latent stair following now exits through a two-flat-touchdown
+  confirmation instead of resetting immediately after passing the last stair
+  boundary, making the stair-to-flat transition state explicit.
 - G1 high-stair curriculum tasks now enable mixed terrain replay after
   reaching high levels, sampling low/mid/high stair rows at a 20/30/50 ratio.
 - G1 high-stair terrains now randomize stair step depth per tile from
