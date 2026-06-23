@@ -90,9 +90,9 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """Hold update rate for continuously refreshed geometry/stride memory."""
   write_steps: int = 2
   """Number of steps to stay in STAIR_WRITE mode."""
-  min_stair_steps: int = 50
+  min_stair_steps: int = 30
   """Minimum steps in STAIR_MEMORY before exit is allowed."""
-  exit_steps: int = 100
+  exit_steps: int = 40
   """Consecutive no-event steps required to exit STAIR_MEMORY."""
   cooldown_steps: int = 15
   """Cooldown steps after exiting STAIR_MEMORY before re-triggering."""
@@ -102,16 +102,26 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """p_event threshold to trigger STAIR_WRITE."""
   event_off_threshold: float = 0.4
   """p_event threshold for no-event counting."""
-  stair_off_threshold: float = 0.4
+  stair_on_threshold: float = 0.1
+  """p_stair threshold required to confirm STAIR_WRITE into STAIR_MEMORY."""
+  stair_off_threshold: float = 0.1
   """p_stair threshold to allow exit from STAIR_MEMORY."""
 
   # ---- Auxiliary loss ----
-  aux_future_collision_coef: float = 0.05
-  """Weight for future toe-riser collision BCE loss."""
+  aux_future_collision_risk_coef: float = 0.03
+  """Weight for continuous future collision-risk Huber loss."""
+  aux_future_safe_landing_quality_coef: float = 0.03
+  """Weight for continuous next-touchdown quality Huber loss."""
   aux_event_coef: float = 0.03
   """Weight for current toe-riser event BCE loss."""
-  aux_stair_coef: float = 0.0
-  """Weight for stair state BCE loss (0.0 = disabled in v1)."""
+  aux_event_pos_weight: float = 100.0
+  """Positive-class weight for the sparse stair-entry event BCE loss."""
+  event_label_window_steps: int = 5
+  """Number of frames over which one-shot stair-entry event labels stay positive."""
+  aux_stair_coef: float = 0.05
+  """Weight for stair state BCE loss."""
+  aux_stair_pos_weight: float = 3.0
+  """Positive-class weight for stair-state BCE loss."""
   aux_stair_shape_coef: float = 0.03
   """Weight for masked tread-depth/riser-height Huber loss."""
   aux_safe_stride_coef: float = 0.03
@@ -124,8 +134,16 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """Minimum decoded safe-stride lower bound, in meters."""
   safe_stride_max: float = 0.45
   """Maximum decoded safe-stride lower bound, in meters."""
-  future_collision_horizon: int = 20
-  """Future window (steps) for the collision prediction label."""
+  future_risk_weight_scale: float = 2.0
+  """Extra Huber weight applied in proportion to the risk label."""
+  future_quality_weight_scale: float = 2.0
+  """Extra Huber weight applied in proportion to the quality label."""
+  future_risk_huber_delta: float = 0.1
+  """Huber transition point for normalized future risk."""
+  future_quality_huber_delta: float = 0.1
+  """Huber transition point for normalized next-touchdown quality."""
+  future_horizon: int = 20
+  """Future window for maximum risk and first-touchdown quality labels."""
 
   # ---- MLP encoder ----
   mlp_encoder_dims: tuple[int, ...] = (128, 128)

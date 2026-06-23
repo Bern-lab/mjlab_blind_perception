@@ -331,6 +331,7 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
     "stair_state",
     "stair_shape",
     "safe_stride",
+    "future_events",
   )
   assert "reset_stair_latent_cache" in env_cfg.events
   assert rl_cfg.obs_groups["actor"] == ("actor",)
@@ -354,6 +355,7 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert toe_reward_params["stair_touchdown_lip_clearance"] == 0.02
   assert toe_reward_params["stair_touchdown_lip_height_band"] == 0.06
   assert toe_reward_params["stair_following_timeout"] == 1.50
+  assert toe_reward_params["collision_risk_margin"] == 0.06
   assert not any("probe" in name for name in toe_reward_params)
   assert toe_reward_params["ground_contact_sensor_name"] == "feet_ground_contact"
   foot_gait = env_cfg.rewards["foot_gait"]
@@ -370,8 +372,7 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
     "left_ankle_roll_link",
     "right_ankle_roll_link",
   )
-  assert landing_reward.params["short_penalty_scale"] == 0.40
-  assert landing_reward.params["over_front_penalty_scale"] == 0.60
+  assert landing_reward.params["support_deficit_scale"] == 0.40
   latent_labels = env_cfg.observations["latent_labels"]
   assert all(term.params == {} for term in latent_labels.terms.values())
   toe_sensor_cfg = cast(
@@ -391,8 +392,17 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert actor_cfg.alpha_hold_state == 0.01
   assert actor_cfg.alpha_hold_shape == 0.05
   assert actor_cfg.aux_event_coef == 0.03
-  assert actor_cfg.aux_stair_coef == 0.02
-  assert actor_cfg.aux_future_collision_coef == 0.05
+  assert actor_cfg.aux_event_pos_weight == 100.0
+  assert actor_cfg.event_label_window_steps == 5
+  assert actor_cfg.min_stair_steps == 30
+  assert actor_cfg.exit_steps == 40
+  assert actor_cfg.stair_on_threshold == 0.1
+  assert actor_cfg.stair_off_threshold == 0.1
+  assert actor_cfg.aux_stair_coef == 0.05
+  assert actor_cfg.aux_stair_pos_weight == 3.0
+  assert actor_cfg.aux_future_collision_risk_coef == 0.03
+  assert actor_cfg.aux_future_safe_landing_quality_coef == 0.03
+  assert actor_cfg.future_horizon == 20
   assert actor_cfg.aux_stair_shape_coef == 0.03
   assert actor_cfg.aux_safe_stride_coef == 0.03
   assert actor_cfg.stair_shape_huber_delta == 0.05
@@ -566,8 +576,16 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
       mlp_encoder_dims=(64,),
       alpha_hold_state=0.006,
       alpha_hold_shape=0.07,
+      stair_on_threshold=0.2,
+      stair_off_threshold=0.05,
+      aux_event_pos_weight=42.0,
+      event_label_window_steps=7,
       aux_stair_coef=0.7,
+      aux_stair_pos_weight=4.0,
       aux_safe_stride_coef=0.11,
+      aux_future_collision_risk_coef=0.12,
+      aux_future_safe_landing_quality_coef=0.13,
+      future_horizon=18,
       safe_stride_min=0.10,
       safe_stride_max=0.42,
     ),
@@ -587,8 +605,16 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
   assert actor_cfg.mlp_encoder_dims == (64,)
   assert actor_cfg.alpha_hold_state == 0.006
   assert actor_cfg.alpha_hold_shape == 0.07
+  assert actor_cfg.stair_on_threshold == 0.2
+  assert actor_cfg.stair_off_threshold == 0.05
+  assert actor_cfg.aux_event_pos_weight == 42.0
+  assert actor_cfg.event_label_window_steps == 7
   assert actor_cfg.aux_stair_coef == 0.7
+  assert actor_cfg.aux_stair_pos_weight == 4.0
   assert actor_cfg.aux_safe_stride_coef == 0.11
+  assert actor_cfg.aux_future_collision_risk_coef == 0.12
+  assert actor_cfg.aux_future_safe_landing_quality_coef == 0.13
+  assert actor_cfg.future_horizon == 18
   assert actor_cfg.safe_stride_min == 0.10
   assert actor_cfg.safe_stride_max == 0.42
 

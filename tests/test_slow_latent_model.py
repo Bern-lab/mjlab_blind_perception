@@ -75,7 +75,8 @@ def test_slow_latent_actor_forward_updates_state_and_aux_outputs() -> None:
   assert hidden_state[3].shape == (1, 4, 1)
   assert aux["event_logit"].shape == (4, 1)
   assert aux["stair_logit"].shape == (4, 1)
-  assert aux["future_collision_logit"].shape == (4, 1)
+  assert aux["future_collision_risk_logit"].shape == (4, 1)
+  assert aux["future_safe_landing_quality_logit"].shape == (4, 1)
   assert aux["stair_shape"].shape == (4, 2)
   assert aux["safe_stride"].shape == (4, 1)
   assert torch.all(
@@ -89,11 +90,15 @@ def test_slow_latent_actor_forward_updates_state_and_aux_outputs() -> None:
   diagnostics = model.get_slow_latent_diagnostics()
   assert diagnostics["event_prob"].shape == (4, 1)
   assert diagnostics["stair_prob"].shape == (4, 1)
-  assert diagnostics["future_prob"].shape == (4, 1)
+  assert diagnostics["future_risk"].shape == (4, 1)
+  assert diagnostics["future_quality"].shape == (4, 1)
   assert diagnostics["stair_shape"].shape == (4, 2)
   assert diagnostics["safe_stride"].shape == (4, 1)
   assert diagnostics["z_norm"].shape == (4, 1)
   assert diagnostics["gate_mode"].shape == (4, 1)
+  assert diagnostics["gate_memory_age"].shape == (4, 1)
+  assert diagnostics["episode_write_ever"].shape == (4, 1)
+  assert diagnostics["episode_memory_ever"].shape == (4, 1)
   assert diagnostics["alpha"].shape == (4, 5)
   assert diagnostics["alpha_state"].shape == (4, 1)
   assert diagnostics["alpha_shape"].shape == (4, 1)
@@ -112,6 +117,28 @@ def test_stair_memory_uses_distinct_state_and_shape_hold_rates() -> None:
 
   torch.testing.assert_close(alpha[:, :2], torch.full((2, 2), 0.01))
   torch.testing.assert_close(alpha[:, 2:], torch.full((2, 3), 0.05))
+
+
+def test_stair_write_requires_stair_probability_to_enter_memory() -> None:
+  model = _make_model()
+  gate = torch.zeros(2, 5)
+
+  gate, _alpha = model._advance_gate_state(
+    event_prob=torch.ones(2, 1),
+    stair_prob=torch.zeros(2, 1),
+    gate_state=gate,
+  )
+  torch.testing.assert_close(gate[:, 0], torch.full((2,), 1.0))
+
+  gate, _alpha = model._advance_gate_state(
+    event_prob=torch.zeros(2, 1),
+    stair_prob=torch.tensor([[0.05], [0.2]]),
+    gate_state=gate,
+  )
+
+  assert gate[0, 0].item() == 0.0
+  assert gate[0, 4].item() == pytest.approx(model.cooldown_steps)
+  assert gate[1, 0].item() == 2.0
 
 
 def test_safe_stride_output_bounds_must_be_ordered() -> None:
@@ -247,7 +274,8 @@ def test_onnx_wrapper_exposes_gated_slow_latent_state() -> None:
     "gate_state_out",
     "event_prob",
     "stair_prob",
-    "future_collision_prob",
+    "future_collision_risk",
+    "future_safe_landing_quality",
     "stair_shape",
     "safe_stride",
   ]
@@ -258,11 +286,13 @@ def test_onnx_wrapper_exposes_gated_slow_latent_state() -> None:
   assert outputs[2].shape == (1, 1, 7)
   assert outputs[3].shape == (1, 5)
   assert outputs[4].shape == (1, 5)
-  assert outputs[8].shape == (1, 2)
-  assert outputs[9].shape == (1, 1)
-  assert torch.all((0.25 <= outputs[8][..., 0]) & (outputs[8][..., 0] <= 0.35))
-  assert torch.all((0.088 <= outputs[8][..., 1]) & (outputs[8][..., 1] <= 0.25))
-  assert torch.all((0.08 <= outputs[9]) & (outputs[9] <= 0.45))
+  assert outputs[7].shape == (1, 1)
+  assert outputs[8].shape == (1, 1)
+  assert outputs[9].shape == (1, 2)
+  assert outputs[10].shape == (1, 1)
+  assert torch.all((0.25 <= outputs[9][..., 0]) & (outputs[9][..., 0] <= 0.35))
+  assert torch.all((0.088 <= outputs[9][..., 1]) & (outputs[9][..., 1] <= 0.25))
+  assert torch.all((0.08 <= outputs[10]) & (outputs[10] <= 0.45))
 
 
 def test_slow_latent_export_metadata() -> None:

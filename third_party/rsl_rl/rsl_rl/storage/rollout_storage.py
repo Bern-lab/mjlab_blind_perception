@@ -262,6 +262,7 @@ class RolloutStorage:
         if self.training_type != "rl":
             raise ValueError("This function is only available for reinforcement learning training.")
         padded_obs_trajectories, trajectory_masks = split_and_pad_trajectories(self.observations, self.dones)
+        padded_dones, _ = split_and_pad_trajectories(self.dones, self.dones)
         mini_batch_size = self.num_envs // num_mini_batches
 
         for ep in range(num_epochs):
@@ -323,6 +324,7 @@ class RolloutStorage:
                     old_distribution_params=tuple(p[:, start:stop] for p in self.distribution_params),  # type: ignore
                     hidden_states=(hidden_state_a_batch, hidden_state_c_batch),  # type: ignore
                     masks=trajectory_masks[:, first_traj:last_traj],
+                    dones=padded_dones[:, first_traj:last_traj],
                 )
 
                 first_traj = last_traj

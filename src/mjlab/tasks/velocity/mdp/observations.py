@@ -11,6 +11,9 @@ from mjlab.utils.lab_api.math import quat_apply, quat_apply_inverse
 
 from .rewards import _current_step_boundaries
 from .stair_geometry import (
+  COLLISION_RISK_KEY,
+  LANDING_QUALITY_KEY,
+  LANDING_TOUCHDOWN_KEY,
   SAFE_STRIDE_VALID_KEY,
   SAFE_TREAD_LOWER_BOUND_KEY,
   STAIR_ENTRY_EVENT_KEY,
@@ -422,6 +425,17 @@ def safe_stride_label(env: ManagerBasedRlEnv) -> torch.Tensor:
   if safe_stride is None or safe_stride_valid is None:
     return torch.zeros(env.num_envs, 2, device=env.device)
   return torch.stack([safe_stride, safe_stride_valid.float()], dim=-1)
+
+
+def stair_future_event_labels(env: ManagerBasedRlEnv) -> torch.Tensor:
+  """Privileged ``[collision_risk, touchdown, landing_quality]`` labels."""
+  zeros = torch.zeros(env.num_envs, device=env.device)
+  collision_risk = env.extras.get(COLLISION_RISK_KEY, zeros)
+  touchdown = env.extras.get(LANDING_TOUCHDOWN_KEY, zeros)
+  landing_quality = env.extras.get(LANDING_QUALITY_KEY, zeros)
+  return torch.stack(
+    [collision_risk.float(), touchdown.float(), landing_quality.float()], dim=-1
+  )
 
 
 # ======================================================================

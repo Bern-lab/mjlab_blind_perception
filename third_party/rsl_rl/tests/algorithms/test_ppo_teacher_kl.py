@@ -83,9 +83,13 @@ def test_slow_latent_diagnostics_are_logged() -> None:
         return {
             "event_prob": torch.tensor([[0.2], [0.8]]),
             "stair_prob": torch.tensor([[0.3], [0.7]]),
-            "future_prob": torch.tensor([[0.4], [0.6]]),
+            "future_risk": torch.tensor([[0.4], [0.6]]),
+            "future_quality": torch.tensor([[0.7], [0.3]]),
             "z_norm": torch.tensor([[1.0], [3.0]]),
             "gate_mode": torch.tensor([[0.0], [1.0], [2.0], [2.0]]),
+            "gate_memory_age": torch.tensor([[0.0], [0.0], [4.0], [10.0]]),
+            "episode_write_ever": torch.tensor([[1.0], [0.0]]),
+            "episode_memory_ever": torch.tensor([[1.0], [1.0]]),
             "alpha": torch.tensor([[0.3, 0.3], [0.8, 0.8], [0.01, 0.05]]),
             "alpha_state": torch.tensor([[0.3], [0.8], [0.01]]),
             "alpha_shape": torch.tensor([[0.3], [0.8], [0.05]]),
@@ -97,16 +101,202 @@ def test_slow_latent_diagnostics_are_logged() -> None:
 
     assert logs["slow_latent_event_prob_mean"] == pytest.approx(0.5)
     assert logs["slow_latent_stair_prob_mean"] == pytest.approx(0.5)
-    assert logs["slow_latent_future_prob_mean"] == pytest.approx(0.5)
+    assert logs["slow_latent_future_collision_risk_mean"] == pytest.approx(0.5)
+    assert logs["slow_latent_future_safe_landing_quality_mean"] == pytest.approx(0.5)
+    assert logs["slow_latent_future_risk_quality_overlap_mean"] == pytest.approx(0.23)
     assert logs["slow_latent_z_norm_mean"] == pytest.approx(2.0)
     assert logs["slow_latent_z_norm_max"] == pytest.approx(3.0)
     assert logs["slow_latent_mode_normal_count"] == pytest.approx(1.0)
     assert logs["slow_latent_mode_write_count"] == pytest.approx(1.0)
     assert logs["slow_latent_mode_memory_count"] == pytest.approx(2.0)
+    assert logs["slow_latent_episode_write_ever_ratio"] == pytest.approx(0.5)
+    assert logs["slow_latent_episode_memory_ever_ratio"] == pytest.approx(1.0)
+    assert logs["slow_latent_memory_age_mean"] == pytest.approx(7.0)
+    assert logs["slow_latent_memory_age_p90"] == pytest.approx(9.4)
     assert logs["slow_latent_alpha_min"] == pytest.approx(0.01)
     assert logs["slow_latent_alpha_max"] == pytest.approx(0.8)
     assert logs["slow_latent_alpha_state_mean"] == pytest.approx(0.37)
     assert logs["slow_latent_alpha_shape_mean"] == pytest.approx(0.3833333)
+
+
+def test_future_labels_use_max_risk_and_first_touchdown_quality() -> None:
+    """Risk uses the worst frame while quality uses the first future touchdown."""
+    alg = _build_teacher_kl({"enabled": False})
+    risk_now = torch.tensor([0.0, 0.2, 0.8, 0.1, 0.0]).view(5, 1, 1)
+    touchdown_now = torch.tensor([0.0, 0.0, 1.0, 1.0, 0.0]).view(5, 1, 1)
+    quality_now = torch.tensor([0.0, 0.0, 0.4, 0.9, 0.0]).view(5, 1, 1)
+
+    future_risk = alg._compute_future_max_labels(risk_now, None, horizon=3)
+    future_quality, found = alg._compute_future_first_touchdown_quality(
+        touchdown_now,
+        quality_now,
+        None,
+        horizon=3,
+    )
+
+    assert future_risk[:, 0, 0].tolist() == pytest.approx([0.8, 0.8, 0.1, 0.0, 0.0])
+    assert future_quality[:, 0, 0].tolist() == pytest.approx([0.4, 0.4, 0.9, 0.0, 0.0])
+    assert found[:, 0, 0].tolist() == pytest.approx([1.0, 1.0, 1.0, 0.0, 0.0])
+
+
+def test_continuous_future_aux_losses_use_future_labels() -> None:
+    """Future heads should regress worst risk and first-touchdown quality."""
+    alg = _build_teacher_kl({"enabled": False})
+    actor = cast(Any, alg.actor)
+    actor.aux_event_coef = 0.0
+    actor.aux_stair_coef = 0.0
+    actor.aux_future_collision_risk_coef = 0.1
+    actor.aux_future_safe_landing_quality_coef = 0.1
+    actor.aux_stair_shape_coef = 0.0
+    actor.aux_safe_stride_coef = 0.0
+    actor.future_horizon = 2
+    actor.future_risk_weight_scale = 2.0
+    actor.future_quality_weight_scale = 2.0
+    actor.future_risk_huber_delta = 0.1
+    actor.future_quality_huber_delta = 0.1
+    actor.get_aux_outputs = lambda: {
+        "future_collision_risk_logit": torch.zeros(4, 1, 1),
+        "future_safe_landing_quality_logit": torch.zeros(4, 1, 1),
+    }
+    actor.get_slow_latent_diagnostics = lambda: {}
+
+    labels = torch.zeros(4, 1, 10)
+    labels[:, 0, 7] = torch.tensor([0.0, 0.2, 0.8, 0.0])
+    labels[:, 0, 8] = torch.tensor([0.0, 0.0, 1.0, 0.0])
+    labels[:, 0, 9] = torch.tensor([0.0, 0.0, 0.6, 0.0])
+    observations = TensorDict({"latent_labels": labels}, batch_size=[4, 1])
+
+    loss, logs = alg._compute_slow_latent_aux_loss(
+        RolloutStorage.Batch(observations=observations, hidden_states=(None, None))
+    )
+
+    assert loss.item() > 0.0
+    assert logs["slow_latent_future_collision_risk_label_mean"] == pytest.approx(0.4)
+    assert logs["slow_latent_future_safe_landing_quality_label_mean"] == pytest.approx(0.3)
+    assert logs["slow_latent_future_touchdown_found_ratio"] == pytest.approx(0.5)
+    assert logs["slow_latent_first_touchdown_quality_mean"] == pytest.approx(0.6)
+
+
+def test_event_aux_logs_threshold_crossing_and_recall() -> None:
+    """Event diagnostics should expose the write-threshold crossing behavior."""
+    alg = _build_teacher_kl({"enabled": False})
+    actor = cast(Any, alg.actor)
+    actor.aux_event_coef = 0.1
+    actor.aux_stair_coef = 0.0
+    actor.aux_future_collision_risk_coef = 0.0
+    actor.aux_future_safe_landing_quality_coef = 0.0
+    actor.aux_stair_shape_coef = 0.0
+    actor.aux_safe_stride_coef = 0.0
+    actor.event_on_threshold = 0.6
+    event_prob = torch.tensor([[0.2], [0.7], [0.5], [0.8]])
+    actor.get_aux_outputs = lambda: {"event_logit": torch.logit(event_prob)}
+    actor.get_slow_latent_diagnostics = lambda: {}
+    labels = torch.zeros(4, 10)
+    labels[:, 0] = torch.tensor([0.0, 1.0, 1.0, 0.0])
+    observations = TensorDict({"latent_labels": labels}, batch_size=[NUM_ENVS])
+
+    loss, logs = alg._compute_slow_latent_aux_loss(
+        RolloutStorage.Batch(observations=observations, hidden_states=(None, None))
+    )
+
+    assert loss.item() > 0.0
+    assert logs["slow_latent_event_label_mean"] == pytest.approx(0.5)
+    assert logs["slow_latent_event_label_positive_ratio"] == pytest.approx(0.5)
+    assert logs["slow_latent_event_prob_max"] == pytest.approx(0.8)
+    assert logs["slow_latent_event_prob_p99"] == pytest.approx(0.797)
+    assert logs["slow_latent_event_prob_gt_on_threshold_ratio"] == pytest.approx(0.5)
+    assert logs["slow_latent_event_prob_gt_0p6_ratio"] == pytest.approx(0.5)
+    assert logs["slow_latent_event_prob_gt_0p4_ratio"] == pytest.approx(0.75)
+    assert logs["slow_latent_event_prob_pos_mean"] == pytest.approx(0.6)
+    assert logs["slow_latent_event_prob_neg_mean"] == pytest.approx(0.5)
+    assert logs["slow_latent_event_recall_at_0p6"] == pytest.approx(0.5)
+    assert logs["slow_latent_event_precision_at_0p6"] == pytest.approx(0.5)
+
+
+def test_event_aux_expands_sparse_labels_and_uses_positive_weight() -> None:
+    """Sparse one-frame events should train over a short positive window."""
+    alg = _build_teacher_kl({"enabled": False})
+    actor = cast(Any, alg.actor)
+    actor.aux_event_coef = 0.1
+    actor.aux_event_pos_weight = 10.0
+    actor.event_label_window_steps = 3
+    actor.aux_stair_coef = 0.0
+    actor.aux_future_collision_risk_coef = 0.0
+    actor.aux_future_safe_landing_quality_coef = 0.0
+    actor.aux_stair_shape_coef = 0.0
+    actor.aux_safe_stride_coef = 0.0
+    actor.event_on_threshold = 0.6
+    event_prob = torch.tensor([0.1, 0.7, 0.8, 0.2, 0.1]).view(5, 1, 1)
+    actor.get_aux_outputs = lambda: {"event_logit": torch.logit(event_prob)}
+    actor.get_slow_latent_diagnostics = lambda: {}
+    labels = torch.zeros(5, 1, 10)
+    labels[1, 0, 0] = 1.0
+    observations = TensorDict({"latent_labels": labels}, batch_size=[5, 1])
+
+    loss, logs = alg._compute_slow_latent_aux_loss(
+        RolloutStorage.Batch(observations=observations, hidden_states=(None, None))
+    )
+
+    assert loss.item() > 0.0
+    assert logs["slow_latent_event_pos_weight"] == pytest.approx(10.0)
+    assert logs["slow_latent_event_label_window_steps"] == pytest.approx(3.0)
+    assert logs["slow_latent_event_raw_label_mean"] == pytest.approx(0.2)
+    assert logs["slow_latent_event_label_mean"] == pytest.approx(0.6)
+    assert logs["slow_latent_event_prob_gt_0p6_ratio"] == pytest.approx(0.4)
+    assert logs["slow_latent_event_raw_recall_at_0p6"] == pytest.approx(1.0)
+    assert logs["slow_latent_event_recall_at_0p6"] == pytest.approx(2 / 3)
+    assert logs["slow_latent_event_precision_at_0p6"] == pytest.approx(1.0)
+
+
+def test_stair_aux_logs_phase_mismatch_and_uses_positive_weight() -> None:
+    """Stair-state aux loss should expose latent/env phase disagreement."""
+    alg = _build_teacher_kl({"enabled": False})
+    actor = cast(Any, alg.actor)
+    actor.aux_event_coef = 0.0
+    actor.aux_stair_coef = 0.1
+    actor.aux_stair_pos_weight = 3.0
+    actor.aux_future_collision_risk_coef = 0.0
+    actor.aux_future_safe_landing_quality_coef = 0.0
+    actor.aux_stair_shape_coef = 0.0
+    actor.aux_safe_stride_coef = 0.0
+
+    stair_prob = torch.tensor([[0.1], [0.8], [0.7], [0.2]])
+    actor.get_aux_outputs = lambda: {"stair_logit": torch.logit(stair_prob)}
+    actor.get_slow_latent_diagnostics = lambda: {
+        "gate_mode": torch.tensor([[2.0], [0.0], [2.0], [1.0]]),
+    }
+    labels = torch.zeros(4, 10)
+    labels[:, 1] = torch.tensor([0.0, 1.0, 1.0, 0.0])
+    dones = torch.tensor([[1.0], [0.0], [1.0], [0.0]])
+    observations = TensorDict({"latent_labels": labels}, batch_size=[NUM_ENVS])
+
+    loss, logs = alg._compute_slow_latent_aux_loss(
+        RolloutStorage.Batch(
+            observations=observations,
+            hidden_states=(None, None),
+            dones=dones,
+        )
+    )
+
+    assert loss.item() > 0.0
+    assert logs["slow_latent_stair_pos_weight"] == pytest.approx(3.0)
+    assert logs["slow_latent_stair_on_threshold"] == pytest.approx(0.1)
+    assert logs["slow_latent_stair_label_mean"] == pytest.approx(0.5)
+    assert logs["slow_latent_stair_prob_pos_mean"] == pytest.approx(0.75)
+    assert logs["slow_latent_stair_prob_neg_mean"] == pytest.approx(0.15)
+    assert logs["slow_latent_stair_prob_gt_on_threshold_ratio"] == pytest.approx(
+        0.75
+    )
+    assert logs["slow_latent_memory_while_env_normal_ratio"] == pytest.approx(0.25)
+    assert logs["slow_latent_write_while_env_normal_ratio"] == pytest.approx(0.25)
+    assert logs["slow_latent_env_stair_while_latent_normal_ratio"] == pytest.approx(
+        0.25
+    )
+    assert logs["slow_latent_memory_while_env_stair_ratio"] == pytest.approx(0.25)
+    assert logs["slow_latent_done_while_memory_ratio"] == pytest.approx(0.5)
+    assert logs["slow_latent_done_while_env_normal_memory_ratio"] == pytest.approx(
+        0.25
+    )
 
 
 def test_safe_stride_aux_loss_uses_seventh_label_as_valid_mask() -> None:
@@ -115,7 +305,8 @@ def test_safe_stride_aux_loss_uses_seventh_label_as_valid_mask() -> None:
     actor = cast(Any, alg.actor)
     actor.aux_event_coef = 0.0
     actor.aux_stair_coef = 0.0
-    actor.aux_future_collision_coef = 0.0
+    actor.aux_future_collision_risk_coef = 0.0
+    actor.aux_future_safe_landing_quality_coef = 0.0
     actor.aux_stair_shape_coef = 0.0
     actor.aux_safe_stride_coef = 0.5
     actor.safe_stride_huber_delta = 0.05
@@ -149,7 +340,8 @@ def test_stair_label_range_metrics_do_not_clamp_labels() -> None:
     actor = cast(Any, alg.actor)
     actor.aux_event_coef = 0.0
     actor.aux_stair_coef = 0.0
-    actor.aux_future_collision_coef = 0.0
+    actor.aux_future_collision_risk_coef = 0.0
+    actor.aux_future_safe_landing_quality_coef = 0.0
     actor.aux_stair_shape_coef = 0.1
     actor.aux_safe_stride_coef = 0.1
     actor.tread_depth_min = 0.25

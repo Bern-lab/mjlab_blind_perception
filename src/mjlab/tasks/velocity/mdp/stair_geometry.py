@@ -11,12 +11,16 @@ if TYPE_CHECKING:
 
 STAIR_PHASE_KEY = "slow_latent_stair_phase"
 STAIR_ENTRY_EVENT_KEY = "slow_latent_stair_entry_event"
+STAIR_EXIT_EVENT_KEY = "slow_latent_stair_exit_event"
 STAIR_TARGET_FOOT_KEY = "slow_latent_stair_target_foot"
 STAIR_ASCENT_DIR_KEY = "slow_latent_stair_ascent_dir"
 SAFE_STRIDE_VALID_KEY = "slow_latent_safe_stride_valid"
 SAFE_TREAD_LOWER_BOUND_KEY = "slow_latent_safe_tread_lower_bound"
 SAFE_LANDING_CENTER_KEY = "slow_latent_safe_landing_center_s"
 OBSERVED_STEP_STRIDE_KEY = "slow_latent_observed_step_stride"
+COLLISION_RISK_KEY = "slow_latent_collision_risk_now"
+LANDING_TOUCHDOWN_KEY = "slow_latent_landing_touchdown_now"
+LANDING_QUALITY_KEY = "slow_latent_landing_quality_now"
 _STAIR_SHAPE_CACHE_KEY = "_privileged_stair_shape_cache"
 
 

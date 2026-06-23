@@ -7,9 +7,13 @@ import pytest
 import torch
 
 import mjlab.tasks.velocity.mdp.observations as velocity_observations
+import mjlab.tasks.velocity.mdp.temporal_stair_rewards as temporal_stair_rewards
 from mjlab.envs.mdp.events import randomize_terrain
 from mjlab.tasks.velocity.mdp.curriculums import terrain_levels_vel
 from mjlab.tasks.velocity.mdp.stair_geometry import (
+  COLLISION_RISK_KEY,
+  LANDING_QUALITY_KEY,
+  LANDING_TOUCHDOWN_KEY,
   SAFE_STRIDE_VALID_KEY,
   SAFE_TREAD_LOWER_BOUND_KEY,
   STAIR_ENTRY_EVENT_KEY,
@@ -292,6 +296,17 @@ def test_stair_entry_tread_support_fraction_detects_sixty_percent() -> None:
   assert support_fraction.item() == pytest.approx(0.6)
 
 
+def test_landing_quality_increases_continuously_with_sole_support() -> None:
+  quality = temporal_stair_rewards._landing_quality(
+    coverage=torch.tensor([0.5, 0.6, 0.8, 1.0]),
+    center_score=torch.ones(4),
+    edge_clearance_score=torch.ones(4),
+    valid=torch.ones(4, dtype=torch.bool),
+  )
+
+  assert quality.tolist() == pytest.approx([0.5, 0.6, 0.8, 1.0])
+
+
 def test_stair_following_gait_does_not_require_fixed_phase() -> None:
   is_contact = torch.tensor([[True, False], [True, True], [False, False]])
 
@@ -311,6 +326,9 @@ def test_slow_latent_labels_follow_env_stair_state_machine(
       STAIR_PHASE_KEY: torch.tensor([1, 2]),
       SAFE_STRIDE_VALID_KEY: torch.tensor([False, True]),
       SAFE_TREAD_LOWER_BOUND_KEY: torch.tensor([0.0, 0.26]),
+      COLLISION_RISK_KEY: torch.tensor([0.75, 0.10]),
+      LANDING_TOUCHDOWN_KEY: torch.tensor([True, False]),
+      LANDING_QUALITY_KEY: torch.tensor([0.45, 0.0]),
     },
   )
   boundaries = torch.zeros(2, 1, 11)
@@ -336,17 +354,18 @@ def test_slow_latent_labels_follow_env_stair_state_machine(
       velocity_observations.stair_state_label(cast(Any, env)),
       velocity_observations.stair_shape_label(cast(Any, env)),
       velocity_observations.safe_stride_label(cast(Any, env)),
+      velocity_observations.stair_future_event_labels(cast(Any, env)),
     ],
     dim=-1,
   )
 
-  assert labels.shape == (2, 7)
+  assert labels.shape == (2, 10)
   torch.testing.assert_close(
     labels,
     torch.tensor(
       [
-        [1.0, 1.0, 0.30, 0.18, 0.0, 0.0, 0.0],
-        [0.0, 1.0, 0.35, 0.20, 1.0, 0.26, 1.0],
+        [1.0, 1.0, 0.30, 0.18, 0.0, 0.0, 0.0, 0.75, 1.0, 0.45],
+        [0.0, 1.0, 0.35, 0.20, 1.0, 0.26, 1.0, 0.10, 0.0, 0.0],
       ]
     ),
   )

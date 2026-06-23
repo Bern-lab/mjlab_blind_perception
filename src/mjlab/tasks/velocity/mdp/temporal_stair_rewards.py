@@ -17,16 +17,37 @@ from .rewards import (
   _terrain_level_active,
 )
 from .stair_geometry import (
+  COLLISION_RISK_KEY,
+  LANDING_QUALITY_KEY,
+  LANDING_TOUCHDOWN_KEY,
   OBSERVED_STEP_STRIDE_KEY,
   SAFE_LANDING_CENTER_KEY,
   SAFE_STRIDE_VALID_KEY,
   SAFE_TREAD_LOWER_BOUND_KEY,
   STAIR_ASCENT_DIR_KEY,
   STAIR_ENTRY_EVENT_KEY,
+  STAIR_EXIT_EVENT_KEY,
   STAIR_PHASE_KEY,
   STAIR_TARGET_FOOT_KEY,
   cached_stair_shape,
 )
+
+
+def _proximity_risk(clearance: torch.Tensor, safe_margin: float) -> torch.Tensor:
+  return torch.clamp(
+    (safe_margin - clearance) / max(safe_margin, 1.0e-6), min=0.0, max=1.0
+  )
+
+
+def _landing_quality(
+  coverage: torch.Tensor,
+  center_score: torch.Tensor,
+  edge_clearance_score: torch.Tensor,
+  valid: torch.Tensor,
+) -> torch.Tensor:
+  secondary = 0.5 * center_score + 0.5 * edge_clearance_score
+  quality = coverage.clamp(0.0, 1.0) * (0.8 + 0.2 * secondary)
+  return quality * valid.float()
 
 
 class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
@@ -47,6 +68,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     )
     self._stair_phase = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
     self._entry_event = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+    self._exit_event = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
     self._first_foot = torch.full(
       (env.num_envs,), -1, device=env.device, dtype=torch.long
     )
@@ -78,14 +100,26 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     self._following_timer = torch.zeros(
       env.num_envs, device=env.device, dtype=torch.long
     )
+    self._exit_flat_steps = torch.zeros(
+      env.num_envs, device=env.device, dtype=torch.long
+    )
+    self._collision_risk_now = torch.zeros(env.num_envs, device=env.device)
+    self._landing_touchdown_now = torch.zeros(
+      env.num_envs, device=env.device, dtype=torch.bool
+    )
+    self._landing_quality_now = torch.zeros(env.num_envs, device=env.device)
     env.extras[STAIR_PHASE_KEY] = self._stair_phase
     env.extras[STAIR_ENTRY_EVENT_KEY] = self._entry_event
+    env.extras[STAIR_EXIT_EVENT_KEY] = self._exit_event
     env.extras[STAIR_TARGET_FOOT_KEY] = self._target_foot
     env.extras[STAIR_ASCENT_DIR_KEY] = self._ascent_dir
     env.extras[SAFE_STRIDE_VALID_KEY] = self._safe_stride_valid
     env.extras[SAFE_TREAD_LOWER_BOUND_KEY] = self._safe_tread_lower_bound
     env.extras[SAFE_LANDING_CENTER_KEY] = self._safe_landing_center_s
     env.extras[OBSERVED_STEP_STRIDE_KEY] = self._observed_step_stride
+    env.extras[COLLISION_RISK_KEY] = self._collision_risk_now
+    env.extras[LANDING_TOUCHDOWN_KEY] = self._landing_touchdown_now
+    env.extras[LANDING_QUALITY_KEY] = self._landing_quality_now
 
   def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
     if env_ids is None:
@@ -93,6 +127,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     self._contact_cooldown[env_ids] = 0.0
     self._stair_phase[env_ids] = 0
     self._entry_event[env_ids] = False
+    self._exit_event[env_ids] = False
     self._first_foot[env_ids] = -1
     self._target_foot[env_ids] = -1
     self._entry_timer[env_ids] = 0
@@ -104,6 +139,10 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     self._safe_landing_center_s[env_ids] = 0.0
     self._observed_step_stride[env_ids] = 0.0
     self._following_timer[env_ids] = 0
+    self._exit_flat_steps[env_ids] = 0
+    self._collision_risk_now[env_ids] = 0.0
+    self._landing_touchdown_now[env_ids] = False
+    self._landing_quality_now[env_ids] = 0.0
 
   @staticmethod
   def _normalize_xy(vec: torch.Tensor) -> torch.Tensor:
@@ -348,6 +387,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     stair_touchdown_lip_clearance: float = 0.02,
     stair_touchdown_lip_height_band: float = 0.06,
     stair_following_timeout: float = 1.50,
+    collision_risk_margin: float = 0.06,
     command_name: str = "twist",
     command_threshold: float = 0.05,
     ground_contact_sensor_name: str = "feet_ground_contact",
@@ -355,6 +395,10 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     **_unused: object,
   ) -> torch.Tensor:
     self._entry_event.zero_()
+    self._exit_event.zero_()
+    self._collision_risk_now.zero_()
+    self._landing_touchdown_now.zero_()
+    self._landing_quality_now.zero_()
     boundaries, valid_boundaries = _current_step_boundaries(env)
     if boundaries is None or valid_boundaries is None:
       return torch.zeros(env.num_envs, device=env.device)
@@ -376,6 +420,37 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     toe_ref_radius = torch.norm(
       self._local_points[toe_mask] - self._foot_ref_local, dim=-1
     ).max()
+    masked_ref_dist = torch.where(
+      base_valid[:, None, :], ref_dist, torch.full_like(ref_dist, torch.inf)
+    )
+    slab_clearance = (
+      torch.amin(masked_ref_dist, dim=(1, 2)) - toe_ref_radius
+    ).clamp_min(0.0)
+    all_boundaries = boundaries[:, None, :, :].expand(num_envs, num_feet, -1, -1)
+    all_valid = base_valid[:, None, :].expand(num_envs, num_feet, -1)
+    lip_min_dist = self._lip_min_dist(
+      points_w,
+      all_boundaries,
+      all_valid,
+      stair_touchdown_lip_height_band,
+    )
+    lip_clearance = torch.amin(lip_min_dist, dim=(1, 2))
+    slab_unsafe_all = stair_tread_landing_reward._toe_slab_mask(
+      toe_points,
+      boundaries,
+      base_valid,
+      slab_depth,
+      u_margin,
+      v_margin,
+      surface_tol,
+    )
+    proximity_risk = torch.maximum(
+      _proximity_risk(slab_clearance, collision_risk_margin),
+      _proximity_risk(lip_clearance, collision_risk_margin),
+    )
+    self._collision_risk_now.copy_(
+      torch.maximum(proximity_risk, torch.any(slab_unsafe_all, dim=-1).float())
+    )
     selected_idx, fallback = self._nearest_boundary_indices(
       ref_dist, base_valid, toe_ref_radius, nearest_boundaries
     )
@@ -534,7 +609,19 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       ground_first_contact = ground_sensor.compute_first_contact(dt=env.step_dt)
       if ground_first_contact.shape[-1] != num_feet:
         raise RuntimeError("Safe stair touchdown requires one channel per foot.")
+      ground_contact_time = ground_sensor.data.current_contact_time
+      if ground_contact_time is None:
+        ground_contact = ground_first_contact
+      else:
+        if ground_contact_time.shape[-1] != num_feet:
+          if ground_contact_time.shape[-1] % num_feet != 0:
+            raise RuntimeError("Safe stair touchdown requires one channel per foot.")
+          ground_contact_time = ground_contact_time.view(num_envs, num_feet, -1).max(
+            dim=-1
+          ).values
+        ground_contact = ground_contact_time > 0.0
       target_touchdown = phase1 & ground_first_contact[env_ids, target_foot]
+      target_contact = phase1 & ground_contact[env_ids, target_foot]
 
       ref_xy = foot_ref_w[:, :, None, :2]
       p0_xy = boundaries[:, None, :, 0:2]
@@ -568,30 +655,15 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       layer2_support_fraction = torch.where(
         support_candidate,
         tread_support_fraction,
-        torch.zeros_like(tread_support_fraction),
+        torch.full_like(tread_support_fraction, -1.0),
       )
       best_support_fraction, best_support_idx = torch.max(
         layer2_support_fraction, dim=-1
       )
+      best_support_fraction = best_support_fraction.clamp_min(0.0)
       support_gate = best_support_fraction >= stair_safe_support_fraction
 
-      slab_unsafe = stair_tread_landing_reward._toe_slab_mask(
-        toe_points,
-        boundaries,
-        base_valid,
-        slab_depth,
-        u_margin,
-        v_margin,
-        surface_tol,
-      )
-      all_boundaries = boundaries[:, None, :, :].expand(num_envs, num_feet, -1, -1)
-      all_valid = base_valid[:, None, :].expand(num_envs, num_feet, -1)
-      lip_min_dist = self._lip_min_dist(
-        points_w,
-        all_boundaries,
-        all_valid,
-        stair_touchdown_lip_height_band,
-      )
+      slab_unsafe = slab_unsafe_all
       lip_unsafe = torch.any(lip_min_dist < stair_touchdown_lip_clearance, dim=-1)
       target_forward_gain = self._ascent_progress(
         target_pos_w, self._target_start_pos_w, self._ascent_dir
@@ -603,12 +675,10 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       target_slab_unsafe = slab_unsafe[env_ids, target_foot]
       target_lip_unsafe = lip_unsafe[env_ids, target_foot]
       safe_touchdown = (
-        target_touchdown
+        target_contact
         & heading_gate
         & shape_valid
         & target_geometry_gate
-        & (target_forward_gain >= stair_min_safe_stride)
-        & target_support_gate
         & ~target_riser_unsafe
         & ~target_slab_unsafe
         & ~target_lip_unsafe
@@ -621,6 +691,40 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       landing_center_s = torch.sum(
         (target_ref_xy - selected_p0_xy) * -selected_normal, dim=-1
       )
+      target_coverage = best_support_fraction[env_ids, target_foot]
+      quality_sigma = torch.clamp(0.25 * tread_depth, min=0.03)
+      center_score = torch.exp(
+        -torch.square((landing_center_s - 0.5 * tread_depth) / quality_sigma)
+      )
+      edge_clearance_score = torch.clamp(
+        torch.minimum(landing_center_s, tread_depth - landing_center_s) / 0.06,
+        min=0.0,
+        max=1.0,
+      )
+      stage1_quality_valid = (
+        target_touchdown
+        & heading_gate
+        & shape_valid
+        & target_geometry_gate
+        & ~target_riser_unsafe
+        & ~target_slab_unsafe
+        & ~target_lip_unsafe
+      )
+      self._landing_touchdown_now.copy_(target_touchdown & heading_gate)
+      self._landing_quality_now.copy_(
+        _landing_quality(
+          target_coverage,
+          center_score,
+          edge_clearance_score,
+          stage1_quality_valid,
+        )
+      )
+      self._collision_risk_now.copy_(
+        torch.maximum(
+          self._collision_risk_now,
+          torch.any(riser_contact, dim=-1).float(),
+        )
+      )
       target_toe_points = toe_points[env_ids, target_foot, :, :2]
       toe_front_s = (
         torch.sum(
@@ -631,12 +735,32 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         .max(dim=-1)
         .values
       )
+      min_memory_stride = torch.minimum(
+        torch.full_like(tread_depth, stair_min_safe_stride),
+        tread_depth,
+      )
+      safe_tread_lower_bound = torch.minimum(
+        torch.maximum(toe_front_s, min_memory_stride),
+        tread_depth,
+      )
+      safe_landing_center = torch.minimum(
+        torch.clamp_min(landing_center_s, 0.0),
+        tread_depth,
+      )
+      safe_stride_label_clamped = (
+        (torch.abs(safe_tread_lower_bound - toe_front_s) > 1.0e-4)
+        | (torch.abs(safe_landing_center - landing_center_s) > 1.0e-4)
+      )
       if bool(torch.any(safe_touchdown).item()):
         self._stair_phase[safe_touchdown] = 2
         self._entry_timer[safe_touchdown] = 0
         self._safe_stride_valid[safe_touchdown] = True
-        self._safe_tread_lower_bound[safe_touchdown] = toe_front_s[safe_touchdown]
-        self._safe_landing_center_s[safe_touchdown] = landing_center_s[safe_touchdown]
+        self._safe_tread_lower_bound[safe_touchdown] = safe_tread_lower_bound[
+          safe_touchdown
+        ]
+        self._safe_landing_center_s[safe_touchdown] = safe_landing_center[
+          safe_touchdown
+        ]
         self._observed_step_stride[safe_touchdown] = target_forward_gain[safe_touchdown]
         self._following_timer[safe_touchdown] = 0
 
@@ -689,11 +813,40 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         & torch.isfinite(last_boundary_s)
         & (root_s > last_boundary_s + tread_depth)
       )
+      ahead_boundary = aligned_boundary & (
+        boundary_s > root_s[:, None] + 0.05
+      )
+      no_higher_tread_ahead = following & ~torch.any(ahead_boundary, dim=-1)
+      exit_candidate = following & heading_gate & (
+        past_last_boundary | no_higher_tread_ahead
+      )
+      touchdown_now = torch.any(ground_first_contact, dim=-1)
+      unsafe_now = torch.any(riser_contact | slab_unsafe | lip_unsafe, dim=-1)
+      flat_exit_step = (
+        exit_candidate
+        & touchdown_now
+        & ~unsafe_now
+      )
+      reset_exit_evidence = (~following) | (~exit_candidate) | unsafe_now
+      self._exit_flat_steps = torch.where(
+        reset_exit_evidence,
+        torch.zeros_like(self._exit_flat_steps),
+        self._exit_flat_steps,
+      )
+      self._exit_flat_steps = torch.where(
+        flat_exit_step,
+        self._exit_flat_steps + 1,
+        self._exit_flat_steps,
+      )
+      confirmed_exit = following & (self._exit_flat_steps >= 2)
 
       phase1_count = phase1.float().sum().clamp_min(1.0)
+      following_count = following.float().sum().clamp_min(1.0)
       touchdown_count = target_touchdown.float().sum().clamp_min(1.0)
+      contact_count = target_contact.float().sum().clamp_min(1.0)
       geometry_touchdown = target_touchdown & target_geometry_gate
-      geometry_count = geometry_touchdown.float().sum().clamp_min(1.0)
+      geometry_contact = target_contact & target_geometry_gate
+      geometry_contact_count = geometry_contact.float().sum().clamp_min(1.0)
       log["Metrics/stair_entry_event_ratio"] = entry_mask.float().mean()
       log["Metrics/stair_heading_cos_mean"] = (
         torch.where(phase1, heading_cos, torch.zeros_like(heading_cos)).sum()
@@ -705,44 +858,84 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       log["Metrics/stair_layer2_touchdown_candidate_ratio"] = (
         target_touchdown.float().sum() / phase1_count
       )
+      log["Metrics/stair_layer2_contact_candidate_ratio"] = (
+        target_contact.float().sum() / phase1_count
+      )
       log["Metrics/stair_layer2_height_gate_ratio"] = (
         target_touchdown & target_height_gate
       ).float().sum() / touchdown_count
+      log["Metrics/stair_layer2_contact_height_gate_ratio"] = (
+        target_contact & target_height_gate
+      ).float().sum() / contact_count
       log["Metrics/stair_layer2_segment_gate_ratio"] = (
         geometry_touchdown.float().sum() / touchdown_count
       )
+      log["Metrics/stair_layer2_contact_segment_gate_ratio"] = (
+        geometry_contact.float().sum() / contact_count
+      )
       log["Metrics/stair_layer2_support_fraction_mean"] = (
         torch.where(
-          geometry_touchdown,
+          geometry_contact,
           best_support_fraction[env_ids, target_foot],
           torch.zeros_like(best_support_fraction[:, 0]),
         ).sum()
-        / geometry_count
+        / geometry_contact_count
       )
       log["Metrics/stair_layer2_support_ge60_ratio"] = (
-        geometry_touchdown & target_support_gate
-      ).float().sum() / geometry_count
+        geometry_contact & target_support_gate
+      ).float().sum() / geometry_contact_count
       log["Metrics/stair_safe_touchdown_ratio"] = (
         safe_touchdown.float().sum() / phase1_count
       )
+      safe_touchdown_count = safe_touchdown.float().sum().clamp_min(1.0)
+      log["Metrics/stair_safe_stride_label_clamped_ratio"] = (
+        safe_touchdown & safe_stride_label_clamped
+      ).float().sum() / safe_touchdown_count
+      log["Metrics/stair_safe_stride_raw_toe_front_s_mean"] = (
+        toe_front_s * safe_touchdown.float()
+      ).sum() / safe_touchdown_count
+      log["Metrics/stair_safe_landing_raw_center_s_mean"] = (
+        landing_center_s * safe_touchdown.float()
+      ).sum() / safe_touchdown_count
+      log["Metrics/landing_touchdown_now_ratio"] = (
+        self._landing_touchdown_now.float().mean()
+      )
+      log["Metrics/landing_quality_now_mean"] = self._landing_quality_now.mean()
       log["Metrics/stair_touchdown_rejected_riser_ratio"] = (
-        geometry_touchdown & target_riser_unsafe
-      ).float().sum() / geometry_count
+        geometry_contact & target_riser_unsafe
+      ).float().sum() / geometry_contact_count
       log["Metrics/stair_touchdown_rejected_slab_ratio"] = (
-        geometry_touchdown & target_slab_unsafe
-      ).float().sum() / geometry_count
+        geometry_contact & target_slab_unsafe
+      ).float().sum() / geometry_contact_count
       log["Metrics/stair_touchdown_rejected_lip_ratio"] = (
-        geometry_touchdown & target_lip_unsafe
-      ).float().sum() / geometry_count
+        geometry_contact & target_lip_unsafe
+      ).float().sum() / geometry_contact_count
       log["Metrics/stair_entry_timeout_ratio"] = (
         entry_timeout.float().sum() / phase1_count
       )
       log["Metrics/stair_following_active_ratio"] = following.float().mean()
       log["Metrics/stair_following_timeout_ratio"] = (
-        following_timeout.float().sum() / following.float().sum().clamp_min(1.0)
+        following_timeout.float().sum() / following_count
       )
       log["Metrics/stair_following_past_last_exit_ratio"] = (
-        past_last_boundary.float().sum() / following.float().sum().clamp_min(1.0)
+        past_last_boundary.float().sum() / following_count
+      )
+      log["Metrics/stair_exit_candidate_ratio"] = (
+        exit_candidate.float().sum() / following_count
+      )
+      log["Metrics/stair_exit_flat_step_ratio"] = (
+        flat_exit_step.float().sum() / following_count
+      )
+      log["Metrics/stair_exit_confirmed_ratio"] = (
+        confirmed_exit.float().sum() / following_count
+      )
+      log["Metrics/stair_exit_flat_steps_mean"] = (
+        torch.where(
+          following,
+          self._exit_flat_steps.float(),
+          torch.zeros_like(self._exit_flat_steps, dtype=torch.float32),
+        ).sum()
+        / following_count
       )
       safe_count = self._safe_stride_valid.float().sum().clamp_min(1.0)
       log["Metrics/safe_tread_lower_bound_mean"] = (
@@ -755,18 +948,48 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         self._observed_step_stride.sum() / safe_count
       )
 
+      active_phase = phase1 | following
       reset_mask = (
-        entry_timeout | following_timeout | past_last_boundary | ~level_active
+        entry_timeout
+        | following_timeout
+        | confirmed_exit
+        | (active_phase & ~level_active)
+      )
+      active_phase_count = active_phase.float().sum().clamp_min(1.0)
+      reset_count = reset_mask.float().sum().clamp_min(1.0)
+      confirmed_exit_count = confirmed_exit.float().sum().clamp_min(1.0)
+      log["Metrics/stair_phase_reset_event_ratio"] = (
+        reset_mask.float().sum() / active_phase_count
+      )
+      log["Metrics/stair_phase_reset_population_ratio"] = reset_mask.float().mean()
+      log["Metrics/stair_exit_reset_by_past_last_ratio"] = (
+        (confirmed_exit & past_last_boundary).float().sum() / confirmed_exit_count
+      )
+      log["Metrics/stair_exit_reset_by_timeout_ratio"] = (
+        (entry_timeout | following_timeout).float().sum() / reset_count
       )
       if bool(torch.any(reset_mask).item()):
-        self.reset(reset_mask.nonzero(as_tuple=False).squeeze(-1))
+        reset_ids = reset_mask.nonzero(as_tuple=False).squeeze(-1)
+        exit_ids = confirmed_exit.nonzero(as_tuple=False).squeeze(-1)
+        self.reset(reset_ids)
+        if bool(torch.any(confirmed_exit).item()):
+          self._exit_event[exit_ids] = True
     else:
       zero = torch.zeros((), device=env.device)
       log["Metrics/toe_riser_contact_penalty_mean"] = zero
       log["Metrics/toe_riser_contact_time_mean"] = zero
+      log["Metrics/stair_exit_candidate_ratio"] = zero
+      log["Metrics/stair_exit_flat_step_ratio"] = zero
+      log["Metrics/stair_exit_confirmed_ratio"] = zero
+      log["Metrics/stair_exit_flat_steps_mean"] = zero
+      log["Metrics/stair_phase_reset_event_ratio"] = zero
+      log["Metrics/stair_phase_reset_population_ratio"] = zero
+      log["Metrics/stair_exit_reset_by_past_last_ratio"] = zero
+      log["Metrics/stair_exit_reset_by_timeout_ratio"] = zero
 
     total_penalty = slab_penalty + contact_penalty
     log["Metrics/toe_riser_total_penalty_mean"] = total_penalty.mean()
+    log["Metrics/collision_risk_now_mean"] = self._collision_risk_now.mean()
     log["Metrics/stair_entry_active_ratio"] = (self._stair_phase == 1).float().mean()
     return total_penalty
 
@@ -955,8 +1178,7 @@ class stair_tread_landing_reward(_StepBoundaryFootVolume):
     front_margin: float = 0.08,
     lateral_margin: float = 0.03,
     height_tolerance: float = 0.08,
-    short_penalty_scale: float = 0.40,
-    over_front_penalty_scale: float = 0.60,
+    support_deficit_scale: float = 0.40,
     vertical_normal_z_max: float = 0.40,
     min_terrain_level: int = 3,
     min_landing_layer: int = 3,
@@ -1054,19 +1276,6 @@ class stair_tread_landing_reward(_StepBoundaryFootVolume):
     ).squeeze(-1)
     landing_layer_valid = best_boundary_layer >= min_landing_layer
 
-    safe_band = (best_s >= effective_back_margin) & (
-      best_s <= depth.squeeze(-1) - effective_front_margin
-    )
-    middle_forward_reward = best_score * safe_band.float()
-    short_penalty = torch.relu(
-      (desired_s.squeeze(-1) - sigma.squeeze(-1) - best_s)
-      / depth.squeeze(-1).clamp_min(1.0e-6)
-    )
-    over_front_penalty = torch.relu(
-      (best_s - (depth.squeeze(-1) - effective_front_margin))
-      / depth.squeeze(-1).clamp_min(1.0e-6)
-    )
-
     slab_unsafe = self._toe_slab_mask(
       toe_points_w,
       boundaries,
@@ -1122,17 +1331,51 @@ class stair_tread_landing_reward(_StepBoundaryFootVolume):
       first_contact & env_active[:, None] & has_candidate & landing_layer_valid
     )
     touchdown_candidate = safety_candidate & ~riser_contact & ~slab_unsafe & ~lip_unsafe
-    landing_active = touchdown_candidate & safe_band
-    per_foot = middle_forward_reward * landing_active.float()
-    per_foot -= short_penalty_scale * short_penalty * touchdown_candidate.float()
-    per_foot -= (
-      over_front_penalty_scale * over_front_penalty * touchdown_candidate.float()
+    sole_z = torch.min(self._local_points[:, 2])
+    sole_points_w = foot_points_w[:, :, self._local_points[:, 2] <= sole_z + 1.0e-6, :]
+    support_fraction = toe_step_riser_slab_penalty._tread_support_fraction(
+      sole_points_w,
+      boundaries,
+      tread_depth,
     )
+    best_support_fraction = torch.gather(
+      support_fraction, dim=-1, index=best_idx[..., None]
+    ).squeeze(-1)
+    back_clearance_score = torch.clamp(best_s / effective_back_margin, min=0.0, max=1.0)
+    front_clearance_score = torch.clamp(
+      (depth.squeeze(-1) - best_s) / effective_front_margin,
+      min=0.0,
+      max=1.0,
+    )
+    edge_clearance_score = torch.minimum(back_clearance_score, front_clearance_score)
+    landing_quality = _landing_quality(
+      best_support_fraction,
+      best_score,
+      edge_clearance_score,
+      touchdown_candidate,
+    )
+    support_deficit = torch.relu(0.50 - best_support_fraction) / 0.50
+    per_foot = landing_quality - (
+      support_deficit_scale * support_deficit * touchdown_candidate.float()
+    )
+    landing_active = touchdown_candidate
+
+    touchdown_now = torch.any(first_contact & env_active[:, None], dim=-1)
+    quality_now = torch.max(landing_quality, dim=-1).values
+    cached_touchdown = env.extras.get(LANDING_TOUCHDOWN_KEY)
+    cached_quality = env.extras.get(LANDING_QUALITY_KEY)
+    if isinstance(cached_touchdown, torch.Tensor):
+      cached_touchdown.logical_or_(touchdown_now)
+    else:
+      env.extras[LANDING_TOUCHDOWN_KEY] = touchdown_now
+    if isinstance(cached_quality, torch.Tensor):
+      cached_quality.copy_(torch.maximum(cached_quality, quality_now))
+    else:
+      env.extras[LANDING_QUALITY_KEY] = quality_now
 
     log = env.extras["log"]
     landing_count = landing_active.float().sum().clamp_min(1.0)
     safety_count = safety_candidate.float().sum().clamp_min(1.0)
-    touchdown_count = touchdown_candidate.float().sum().clamp_min(1.0)
     log["Metrics/stair_tread_landing_active_ratio"] = landing_active.float().mean()
     log["Metrics/stair_landing_active_ratio"] = landing_active.float().mean()
     log["Metrics/stair_landing_heading_gate_ratio"] = (
@@ -1168,12 +1411,14 @@ class stair_tread_landing_reward(_StepBoundaryFootVolume):
       safety_candidate & riser_contact
     ).float().sum() / safety_count
     log["Metrics/stair_tread_landing_score_mean"] = (
-      middle_forward_reward * landing_active.float()
+      landing_quality * landing_active.float()
     ).sum() / landing_count
-    log["Metrics/stair_tread_landing_short_ratio"] = (
-      touchdown_candidate & (short_penalty > 0.0)
-    ).float().sum() / touchdown_count
-    log["Metrics/stair_tread_landing_over_front_ratio"] = (
-      touchdown_candidate & (over_front_penalty > 0.0)
-    ).float().sum() / touchdown_count
+    log["Metrics/stair_landing_support_fraction_mean"] = (
+      best_support_fraction * safety_candidate.float()
+    ).sum() / safety_count
+    log["Metrics/stair_landing_support_below_50_ratio"] = (
+      safety_candidate & (best_support_fraction < 0.50)
+    ).float().sum() / safety_count
+    log["Metrics/landing_touchdown_now_ratio"] = touchdown_now.float().mean()
+    log["Metrics/landing_quality_now_mean"] = quality_now.mean()
     return per_foot.sum(dim=-1)

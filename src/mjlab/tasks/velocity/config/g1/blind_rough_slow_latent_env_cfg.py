@@ -185,6 +185,7 @@ class G1SlowLatentRewardParams:
   toe_stair_touchdown_lip_clearance: float = 0.02
   toe_stair_touchdown_lip_height_band: float = 0.06
   toe_stair_following_timeout: float = 1.50
+  toe_collision_risk_margin: float = 0.06
   toe_stair_command_threshold: float = 0.05
 
   # Stage-2 privileged-geometry landing shaping.
@@ -196,8 +197,7 @@ class G1SlowLatentRewardParams:
   stair_tread_landing_front_margin: float = 0.08
   stair_tread_landing_lateral_margin: float = 0.03
   stair_tread_landing_height_tolerance: float = 0.08
-  stair_tread_landing_short_penalty_scale: float = 0.40
-  stair_tread_landing_over_front_penalty_scale: float = 0.60
+  stair_tread_landing_support_deficit_scale: float = 0.40
   stair_tread_landing_min_layer: int = 3
   stair_tread_landing_lip_margin: float = 0.01
 
@@ -323,6 +323,7 @@ def configure_g1_step_danger_rewards(
       "stair_touchdown_lip_clearance": (params.toe_stair_touchdown_lip_clearance),
       "stair_touchdown_lip_height_band": (params.toe_stair_touchdown_lip_height_band),
       "stair_following_timeout": params.toe_stair_following_timeout,
+      "collision_risk_margin": params.toe_collision_risk_margin,
       "command_threshold": params.toe_stair_command_threshold,
       "ground_contact_sensor_name": "feet_ground_contact",
       "asset_cfg": foot_asset_cfg(),
@@ -341,8 +342,7 @@ def configure_g1_step_danger_rewards(
       "front_margin": params.stair_tread_landing_front_margin,
       "lateral_margin": params.stair_tread_landing_lateral_margin,
       "height_tolerance": params.stair_tread_landing_height_tolerance,
-      "short_penalty_scale": params.stair_tread_landing_short_penalty_scale,
-      "over_front_penalty_scale": (params.stair_tread_landing_over_front_penalty_scale),
+      "support_deficit_scale": params.stair_tread_landing_support_deficit_scale,
       "vertical_normal_z_max": params.toe_contact_vertical_normal_z_max,
       "min_terrain_level": params.min_terrain_level,
       "min_landing_layer": params.stair_tread_landing_min_layer,
@@ -623,6 +623,10 @@ def _configure_latent_observations(
         ),
         "safe_stride": ObservationTermCfg(
           func=mdp.safe_stride_label,
+          params={},
+        ),
+        "future_events": ObservationTermCfg(
+          func=mdp.stair_future_event_labels,
           params={},
         ),
       },

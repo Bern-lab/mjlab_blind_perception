@@ -61,22 +61,31 @@ class LSTMSlowLatentMLPModel(MLPModel):
     alpha_hold_shape: float = 0.05,
     alpha_hold: float | None = None,
     write_steps: int = 2,
-    min_stair_steps: int = 50,
-    exit_steps: int = 100,
+    min_stair_steps: int = 30,
+    exit_steps: int = 40,
     cooldown_steps: int = 15,
     event_on_threshold: float = 0.6,
     event_off_threshold: float = 0.4,
-    stair_off_threshold: float = 0.4,
-    aux_future_collision_coef: float = 0.05,
+    stair_on_threshold: float = 0.1,
+    stair_off_threshold: float = 0.1,
+    aux_future_collision_risk_coef: float = 0.03,
+    aux_future_safe_landing_quality_coef: float = 0.03,
     aux_event_coef: float = 0.03,
-    aux_stair_coef: float = 0.02,
+    aux_event_pos_weight: float = 100.0,
+    event_label_window_steps: int = 5,
+    aux_stair_coef: float = 0.05,
+    aux_stair_pos_weight: float = 3.0,
     aux_stair_shape_coef: float = 0.0,
     aux_safe_stride_coef: float = 0.0,
     stair_shape_huber_delta: float = 0.05,
     safe_stride_huber_delta: float = 0.05,
     safe_stride_min: float = 0.08,
     safe_stride_max: float = 0.45,
-    future_collision_horizon: int = 20,
+    future_risk_weight_scale: float = 2.0,
+    future_quality_weight_scale: float = 2.0,
+    future_risk_huber_delta: float = 0.1,
+    future_quality_huber_delta: float = 0.1,
+    future_horizon: int = 20,
     latent_obs_set: str = "latent",
     **kwargs: Any,
   ) -> None:
@@ -159,7 +168,12 @@ class LSTMSlowLatentMLPModel(MLPModel):
       activation_cls(),
       nn.Linear(64, 1),
     )
-    self.future_collision_head = nn.Sequential(
+    self.future_collision_risk_head = nn.Sequential(
+      nn.Linear(self.z_dim, 64),
+      activation_cls(),
+      nn.Linear(64, 1),
+    )
+    self.future_safe_landing_quality_head = nn.Sequential(
       nn.Linear(self.z_dim, 64),
       activation_cls(),
       nn.Linear(64, 1),
@@ -203,11 +217,26 @@ class LSTMSlowLatentMLPModel(MLPModel):
     self.cooldown_steps = float(cooldown_steps)
     self.event_on_threshold = float(event_on_threshold)
     self.event_off_threshold = float(event_off_threshold)
+    self.stair_on_threshold = float(stair_on_threshold)
     self.stair_off_threshold = float(stair_off_threshold)
+    if self.stair_on_threshold < self.stair_off_threshold:
+      raise ValueError("stair_on_threshold must be >= stair_off_threshold.")
 
-    self.aux_future_collision_coef = float(aux_future_collision_coef)
+    self.aux_future_collision_risk_coef = float(aux_future_collision_risk_coef)
+    self.aux_future_safe_landing_quality_coef = float(
+      aux_future_safe_landing_quality_coef
+    )
     self.aux_event_coef = float(aux_event_coef)
+    self.aux_event_pos_weight = float(aux_event_pos_weight)
+    self.event_label_window_steps = int(event_label_window_steps)
+    if self.aux_event_pos_weight <= 0.0:
+      raise ValueError("aux_event_pos_weight must be positive.")
+    if self.event_label_window_steps < 1:
+      raise ValueError("event_label_window_steps must be at least 1.")
     self.aux_stair_coef = float(aux_stair_coef)
+    self.aux_stair_pos_weight = float(aux_stair_pos_weight)
+    if self.aux_stair_pos_weight <= 0.0:
+      raise ValueError("aux_stair_pos_weight must be positive.")
     self.aux_stair_shape_coef = float(aux_stair_shape_coef)
     self.aux_safe_stride_coef = float(aux_safe_stride_coef)
     self.stair_shape_huber_delta = float(stair_shape_huber_delta)
@@ -230,14 +259,25 @@ class LSTMSlowLatentMLPModel(MLPModel):
         raise ValueError(
           f"{name}_max must be greater than {name}_min, got [{minimum}, {maximum}]."
         )
-    self.future_collision_horizon = int(future_collision_horizon)
+    self.future_risk_weight_scale = float(future_risk_weight_scale)
+    self.future_quality_weight_scale = float(future_quality_weight_scale)
+    self.future_risk_huber_delta = float(future_risk_huber_delta)
+    self.future_quality_huber_delta = float(future_quality_huber_delta)
+    self.future_horizon = int(future_horizon)
+    if self.future_risk_weight_scale < 0.0 or self.future_quality_weight_scale < 0.0:
+      raise ValueError("Future-label weight scales must be non-negative.")
+    if self.future_risk_huber_delta <= 0.0 or self.future_quality_huber_delta <= 0.0:
+      raise ValueError("Future-label Huber deltas must be positive.")
+    if self.future_horizon <= 0:
+      raise ValueError("future_horizon must be positive.")
 
     self._hidden_state: tuple[torch.Tensor, torch.Tensor] | None = None
     self._z_memory: torch.Tensor | None = None
     self._gate_state: torch.Tensor | None = None
     self._aux_event_logits: torch.Tensor | None = None
     self._aux_stair_logits: torch.Tensor | None = None
-    self._aux_future_collision_logits: torch.Tensor | None = None
+    self._aux_future_collision_risk_logits: torch.Tensor | None = None
+    self._aux_future_safe_landing_quality_logits: torch.Tensor | None = None
     self._aux_stair_shape_predictions: torch.Tensor | None = None
     self._aux_safe_stride_predictions: torch.Tensor | None = None
     self._slow_latent_diagnostics: dict[str, torch.Tensor] = {}
@@ -370,7 +410,18 @@ class LSTMSlowLatentMLPModel(MLPModel):
     write_timer = torch.where(in_write, write_timer + 1.0, write_timer)
     stair_timer = torch.where(in_write, stair_timer + 1.0, stair_timer)
     done_write = in_write & (write_timer >= self.write_steps)
-    mode = torch.where(done_write, torch.full_like(mode, _MODE_STAIR_MEMORY), mode)
+    confirm_memory = done_write & (stair_prob > self.stair_on_threshold)
+    abort_write = done_write & ~confirm_memory
+    mode = torch.where(confirm_memory, torch.full_like(mode, _MODE_STAIR_MEMORY), mode)
+    mode = torch.where(abort_write, torch.full_like(mode, _MODE_NORMAL), mode)
+    cooldown = torch.where(
+      abort_write, torch.full_like(cooldown, self.cooldown_steps), cooldown
+    )
+    stair_timer = torch.where(abort_write, torch.zeros_like(stair_timer), stair_timer)
+    no_event_timer = torch.where(
+      abort_write, torch.zeros_like(no_event_timer), no_event_timer
+    )
+    write_timer = torch.where(abort_write, torch.zeros_like(write_timer), write_timer)
 
     in_memory = mode == _MODE_STAIR_MEMORY
     stair_timer = torch.where(in_memory, stair_timer + 1.0, stair_timer)
@@ -456,9 +507,11 @@ class LSTMSlowLatentMLPModel(MLPModel):
     z_steps: list[torch.Tensor] = []
     alpha_steps: list[torch.Tensor] = []
     mode_steps: list[torch.Tensor] = []
+    gate_steps: list[torch.Tensor] = []
     event_logits: list[torch.Tensor] = []
     stair_logits: list[torch.Tensor] = []
-    future_logits: list[torch.Tensor] = []
+    future_risk_logits: list[torch.Tensor] = []
+    future_quality_logits: list[torch.Tensor] = []
     stair_shape_predictions: list[torch.Tensor] = []
     safe_stride_predictions: list[torch.Tensor] = []
 
@@ -488,7 +541,8 @@ class LSTMSlowLatentMLPModel(MLPModel):
       stair_logit = self.stair_state_head(
         torch.cat([h_t, self._state_memory(z_next)], dim=-1)
       )
-      future_logit = self.future_collision_head(z_next)
+      future_risk_logit = self.future_collision_risk_head(z_next)
+      future_quality_logit = self.future_safe_landing_quality_head(z_next)
       shape_memory = self._shape_memory(z_next)
       stair_shape_prediction = self._decode_stair_shape(shape_memory)
       safe_stride_prediction = self._decode_safe_stride(shape_memory)
@@ -498,18 +552,41 @@ class LSTMSlowLatentMLPModel(MLPModel):
       z_steps.append(z)
       alpha_steps.append(alpha)
       mode_steps.append(gate[:, 0:1])
+      gate_steps.append(gate)
       event_logits.append(event_logit)
       stair_logits.append(stair_logit)
-      future_logits.append(future_logit)
+      future_risk_logits.append(future_risk_logit)
+      future_quality_logits.append(future_quality_logit)
       stair_shape_predictions.append(stair_shape_prediction)
       safe_stride_predictions.append(safe_stride_prediction)
 
     z_seq = torch.stack(z_steps, dim=0)
     alpha_seq = torch.stack(alpha_steps, dim=0)
     mode_seq = torch.stack(mode_steps, dim=0)
+    gate_seq = torch.stack(gate_steps, dim=0)
+    if valid_masks is None:
+      valid_for_episode = torch.ones_like(mode_seq, dtype=torch.bool)
+    else:
+      valid_for_episode = valid_masks.bool()
+    write_ever = (
+      ((mode_seq == _MODE_STAIR_WRITE) & valid_for_episode)
+      .any(dim=0)
+      .to(mode_seq.dtype)
+    )
+    memory_ever = (
+      ((mode_seq == _MODE_STAIR_MEMORY) & valid_for_episode)
+      .any(dim=0)
+      .to(mode_seq.dtype)
+    )
+    memory_age_seq = gate_seq[..., 1:2] * (
+      mode_seq == _MODE_STAIR_MEMORY
+    ).to(gate_seq.dtype)
     self._aux_event_logits = torch.stack(event_logits, dim=0)
     self._aux_stair_logits = torch.stack(stair_logits, dim=0)
-    self._aux_future_collision_logits = torch.stack(future_logits, dim=0)
+    self._aux_future_collision_risk_logits = torch.stack(future_risk_logits, dim=0)
+    self._aux_future_safe_landing_quality_logits = torch.stack(
+      future_quality_logits, dim=0
+    )
     self._aux_stair_shape_predictions = torch.stack(stair_shape_predictions, dim=0)
     self._aux_safe_stride_predictions = torch.stack(safe_stride_predictions, dim=0)
 
@@ -517,6 +594,10 @@ class LSTMSlowLatentMLPModel(MLPModel):
       z_seq = cast(torch.Tensor, unpad_trajectories(z_seq, masks))
       alpha_seq = cast(torch.Tensor, unpad_trajectories(alpha_seq, masks))
       mode_seq = cast(torch.Tensor, unpad_trajectories(mode_seq, masks))
+      memory_age_seq = cast(
+        torch.Tensor,
+        unpad_trajectories(memory_age_seq, masks),
+      )
       actor_obs = cast(torch.Tensor, unpad_trajectories(actor_obs, masks))
       self._aux_event_logits = cast(
         torch.Tensor, unpad_trajectories(self._aux_event_logits, masks)
@@ -524,9 +605,13 @@ class LSTMSlowLatentMLPModel(MLPModel):
       self._aux_stair_logits = cast(
         torch.Tensor, unpad_trajectories(self._aux_stair_logits, masks)
       )
-      self._aux_future_collision_logits = cast(
+      self._aux_future_collision_risk_logits = cast(
         torch.Tensor,
-        unpad_trajectories(self._aux_future_collision_logits, masks),
+        unpad_trajectories(self._aux_future_collision_risk_logits, masks),
+      )
+      self._aux_future_safe_landing_quality_logits = cast(
+        torch.Tensor,
+        unpad_trajectories(self._aux_future_safe_landing_quality_logits, masks),
       )
       self._aux_stair_shape_predictions = cast(
         torch.Tensor,
@@ -540,14 +625,27 @@ class LSTMSlowLatentMLPModel(MLPModel):
       z_seq = z_seq.squeeze(0)
       alpha_seq = alpha_seq.squeeze(0)
       mode_seq = mode_seq.squeeze(0)
+      memory_age_seq = memory_age_seq.squeeze(0)
       actor_obs = actor_obs.squeeze(0)
       self._aux_event_logits = self._aux_event_logits.squeeze(0)
       self._aux_stair_logits = self._aux_stair_logits.squeeze(0)
-      self._aux_future_collision_logits = self._aux_future_collision_logits.squeeze(0)
+      self._aux_future_collision_risk_logits = (
+        self._aux_future_collision_risk_logits.squeeze(0)
+      )
+      self._aux_future_safe_landing_quality_logits = (
+        self._aux_future_safe_landing_quality_logits.squeeze(0)
+      )
       self._aux_stair_shape_predictions = self._aux_stair_shape_predictions.squeeze(0)
       self._aux_safe_stride_predictions = self._aux_safe_stride_predictions.squeeze(0)
 
-    self._update_slow_latent_diagnostics(z_seq, alpha_seq, mode_seq)
+    self._update_slow_latent_diagnostics(
+      z_seq,
+      alpha_seq,
+      mode_seq,
+      memory_age_seq,
+      write_ever,
+      memory_ever,
+    )
 
     if hidden_state is None:
       self._hidden_state = (h_out.detach(), c_out.detach())
@@ -561,11 +659,15 @@ class LSTMSlowLatentMLPModel(MLPModel):
     z_seq: torch.Tensor,
     alpha_seq: torch.Tensor,
     mode_seq: torch.Tensor,
+    memory_age_seq: torch.Tensor,
+    write_ever: torch.Tensor,
+    memory_ever: torch.Tensor,
   ) -> None:
     if (
       self._aux_event_logits is None
       or self._aux_stair_logits is None
-      or self._aux_future_collision_logits is None
+      or self._aux_future_collision_risk_logits is None
+      or self._aux_future_safe_landing_quality_logits is None
       or self._aux_stair_shape_predictions is None
       or self._aux_safe_stride_predictions is None
     ):
@@ -574,11 +676,17 @@ class LSTMSlowLatentMLPModel(MLPModel):
     self._slow_latent_diagnostics = {
       "event_prob": torch.sigmoid(self._aux_event_logits.detach()),
       "stair_prob": torch.sigmoid(self._aux_stair_logits.detach()),
-      "future_prob": torch.sigmoid(self._aux_future_collision_logits.detach()),
+      "future_risk": torch.sigmoid(self._aux_future_collision_risk_logits.detach()),
+      "future_quality": torch.sigmoid(
+        self._aux_future_safe_landing_quality_logits.detach()
+      ),
       "stair_shape": self._aux_stair_shape_predictions.detach(),
       "safe_stride": self._aux_safe_stride_predictions.detach(),
       "z_norm": z_seq.detach().norm(dim=-1, keepdim=True),
       "gate_mode": mode_seq.detach(),
+      "gate_memory_age": memory_age_seq.detach(),
+      "episode_write_ever": write_ever.detach(),
+      "episode_memory_ever": memory_ever.detach(),
       "alpha": alpha_seq.detach(),
       "alpha_state": alpha_seq[..., : self.state_latent_dim]
       .detach()
@@ -672,8 +780,12 @@ class LSTMSlowLatentMLPModel(MLPModel):
       outputs["event_logit"] = self._aux_event_logits
     if self._aux_stair_logits is not None:
       outputs["stair_logit"] = self._aux_stair_logits
-    if self._aux_future_collision_logits is not None:
-      outputs["future_collision_logit"] = self._aux_future_collision_logits
+    if self._aux_future_collision_risk_logits is not None:
+      outputs["future_collision_risk_logit"] = self._aux_future_collision_risk_logits
+    if self._aux_future_safe_landing_quality_logits is not None:
+      outputs["future_safe_landing_quality_logit"] = (
+        self._aux_future_safe_landing_quality_logits
+      )
     if self._aux_stair_shape_predictions is not None:
       outputs["stair_shape"] = self._aux_stair_shape_predictions
     if self._aux_safe_stride_predictions is not None:
@@ -693,8 +805,12 @@ class LSTMSlowLatentMLPModel(MLPModel):
     return self._aux_stair_logits
 
   @property
-  def aux_future_collision_logits(self) -> torch.Tensor | None:
-    return self._aux_future_collision_logits
+  def aux_future_collision_risk_logits(self) -> torch.Tensor | None:
+    return self._aux_future_collision_risk_logits
+
+  @property
+  def aux_future_safe_landing_quality_logits(self) -> torch.Tensor | None:
+    return self._aux_future_safe_landing_quality_logits
 
   @property
   def aux_stair_shape_predictions(self) -> torch.Tensor | None:
@@ -723,7 +839,10 @@ class _OnnxStairLatentModel(nn.Module):
     self.z_candidate_head = copy.deepcopy(model.z_candidate_head)
     self.event_head = copy.deepcopy(model.event_head)
     self.stair_state_head = copy.deepcopy(model.stair_state_head)
-    self.future_collision_head = copy.deepcopy(model.future_collision_head)
+    self.future_collision_risk_head = copy.deepcopy(model.future_collision_risk_head)
+    self.future_safe_landing_quality_head = copy.deepcopy(
+      model.future_safe_landing_quality_head
+    )
     self.stair_shape_head = copy.deepcopy(model.stair_shape_head)
     self.safe_stride_head = copy.deepcopy(model.safe_stride_head)
     self.mlp = copy.deepcopy(model.mlp)
@@ -754,6 +873,7 @@ class _OnnxStairLatentModel(nn.Module):
     self.cooldown_steps = model.cooldown_steps
     self.event_on_threshold = model.event_on_threshold
     self.event_off_threshold = model.event_off_threshold
+    self.stair_on_threshold = model.stair_on_threshold
     self.stair_off_threshold = model.stair_off_threshold
 
   @property
@@ -770,7 +890,8 @@ class _OnnxStairLatentModel(nn.Module):
       "gate_state_out",
       "event_prob",
       "stair_prob",
-      "future_collision_prob",
+      "future_collision_risk",
+      "future_safe_landing_quality",
       "stair_shape",
       "safe_stride",
     ]
@@ -818,11 +939,19 @@ class _OnnxStairLatentModel(nn.Module):
     in_write = mode == _MODE_STAIR_WRITE
     write_timer = torch.where(in_write, write_timer + 1.0, write_timer)
     stair_timer = torch.where(in_write, stair_timer + 1.0, stair_timer)
-    mode = torch.where(
-      in_write & (write_timer >= self.write_steps),
-      torch.full_like(mode, _MODE_STAIR_MEMORY),
-      mode,
+    done_write = in_write & (write_timer >= self.write_steps)
+    confirm_memory = done_write & (stair_prob.squeeze(-1) > self.stair_on_threshold)
+    abort_write = done_write & ~confirm_memory
+    mode = torch.where(confirm_memory, torch.full_like(mode, _MODE_STAIR_MEMORY), mode)
+    mode = torch.where(abort_write, torch.full_like(mode, _MODE_NORMAL), mode)
+    cooldown = torch.where(
+      abort_write, torch.full_like(cooldown, self.cooldown_steps), cooldown
     )
+    stair_timer = torch.where(abort_write, torch.zeros_like(stair_timer), stair_timer)
+    no_event_timer = torch.where(
+      abort_write, torch.zeros_like(no_event_timer), no_event_timer
+    )
+    write_timer = torch.where(abort_write, torch.zeros_like(write_timer), write_timer)
 
     in_memory = mode == _MODE_STAIR_MEMORY
     stair_timer = torch.where(in_memory, stair_timer + 1.0, stair_timer)
@@ -842,6 +971,11 @@ class _OnnxStairLatentModel(nn.Module):
     cooldown = torch.where(
       exit_memory, torch.full_like(cooldown, self.cooldown_steps), cooldown
     )
+    stair_timer = torch.where(exit_memory, torch.zeros_like(stair_timer), stair_timer)
+    no_event_timer = torch.where(
+      exit_memory, torch.zeros_like(no_event_timer), no_event_timer
+    )
+    write_timer = torch.where(exit_memory, torch.zeros_like(write_timer), write_timer)
 
     next_gate = torch.stack(
       [mode, stair_timer, no_event_timer, write_timer, cooldown], dim=-1
@@ -886,6 +1020,7 @@ class _OnnxStairLatentModel(nn.Module):
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
+    torch.Tensor,
   ]:
     actor_obs_norm = self.actor_obs_normalizer(actor_obs)
     latent_obs_norm = self.latent_obs_normalizer(latent_obs)
@@ -904,7 +1039,10 @@ class _OnnxStairLatentModel(nn.Module):
     stair_prob = torch.sigmoid(
       self.stair_state_head(torch.cat([h_t, z_out[:, : self.state_latent_dim]], dim=-1))
     )
-    future_collision_prob = torch.sigmoid(self.future_collision_head(z_out))
+    future_collision_risk = torch.sigmoid(self.future_collision_risk_head(z_out))
+    future_safe_landing_quality = torch.sigmoid(
+      self.future_safe_landing_quality_head(z_out)
+    )
     shape_memory = z_out[:, self.state_latent_dim :]
     stair_shape = self._decode_stair_shape(shape_memory)
     safe_stride = self._decode_safe_stride(shape_memory)
@@ -918,7 +1056,8 @@ class _OnnxStairLatentModel(nn.Module):
       gate_state_out,
       event_prob,
       stair_prob,
-      future_collision_prob,
+      future_collision_risk,
+      future_safe_landing_quality,
       stair_shape,
       safe_stride,
     )

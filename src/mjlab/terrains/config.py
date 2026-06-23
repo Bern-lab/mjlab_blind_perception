@@ -308,7 +308,7 @@ BLIND_HIGH_STAIRS_TERRAINS_CFG = TerrainGeneratorCfg(
   num_cols=5,
   curriculum=True,
   sub_terrains={
-    "flat": flat(proportion=0.05),
+    "flat": flat(proportion=0.0),
     "high_stairs": pyramid_stairs(
       proportion=0.0,
       step_height_range=(0.04, 0.2),
@@ -318,7 +318,7 @@ BLIND_HIGH_STAIRS_TERRAINS_CFG = TerrainGeneratorCfg(
       border_width=1.0,
     ),
     "high_stairs_inv": pyramid_stairs_inv(
-      proportion=0.75,
+      proportion=0.85,
       step_height_range=(0.04, 0.2),
       step_width=0.30,
       step_width_range=(0.25, 0.35),
@@ -332,7 +332,7 @@ BLIND_HIGH_STAIRS_TERRAINS_CFG = TerrainGeneratorCfg(
       border_width=0.5,
     ),
     "low_rough": random_rough(
-      proportion=0.10,
+      proportion=0.05,
       noise_range=(0.005, 0.04),
       noise_step=0.01,
       border_width=0.5,

@@ -63,9 +63,9 @@ class G1SlowLatentPolicyModelParams:
   """Hold update rate for geometry and safe-stride channels."""
   write_steps: int = 2
   """Number of steps spent in write mode after an event trigger."""
-  min_stair_steps: int = 50
+  min_stair_steps: int = 30
   """Minimum memory-hold steps before exit is allowed."""
-  exit_steps: int = 100
+  exit_steps: int = 40
   """Consecutive no-event steps required to leave stair-memory mode."""
   cooldown_steps: int = 15
   """Cooldown steps after exiting memory before another trigger is accepted."""
@@ -73,14 +73,24 @@ class G1SlowLatentPolicyModelParams:
   """Event probability threshold that triggers stair-memory writing."""
   event_off_threshold: float = 0.4
   """Event probability threshold counted as no-event during exit logic."""
-  stair_off_threshold: float = 0.4
+  stair_on_threshold: float = 0.1
+  """Stair-state probability threshold required to confirm write into memory."""
+  stair_off_threshold: float = 0.1
   """Stair-state probability threshold below which exit is allowed."""
   aux_event_coef: float = 0.03
   """BCE loss weight for current toe-riser event prediction."""
-  aux_stair_coef: float = 0.02
+  aux_event_pos_weight: float = 100.0
+  """Positive-class weight for sparse stair-entry event prediction."""
+  event_label_window_steps: int = 5
+  """Number of frames over which stair-entry event labels stay positive."""
+  aux_stair_coef: float = 0.05
   """BCE loss weight for current stair-state prediction."""
-  aux_future_collision_coef: float = 0.05
-  """BCE loss weight for future toe-riser collision prediction."""
+  aux_stair_pos_weight: float = 3.0
+  """Positive-class weight for stair-state prediction."""
+  aux_future_collision_risk_coef: float = 0.03
+  """Huber loss weight for continuous future collision risk."""
+  aux_future_safe_landing_quality_coef: float = 0.03
+  """Huber loss weight for continuous next-touchdown quality."""
   aux_stair_shape_coef: float = 0.03
   """Huber loss weight for privileged stair geometry prediction."""
   aux_safe_stride_coef: float = 0.03
@@ -93,8 +103,16 @@ class G1SlowLatentPolicyModelParams:
   """Minimum decoded safe-stride estimate, in meters."""
   safe_stride_max: float = 0.45
   """Maximum decoded safe-stride estimate, in meters."""
-  future_collision_horizon: int = 20
-  """Future window length, in policy steps, for collision labels."""
+  future_risk_weight_scale: float = 2.0
+  """Extra Huber weight proportional to normalized future risk."""
+  future_quality_weight_scale: float = 2.0
+  """Extra Huber weight proportional to next-touchdown quality."""
+  future_risk_huber_delta: float = 0.1
+  """Huber transition point for normalized future risk."""
+  future_quality_huber_delta: float = 0.1
+  """Huber transition point for normalized next-touchdown quality."""
+  future_horizon: int = 20
+  """Future window for maximum risk and first-touchdown quality labels."""
   latent_obs_set: str = "latent"
   """Observation set name consumed by the latent encoder."""
 
@@ -160,22 +178,31 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
   alpha_hold_state: float = 0.01,
   alpha_hold_shape: float = 0.05,
   write_steps: int = 2,
-  min_stair_steps: int = 50,
-  exit_steps: int = 100,
+  min_stair_steps: int = 30,
+  exit_steps: int = 40,
   cooldown_steps: int = 15,
   event_on_threshold: float = 0.6,
   event_off_threshold: float = 0.4,
-  stair_off_threshold: float = 0.4,
+  stair_on_threshold: float = 0.1,
+  stair_off_threshold: float = 0.1,
   aux_event_coef: float = 0.03,
-  aux_stair_coef: float = 0.02,
-  aux_future_collision_coef: float = 0.05,
+  aux_event_pos_weight: float = 100.0,
+  event_label_window_steps: int = 5,
+  aux_stair_coef: float = 0.05,
+  aux_stair_pos_weight: float = 3.0,
+  aux_future_collision_risk_coef: float = 0.03,
+  aux_future_safe_landing_quality_coef: float = 0.03,
   aux_stair_shape_coef: float = 0.03,
   aux_safe_stride_coef: float = 0.03,
   stair_shape_huber_delta: float = 0.05,
   safe_stride_huber_delta: float = 0.05,
   safe_stride_min: float = 0.08,
   safe_stride_max: float = 0.45,
-  future_collision_horizon: int = 20,
+  future_risk_weight_scale: float = 2.0,
+  future_quality_weight_scale: float = 2.0,
+  future_risk_huber_delta: float = 0.1,
+  future_quality_huber_delta: float = 0.1,
+  future_horizon: int = 20,
   latent_obs_set: str = "latent",
 ) -> RslRlGatedStairLatentModelCfg:
   return RslRlGatedStairLatentModelCfg(
@@ -201,17 +228,26 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
     cooldown_steps=cooldown_steps,
     event_on_threshold=event_on_threshold,
     event_off_threshold=event_off_threshold,
+    stair_on_threshold=stair_on_threshold,
     stair_off_threshold=stair_off_threshold,
     aux_event_coef=aux_event_coef,
+    aux_event_pos_weight=aux_event_pos_weight,
+    event_label_window_steps=event_label_window_steps,
     aux_stair_coef=aux_stair_coef,
-    aux_future_collision_coef=aux_future_collision_coef,
+    aux_stair_pos_weight=aux_stair_pos_weight,
+    aux_future_collision_risk_coef=aux_future_collision_risk_coef,
+    aux_future_safe_landing_quality_coef=aux_future_safe_landing_quality_coef,
     aux_stair_shape_coef=aux_stair_shape_coef,
     aux_safe_stride_coef=aux_safe_stride_coef,
     stair_shape_huber_delta=stair_shape_huber_delta,
     safe_stride_huber_delta=safe_stride_huber_delta,
     safe_stride_min=safe_stride_min,
     safe_stride_max=safe_stride_max,
-    future_collision_horizon=future_collision_horizon,
+    future_risk_weight_scale=future_risk_weight_scale,
+    future_quality_weight_scale=future_quality_weight_scale,
+    future_risk_huber_delta=future_risk_huber_delta,
+    future_quality_huber_delta=future_quality_huber_delta,
+    future_horizon=future_horizon,
     latent_obs_set=latent_obs_set,
     rnn_type="lstm",
     rnn_hidden_dim=latent_hidden_dim,
@@ -328,7 +364,7 @@ def unitree_g1_blind_rough_teacherkl_runner_cfg() -> RslRlTeacherKLRunnerCfg:
       "teacher": ("teacher", "camera"),
     },
     experiment_name="g1_blind_rough_teacherkl",
-    save_interval=1000,
+    save_interval=500,
     num_steps_per_env=24,
     max_iterations=40_001,
   )
@@ -363,22 +399,31 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
   alpha_hold_state: float = 0.01,
   alpha_hold_shape: float = 0.05,
   write_steps: int = 2,
-  min_stair_steps: int = 50,
-  exit_steps: int = 100,
+  min_stair_steps: int = 30,
+  exit_steps: int = 40,
   cooldown_steps: int = 15,
   event_on_threshold: float = 0.6,
   event_off_threshold: float = 0.4,
-  stair_off_threshold: float = 0.4,
+  stair_on_threshold: float = 0.1,
+  stair_off_threshold: float = 0.1,
   aux_event_coef: float = 0.03,
-  aux_stair_coef: float = 0.02,
-  aux_future_collision_coef: float = 0.05,
+  aux_event_pos_weight: float = 100.0,
+  event_label_window_steps: int = 5,
+  aux_stair_coef: float = 0.05,
+  aux_stair_pos_weight: float = 3.0,
+  aux_future_collision_risk_coef: float = 0.03,
+  aux_future_safe_landing_quality_coef: float = 0.03,
   aux_stair_shape_coef: float = 0.03,
   aux_safe_stride_coef: float = 0.03,
   stair_shape_huber_delta: float = 0.05,
   safe_stride_huber_delta: float = 0.05,
   safe_stride_min: float = 0.08,
   safe_stride_max: float = 0.45,
-  future_collision_horizon: int = 20,
+  future_risk_weight_scale: float = 2.0,
+  future_quality_weight_scale: float = 2.0,
+  future_risk_huber_delta: float = 0.1,
+  future_quality_huber_delta: float = 0.1,
+  future_horizon: int = 20,
   latent_obs_set: str = "latent",
   params: G1SlowLatentRunnerParams | None = None,
 ) -> RslRlTeacherKLRunnerCfg:
@@ -417,17 +462,28 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
     cooldown_steps = model_params.cooldown_steps
     event_on_threshold = model_params.event_on_threshold
     event_off_threshold = model_params.event_off_threshold
+    stair_on_threshold = model_params.stair_on_threshold
     stair_off_threshold = model_params.stair_off_threshold
     aux_event_coef = model_params.aux_event_coef
+    aux_event_pos_weight = model_params.aux_event_pos_weight
+    event_label_window_steps = model_params.event_label_window_steps
     aux_stair_coef = model_params.aux_stair_coef
-    aux_future_collision_coef = model_params.aux_future_collision_coef
+    aux_stair_pos_weight = model_params.aux_stair_pos_weight
+    aux_future_collision_risk_coef = model_params.aux_future_collision_risk_coef
+    aux_future_safe_landing_quality_coef = (
+      model_params.aux_future_safe_landing_quality_coef
+    )
     aux_stair_shape_coef = model_params.aux_stair_shape_coef
     aux_safe_stride_coef = model_params.aux_safe_stride_coef
     stair_shape_huber_delta = model_params.stair_shape_huber_delta
     safe_stride_huber_delta = model_params.safe_stride_huber_delta
     safe_stride_min = model_params.safe_stride_min
     safe_stride_max = model_params.safe_stride_max
-    future_collision_horizon = model_params.future_collision_horizon
+    future_risk_weight_scale = model_params.future_risk_weight_scale
+    future_quality_weight_scale = model_params.future_quality_weight_scale
+    future_risk_huber_delta = model_params.future_risk_huber_delta
+    future_quality_huber_delta = model_params.future_quality_huber_delta
+    future_horizon = model_params.future_horizon
     latent_obs_set = model_params.latent_obs_set
 
   cfg = unitree_g1_blind_rough_target_navigation_teacherkl_runner_cfg()
@@ -451,17 +507,26 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
     cooldown_steps=cooldown_steps,
     event_on_threshold=event_on_threshold,
     event_off_threshold=event_off_threshold,
+    stair_on_threshold=stair_on_threshold,
     stair_off_threshold=stair_off_threshold,
     aux_event_coef=aux_event_coef,
+    aux_event_pos_weight=aux_event_pos_weight,
+    event_label_window_steps=event_label_window_steps,
     aux_stair_coef=aux_stair_coef,
-    aux_future_collision_coef=aux_future_collision_coef,
+    aux_stair_pos_weight=aux_stair_pos_weight,
+    aux_future_collision_risk_coef=aux_future_collision_risk_coef,
+    aux_future_safe_landing_quality_coef=aux_future_safe_landing_quality_coef,
     aux_stair_shape_coef=aux_stair_shape_coef,
     aux_safe_stride_coef=aux_safe_stride_coef,
     stair_shape_huber_delta=stair_shape_huber_delta,
     safe_stride_huber_delta=safe_stride_huber_delta,
     safe_stride_min=safe_stride_min,
     safe_stride_max=safe_stride_max,
-    future_collision_horizon=future_collision_horizon,
+    future_risk_weight_scale=future_risk_weight_scale,
+    future_quality_weight_scale=future_quality_weight_scale,
+    future_risk_huber_delta=future_risk_huber_delta,
+    future_quality_huber_delta=future_quality_huber_delta,
+    future_horizon=future_horizon,
     latent_obs_set=latent_obs_set,
   )
   cfg.obs_groups = {

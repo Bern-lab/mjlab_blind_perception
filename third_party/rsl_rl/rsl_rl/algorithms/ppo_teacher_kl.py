@@ -366,31 +366,105 @@ class PPOTeacherKL(PPO):
         hidden_items = actor_hidden if isinstance(actor_hidden, tuple) else (actor_hidden,)
         return [tuple(h.shape) if hasattr(h, "shape") else type(h).__name__ for h in hidden_items]
 
-    def _compute_future_collision_labels(
+    def _compute_future_max_labels(
         self,
-        event_labels: torch.Tensor,
+        current_labels: torch.Tensor,
         masks: torch.Tensor | None,
         horizon: int,
     ) -> torch.Tensor:
-        """Compute max(event[t+1:t+K+1]) within padded recurrent trajectories."""
+        """Compute max(label[t+1:t+K+1]) within padded trajectories."""
         if horizon <= 0:
-            return torch.zeros_like(event_labels)
-        if event_labels.dim() < 3:
-            return torch.zeros_like(event_labels)
+            return torch.zeros_like(current_labels)
+        if current_labels.dim() < 3:
+            return torch.zeros_like(current_labels)
 
-        valid_events = event_labels
+        valid_labels = current_labels
         if masks is not None:
-            valid_events = valid_events * masks.unsqueeze(-1).to(valid_events.dtype)
+            valid_labels = valid_labels * masks.unsqueeze(-1).to(valid_labels.dtype)
 
-        future = torch.zeros_like(valid_events)
-        seq_len = valid_events.shape[0]
+        future = torch.zeros_like(valid_labels)
+        seq_len = valid_labels.shape[0]
         for offset in range(1, min(horizon, seq_len - 1) + 1):
-            shifted = torch.zeros_like(valid_events)
-            shifted[:-offset] = valid_events[offset:]
+            shifted = torch.zeros_like(valid_labels)
+            shifted[:-offset] = valid_labels[offset:]
             future = torch.maximum(future, shifted)
         if masks is not None:
             future = future * masks.unsqueeze(-1).to(future.dtype)
         return future
+
+    def _compute_future_first_touchdown_quality(
+        self,
+        touchdown: torch.Tensor,
+        quality: torch.Tensor,
+        masks: torch.Tensor | None,
+        horizon: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return quality of the first touchdown in the next K steps."""
+        if horizon <= 0 or touchdown.dim() < 3:
+            zeros = torch.zeros_like(quality)
+            return zeros, zeros
+        if masks is not None:
+            valid = masks.unsqueeze(-1)
+            touchdown = touchdown * valid.to(touchdown.dtype)
+            quality = quality * valid.to(quality.dtype)
+
+        future_quality = torch.zeros_like(quality)
+        found = torch.zeros_like(touchdown, dtype=torch.bool)
+        seq_len = touchdown.shape[0]
+        for offset in range(1, min(horizon, seq_len - 1) + 1):
+            shifted_touchdown = torch.zeros_like(touchdown, dtype=torch.bool)
+            shifted_quality = torch.zeros_like(quality)
+            shifted_touchdown[:-offset] = touchdown[offset:] > 0.5
+            shifted_quality[:-offset] = quality[offset:]
+            take = shifted_touchdown & ~found
+            future_quality = torch.where(take, shifted_quality, future_quality)
+            found |= shifted_touchdown
+        if masks is not None:
+            valid = masks.unsqueeze(-1)
+            future_quality = future_quality * valid.to(future_quality.dtype)
+            found &= valid.bool()
+        return future_quality, found.float()
+
+    @staticmethod
+    def _expand_event_labels(
+        labels: torch.Tensor,
+        masks: torch.Tensor | None,
+        window_steps: int,
+    ) -> torch.Tensor:
+        """Keep sparse one-frame event labels positive for a short forward window."""
+        if window_steps <= 1 or labels.dim() < 3:
+            return labels
+
+        valid_labels = labels
+        if masks is not None:
+            valid_labels = valid_labels * masks.unsqueeze(-1).to(valid_labels.dtype)
+
+        expanded = valid_labels.clone()
+        seq_len = labels.shape[0]
+        for offset in range(1, min(window_steps, seq_len)):
+            shifted = torch.zeros_like(valid_labels)
+            shifted[offset:] = valid_labels[:-offset]
+            expanded = torch.maximum(expanded, shifted)
+        if masks is not None:
+            expanded = expanded * masks.unsqueeze(-1).to(expanded.dtype)
+        return expanded
+
+    @staticmethod
+    def _compute_weighted_bounded_huber(
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+        weight_scale: float,
+        huber_delta: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        predictions = torch.sigmoid(logits)
+        weights = 1.0 + weight_scale * labels
+        error = functional.smooth_l1_loss(
+            predictions,
+            labels,
+            reduction="none",
+            beta=huber_delta,
+        )
+        return (weights * error).mean(), torch.abs(predictions - labels).mean()
 
     @staticmethod
     def _compute_stair_shape_loss(
@@ -443,11 +517,66 @@ class PPOTeacherKL(PPO):
         valid_count = valid.sum().clamp_min(1.0)
         return (out_of_range.to(labels.dtype) * valid).sum(dim=reduce_dims) / valid_count
 
+    def _add_slow_latent_phase_alignment_logs(
+        self,
+        logs: dict[str, float],
+        diagnostics: dict[str, torch.Tensor],
+        stair_labels: torch.Tensor,
+        dones: torch.Tensor | None,
+        masks: torch.Tensor | None,
+    ) -> None:
+        """Log mismatch between env stair labels and latent gate state."""
+        mode = diagnostics.get("gate_mode")
+        if mode is None or mode.numel() == 0 or mode.numel() != stair_labels.numel():
+            return
+
+        mode_bool_shape = mode.reshape(stair_labels.shape)
+        env_stair = stair_labels > 0.5
+        latent_normal = mode_bool_shape == 0.0
+        latent_write = mode_bool_shape == 1.0
+        latent_memory = mode_bool_shape == 2.0
+
+        logs["slow_latent_memory_while_env_normal_ratio"] = (
+            self._distributed_mean_scalar((latent_memory & ~env_stair).float().mean())
+            .item()
+        )
+        logs["slow_latent_write_while_env_normal_ratio"] = (
+            self._distributed_mean_scalar((latent_write & ~env_stair).float().mean())
+            .item()
+        )
+        logs["slow_latent_env_stair_while_latent_normal_ratio"] = (
+            self._distributed_mean_scalar((env_stair & latent_normal).float().mean())
+            .item()
+        )
+        logs["slow_latent_memory_while_env_stair_ratio"] = (
+            self._distributed_mean_scalar((latent_memory & env_stair).float().mean())
+            .item()
+        )
+
+        if dones is None:
+            return
+        dones_float = dones.float()
+        if masks is not None:
+            dones_float = cast(torch.Tensor, unpad_trajectories(dones_float, masks))
+        if dones_float.numel() != stair_labels.numel():
+            return
+        dones_bool = dones_float.reshape(stair_labels.shape) > 0.5
+        logs["slow_latent_done_while_memory_ratio"] = (
+            self._distributed_mean_scalar((dones_bool & latent_memory).float().mean())
+            .item()
+        )
+        logs["slow_latent_done_while_env_normal_memory_ratio"] = (
+            self._distributed_mean_scalar(
+                (dones_bool & ~env_stair & latent_memory).float().mean()
+            )
+            .item()
+        )
+
     def _compute_slow_latent_aux_loss(
         self,
         batch: RolloutStorage.Batch,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        """Compute auxiliary BCE losses exposed by the slow-latent actor.
+        """Compute auxiliary losses exposed by the slow-latent actor.
 
         Debug note:
           This function is the only place where the slow-latent event/stair/future
@@ -466,7 +595,8 @@ class PPOTeacherKL(PPO):
 
         event_coef = float(getattr(self.actor, "aux_event_coef", 0.0))
         stair_coef = float(getattr(self.actor, "aux_stair_coef", 0.0))
-        future_coef = float(getattr(self.actor, "aux_future_collision_coef", 0.0))
+        future_risk_coef = float(getattr(self.actor, "aux_future_collision_risk_coef", 0.0))
+        future_quality_coef = float(getattr(self.actor, "aux_future_safe_landing_quality_coef", 0.0))
         shape_coef = float(getattr(self.actor, "aux_stair_shape_coef", 0.0))
         safe_stride_coef = float(getattr(self.actor, "aux_safe_stride_coef", 0.0))
 
@@ -507,7 +637,8 @@ class PPOTeacherKL(PPO):
                 {
                     "event": event_coef,
                     "stair": stair_coef,
-                    "future": future_coef,
+                    "future_risk": future_risk_coef,
+                    "future_quality": future_quality_coef,
                     "shape": shape_coef,
                     "safe_stride": safe_stride_coef,
                 },
@@ -537,7 +668,8 @@ class PPOTeacherKL(PPO):
         if (
             event_coef == 0.0
             and stair_coef == 0.0
-            and future_coef == 0.0
+            and future_risk_coef == 0.0
+            and future_quality_coef == 0.0
             and shape_coef == 0.0
             and safe_stride_coef == 0.0
         ):
@@ -562,7 +694,19 @@ class PPOTeacherKL(PPO):
                 "Slow-latent safe-stride loss requires labels [event, stair, tread_depth, "
                 "riser_height, shape_valid, safe_stride, safe_stride_valid]."
             )
-        event_labels_padded = labels[..., 0:1].float()
+        if (future_risk_coef != 0.0 or future_quality_coef != 0.0) and labels.shape[-1] < 10:
+            raise RuntimeError(
+                "Slow-latent future losses require labels [entry, stair, tread_depth, "
+                "riser_height, shape_valid, safe_stride, safe_stride_valid, "
+                "collision_risk, landing_touchdown, landing_quality]."
+            )
+        event_labels_raw_padded = labels[..., 0:1].float()
+        event_label_window_steps = int(getattr(self.actor, "event_label_window_steps", 1))
+        event_labels_padded = self._expand_event_labels(
+            event_labels_raw_padded,
+            batch.masks,
+            event_label_window_steps,
+        )
         stair_labels_padded = labels[..., 1:2].float()
         shape_labels_padded = labels[..., 2:4].float()
         shape_valid_padded = labels[..., 4:5].float()
@@ -572,17 +716,46 @@ class PPOTeacherKL(PPO):
         else:
             safe_stride_labels_padded = torch.zeros_like(event_labels_padded)
             safe_stride_valid_padded = torch.zeros_like(event_labels_padded)
-        future_horizon = int(getattr(self.actor, "future_collision_horizon", 20))
-        future_labels_padded = self._compute_future_collision_labels(
-            event_labels_padded,
+        if labels.shape[-1] >= 10:
+            collision_risk_now = labels[..., 7:8].float()
+            landing_touchdown_now = labels[..., 8:9].float()
+            landing_quality_now = labels[..., 9:10].float()
+        else:
+            collision_risk_now = torch.zeros_like(event_labels_padded)
+            landing_touchdown_now = torch.zeros_like(event_labels_padded)
+            landing_quality_now = torch.zeros_like(event_labels_padded)
+        future_horizon = int(getattr(self.actor, "future_horizon", 20))
+        future_risk_padded = self._compute_future_max_labels(
+            collision_risk_now,
+            batch.masks,
+            future_horizon,
+        )
+        future_quality_padded, future_touchdown_found_padded = self._compute_future_first_touchdown_quality(
+            landing_touchdown_now,
+            landing_quality_now,
             batch.masks,
             future_horizon,
         )
 
         if batch.masks is not None:
+            event_labels_raw = cast(
+                torch.Tensor,
+                unpad_trajectories(event_labels_raw_padded, batch.masks),
+            )
             event_labels = cast(torch.Tensor, unpad_trajectories(event_labels_padded, batch.masks))
             stair_labels = cast(torch.Tensor, unpad_trajectories(stair_labels_padded, batch.masks))
-            future_labels = cast(torch.Tensor, unpad_trajectories(future_labels_padded, batch.masks))
+            future_risk_labels = cast(
+                torch.Tensor,
+                unpad_trajectories(future_risk_padded, batch.masks),
+            )
+            future_quality_labels = cast(
+                torch.Tensor,
+                unpad_trajectories(future_quality_padded, batch.masks),
+            )
+            future_touchdown_found = cast(
+                torch.Tensor,
+                unpad_trajectories(future_touchdown_found_padded, batch.masks),
+            )
             shape_labels = cast(torch.Tensor, unpad_trajectories(shape_labels_padded, batch.masks))
             shape_valid = cast(torch.Tensor, unpad_trajectories(shape_valid_padded, batch.masks))
             safe_stride_labels = cast(
@@ -594,9 +767,12 @@ class PPOTeacherKL(PPO):
                 unpad_trajectories(safe_stride_valid_padded, batch.masks),
             )
         else:
+            event_labels_raw = event_labels_raw_padded
             event_labels = event_labels_padded
             stair_labels = stair_labels_padded
-            future_labels = future_labels_padded
+            future_risk_labels = future_risk_padded
+            future_quality_labels = future_quality_padded
+            future_touchdown_found = future_touchdown_found_padded
             shape_labels = shape_labels_padded
             shape_valid = shape_valid_padded
             safe_stride_labels = safe_stride_labels_padded
@@ -604,33 +780,170 @@ class PPOTeacherKL(PPO):
 
         total_loss = torch.zeros((), device=self.device)
         logs: dict[str, float] = {}
+        self._add_slow_latent_phase_alignment_logs(
+            logs,
+            diagnostics,
+            stair_labels,
+            batch.dones,
+            batch.masks,
+        )
         if event_coef != 0.0 and "event_logit" in aux_outputs:
+            event_prob = torch.sigmoid(aux_outputs["event_logit"].detach())
+            event_labels_detached = event_labels.detach()
+            event_labels_raw_detached = event_labels_raw.detach()
+            event_positive = event_labels_detached > 0.5
+            event_positive_raw = event_labels_raw_detached > 0.5
+            event_negative = ~event_positive
+            event_pred_0p6 = event_prob > 0.6
+            event_pred_0p4 = event_prob > 0.4
+            event_on_threshold = float(getattr(self.actor, "event_on_threshold", 0.6))
+            event_pos_weight = float(getattr(self.actor, "aux_event_pos_weight", 1.0))
+            event_pred_on_threshold = event_prob > event_on_threshold
+            event_pos_count = event_positive.float().sum().clamp_min(1.0)
+            event_raw_pos_count = event_positive_raw.float().sum().clamp_min(1.0)
+            event_neg_count = event_negative.float().sum().clamp_min(1.0)
+            event_pred_0p6_count = event_pred_0p6.float().sum().clamp_min(1.0)
+            event_true_positive_0p6 = (event_pred_0p6 & event_positive).float().sum()
+            event_raw_true_positive_0p6 = (
+                event_pred_0p6 & event_positive_raw
+            ).float().sum()
+            flat_event_prob = event_prob.float().reshape(-1)
             event_loss_raw = functional.binary_cross_entropy_with_logits(
                 aux_outputs["event_logit"],
                 event_labels,
+                pos_weight=aux_outputs["event_logit"].new_tensor(event_pos_weight),
             )
             event_loss = event_coef * event_loss_raw
             total_loss = total_loss + event_loss
             logs["slow_latent_event_bce"] = self._distributed_mean_scalar(event_loss_raw).item()
             logs["slow_latent_event_loss"] = self._distributed_mean_scalar(event_loss).item()
+            logs["slow_latent_event_pos_weight"] = event_pos_weight
+            logs["slow_latent_event_label_window_steps"] = float(event_label_window_steps)
+            logs["slow_latent_event_raw_label_mean"] = self._distributed_mean_scalar(
+                event_labels_raw_detached.float().mean()
+            ).item()
+            logs["slow_latent_event_label_mean"] = self._distributed_mean_scalar(
+                event_labels_detached.float().mean()
+            ).item()
+            logs["slow_latent_event_raw_label_positive_ratio"] = (
+                self._distributed_mean_scalar(event_positive_raw.float().mean()).item()
+            )
+            logs["slow_latent_event_label_positive_ratio"] = self._distributed_mean_scalar(
+                event_positive.float().mean()
+            ).item()
+            logs["slow_latent_event_prob_max"] = self._distributed_mean_scalar(
+                flat_event_prob.max()
+            ).item()
+            logs["slow_latent_event_prob_p99"] = self._distributed_mean_scalar(
+                torch.quantile(flat_event_prob, 0.99)
+            ).item()
+            logs["slow_latent_event_prob_gt_on_threshold_ratio"] = (
+                self._distributed_mean_scalar(event_pred_on_threshold.float().mean()).item()
+            )
+            logs["slow_latent_event_prob_gt_0p6_ratio"] = self._distributed_mean_scalar(
+                event_pred_0p6.float().mean()
+            ).item()
+            logs["slow_latent_event_prob_gt_0p4_ratio"] = self._distributed_mean_scalar(
+                event_pred_0p4.float().mean()
+            ).item()
+            logs["slow_latent_event_prob_pos_mean"] = self._distributed_mean_scalar(
+                (event_prob * event_positive.float()).sum() / event_pos_count
+            ).item()
+            logs["slow_latent_event_prob_raw_pos_mean"] = self._distributed_mean_scalar(
+                (event_prob * event_positive_raw.float()).sum() / event_raw_pos_count
+            ).item()
+            logs["slow_latent_event_prob_neg_mean"] = self._distributed_mean_scalar(
+                (event_prob * event_negative.float()).sum() / event_neg_count
+            ).item()
+            logs["slow_latent_event_recall_at_0p6"] = self._distributed_mean_scalar(
+                event_true_positive_0p6 / event_pos_count
+            ).item()
+            logs["slow_latent_event_raw_recall_at_0p6"] = self._distributed_mean_scalar(
+                event_raw_true_positive_0p6 / event_raw_pos_count
+            ).item()
+            logs["slow_latent_event_precision_at_0p6"] = self._distributed_mean_scalar(
+                event_true_positive_0p6 / event_pred_0p6_count
+            ).item()
         if stair_coef != 0.0 and "stair_logit" in aux_outputs:
+            stair_prob = torch.sigmoid(aux_outputs["stair_logit"].detach())
+            stair_labels_detached = stair_labels.detach()
+            stair_positive = stair_labels_detached > 0.5
+            stair_negative = ~stair_positive
+            stair_pos_count = stair_positive.float().sum().clamp_min(1.0)
+            stair_neg_count = stair_negative.float().sum().clamp_min(1.0)
+            stair_pos_weight = float(getattr(self.actor, "aux_stair_pos_weight", 1.0))
+            stair_on_threshold = float(getattr(self.actor, "stair_on_threshold", 0.1))
             stair_loss_raw = functional.binary_cross_entropy_with_logits(
                 aux_outputs["stair_logit"],
                 stair_labels,
+                pos_weight=aux_outputs["stair_logit"].new_tensor(stair_pos_weight),
             )
             stair_loss = stair_coef * stair_loss_raw
             total_loss = total_loss + stair_loss
             logs["slow_latent_stair_bce"] = self._distributed_mean_scalar(stair_loss_raw).item()
             logs["slow_latent_stair_loss"] = self._distributed_mean_scalar(stair_loss).item()
-        if future_coef != 0.0 and "future_collision_logit" in aux_outputs:
-            future_loss_raw = functional.binary_cross_entropy_with_logits(
-                aux_outputs["future_collision_logit"],
-                future_labels,
+            logs["slow_latent_stair_pos_weight"] = stair_pos_weight
+            logs["slow_latent_stair_on_threshold"] = stair_on_threshold
+            logs["slow_latent_stair_label_mean"] = self._distributed_mean_scalar(
+                stair_labels_detached.float().mean()
+            ).item()
+            logs["slow_latent_stair_prob_pos_mean"] = self._distributed_mean_scalar(
+                (stair_prob * stair_positive.float()).sum() / stair_pos_count
+            ).item()
+            logs["slow_latent_stair_prob_neg_mean"] = self._distributed_mean_scalar(
+                (stair_prob * stair_negative.float()).sum() / stair_neg_count
+            ).item()
+            logs["slow_latent_stair_prob_gt_0p4_ratio"] = (
+                self._distributed_mean_scalar((stair_prob > 0.4).float().mean()).item()
             )
-            future_loss = future_coef * future_loss_raw
-            total_loss = total_loss + future_loss
-            logs["slow_latent_future_bce"] = self._distributed_mean_scalar(future_loss_raw).item()
-            logs["slow_latent_future_loss"] = self._distributed_mean_scalar(future_loss).item()
+            logs["slow_latent_stair_prob_gt_on_threshold_ratio"] = (
+                self._distributed_mean_scalar((stair_prob > stair_on_threshold).float().mean()).item()
+            )
+        if future_risk_coef != 0.0 and "future_collision_risk_logit" in aux_outputs:
+            risk_loss_raw, risk_mae = self._compute_weighted_bounded_huber(
+                aux_outputs["future_collision_risk_logit"],
+                future_risk_labels,
+                float(getattr(self.actor, "future_risk_weight_scale", 2.0)),
+                float(getattr(self.actor, "future_risk_huber_delta", 0.1)),
+            )
+            risk_loss = future_risk_coef * risk_loss_raw
+            total_loss = total_loss + risk_loss
+            logs["slow_latent_future_collision_risk_huber"] = self._distributed_mean_scalar(risk_loss_raw).item()
+            logs["slow_latent_future_collision_risk_loss"] = self._distributed_mean_scalar(risk_loss).item()
+            logs["slow_latent_future_collision_risk_mae"] = self._distributed_mean_scalar(risk_mae).item()
+            logs["slow_latent_future_collision_risk_label_mean"] = self._distributed_mean_scalar(
+                future_risk_labels.mean()
+            ).item()
+        if future_quality_coef != 0.0 and "future_safe_landing_quality_logit" in aux_outputs:
+            quality_loss_raw, quality_mae = self._compute_weighted_bounded_huber(
+                aux_outputs["future_safe_landing_quality_logit"],
+                future_quality_labels,
+                float(getattr(self.actor, "future_quality_weight_scale", 2.0)),
+                float(getattr(self.actor, "future_quality_huber_delta", 0.1)),
+            )
+            quality_loss = future_quality_coef * quality_loss_raw
+            total_loss = total_loss + quality_loss
+            logs["slow_latent_future_safe_landing_quality_huber"] = self._distributed_mean_scalar(
+                quality_loss_raw
+            ).item()
+            logs["slow_latent_future_safe_landing_quality_loss"] = self._distributed_mean_scalar(quality_loss).item()
+            logs["slow_latent_future_safe_landing_quality_mae"] = self._distributed_mean_scalar(quality_mae).item()
+            logs["slow_latent_future_safe_landing_quality_label_mean"] = self._distributed_mean_scalar(
+                future_quality_labels.mean()
+            ).item()
+            logs["slow_latent_future_touchdown_found_ratio"] = self._distributed_mean_scalar(
+                future_touchdown_found.mean()
+            ).item()
+            found_count = future_touchdown_found.sum().clamp_min(1.0)
+            first_touchdown_quality = (future_quality_labels * future_touchdown_found).sum() / found_count
+            logs["slow_latent_first_touchdown_quality_mean"] = self._distributed_mean_scalar(
+                first_touchdown_quality
+            ).item()
+        if future_risk_coef != 0.0 and future_quality_coef != 0.0:
+            label_overlap = (future_risk_labels * future_quality_labels).mean()
+            logs["slow_latent_future_risk_quality_label_overlap_mean"] = self._distributed_mean_scalar(
+                label_overlap
+            ).item()
         if shape_coef != 0.0 and "stair_shape" in aux_outputs:
             huber_delta = float(getattr(self.actor, "stair_shape_huber_delta", 0.05))
             shape_predictions = aux_outputs["stair_shape"]
@@ -739,7 +1052,15 @@ class PPOTeacherKL(PPO):
 
         add_mean("slow_latent_event_prob_mean", diagnostics.get("event_prob"))
         add_mean("slow_latent_stair_prob_mean", diagnostics.get("stair_prob"))
-        add_mean("slow_latent_future_prob_mean", diagnostics.get("future_prob"))
+        future_risk = diagnostics.get("future_risk")
+        future_quality = diagnostics.get("future_quality")
+        add_mean("slow_latent_future_collision_risk_mean", future_risk)
+        add_mean("slow_latent_future_safe_landing_quality_mean", future_quality)
+        if future_risk is not None and future_quality is not None:
+            add_mean(
+                "slow_latent_future_risk_quality_overlap_mean",
+                future_risk * future_quality,
+            )
         add_mean("slow_latent_z_norm_mean", diagnostics.get("z_norm"))
 
         stair_shape = diagnostics.get("stair_shape")
@@ -764,6 +1085,26 @@ class PPOTeacherKL(PPO):
             logs["slow_latent_alpha_max"] = self._distributed_mean_scalar(alpha.max()).item()
         add_mean("slow_latent_alpha_state_mean", diagnostics.get("alpha_state"))
         add_mean("slow_latent_alpha_shape_mean", diagnostics.get("alpha_shape"))
+        add_mean(
+            "slow_latent_episode_write_ever_ratio",
+            diagnostics.get("episode_write_ever"),
+        )
+        add_mean(
+            "slow_latent_episode_memory_ever_ratio",
+            diagnostics.get("episode_memory_ever"),
+        )
+
+        memory_age = diagnostics.get("gate_memory_age")
+        if memory_age is not None and memory_age.numel() > 0:
+            positive_age = memory_age.float()[memory_age.float() > 0.0]
+            if positive_age.numel() > 0:
+                logs["slow_latent_memory_age_mean"] = (
+                    self._distributed_mean_scalar(positive_age.mean()).item()
+                )
+                logs["slow_latent_memory_age_p90"] = (
+                    self._distributed_mean_scalar(torch.quantile(positive_age, 0.9))
+                    .item()
+                )
 
         mode = diagnostics.get("gate_mode")
         if mode is not None and mode.numel() > 0:
