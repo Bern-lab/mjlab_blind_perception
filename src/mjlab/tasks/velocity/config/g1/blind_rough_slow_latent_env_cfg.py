@@ -156,7 +156,7 @@ class G1SlowLatentRewardParams:
   foot_lip_edge_radius: float = 0.07
   foot_lip_edge_height_band: float = 0.06
   foot_lip_support_speed_floor: float = 0.08
-  foot_lip_ignore_boundary_layers: int = 2
+  foot_lip_ignore_boundary_layers: int = 0
 
   toe_slab_weight: float = -4.2
   toe_slab_depth: float = 0.10

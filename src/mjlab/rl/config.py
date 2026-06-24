@@ -244,6 +244,8 @@ class RslRlTeacherKLCfg:
   """Whether to raise if the teacher KL becomes NaN or Inf."""
   debug_shapes: bool = False
   """Print distribution parameter shapes when checking them."""
+  log_kl_when_lambda_zero: bool = True
+  """Whether to keep evaluating teacher diagnostics after guidance weight is zero."""
 
 
 @dataclass

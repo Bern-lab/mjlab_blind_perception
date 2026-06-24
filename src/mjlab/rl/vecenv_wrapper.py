@@ -1,3 +1,5 @@
+from typing import Iterable
+
 import torch
 from rsl_rl.env import VecEnv
 from tensordict import TensorDict
@@ -14,6 +16,7 @@ class RslRlVecEnvWrapper(VecEnv):
   ):
     self.env = env
     self.clip_actions = clip_actions
+    self._observation_group_names: tuple[str, ...] | None = None
 
     self.num_envs = self.unwrapped.num_envs
     self.device = torch.device(self.unwrapped.device)
@@ -61,8 +64,16 @@ class RslRlVecEnvWrapper(VecEnv):
   def seed(self, seed: int = -1) -> int:
     return self.unwrapped.seed(seed)
 
+  def set_observation_groups(self, group_names: Iterable[str] | None) -> None:
+    self._observation_group_names = (
+      None if group_names is None else tuple(dict.fromkeys(group_names))
+    )
+    self.unwrapped.set_observation_groups(self._observation_group_names)
+
   def get_observations(self) -> TensorDict:
-    obs_dict = self.unwrapped.observation_manager.compute()
+    obs_dict = self.unwrapped.observation_manager.compute(
+      group_names=self._observation_group_names
+    )
     return TensorDict(obs_dict, batch_size=[self.num_envs])
 
   def reset(self) -> tuple[TensorDict, dict]:

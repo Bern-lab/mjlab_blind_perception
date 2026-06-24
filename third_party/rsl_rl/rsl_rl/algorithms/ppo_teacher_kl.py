@@ -310,21 +310,21 @@ class PPOTeacherKL(PPO):
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Compute frozen-teacher guidance and optional actor auxiliary losses."""
         if self.teacher_guidance_enabled:
-            if self.teacher is None or not self.teacher_loaded:
-                raise RuntimeError("Teacher KL loss requires a loaded teacher model.")
-            if batch.observations is None:
-                raise RuntimeError("Teacher KL loss requires observations in the rollout batch.")
-
             teacher_kl_lambda = self.get_teacher_kl_lambda()
-            if teacher_kl_lambda == 0.0 and not self.teacher_kl_cfg.get("log_kl_when_lambda_zero", True):
+            if not self._teacher_guidance_requires_observations():
                 teacher_loss = torch.zeros((), device=self.device)
                 log_dict = {
                     "teacher_loss": 0.0,
                     "teacher_loss_for_update": 0.0,
                     "teacher_lambda": 0.0,
                     "teacher_kl_lambda": 0.0,
+                    "teacher_guidance_active": 0.0,
                 }
             else:
+                if self.teacher is None or not self.teacher_loaded:
+                    raise RuntimeError("Teacher KL loss requires a loaded teacher model.")
+                if batch.observations is None:
+                    raise RuntimeError("Teacher KL loss requires observations in the rollout batch.")
                 teacher_loss, log_dict = self._compute_teacher_guidance_loss(
                     batch,
                     original_batch_size,
@@ -348,6 +348,42 @@ class PPOTeacherKL(PPO):
             aux_logs = {}
         log_dict.update(aux_logs)
         return teacher_loss + aux_loss, log_dict
+
+    def _teacher_guidance_requires_observations(self) -> bool:
+        """Return whether the next update still needs frozen-teacher observations."""
+        if not self.teacher_guidance_enabled:
+            return False
+        if self.teacher_imitation_only:
+            return True
+        if self.get_teacher_kl_lambda() != 0.0:
+            return True
+        return bool(self.teacher_kl_cfg.get("log_kl_when_lambda_zero", True))
+
+    @staticmethod
+    def _collect_model_observation_groups(model: object, groups: set[str]) -> None:
+        obs_groups = getattr(model, "obs_groups", ())
+        groups.update(str(group_name) for group_name in obs_groups)
+        latent_obs_groups = getattr(model, "_latent_obs_group_names", ())
+        groups.update(str(group_name) for group_name in latent_obs_groups)
+
+    def get_required_observation_groups(self) -> tuple[str, ...]:
+        """Return observation groups needed by the next rollout/update cycle."""
+        groups: set[str] = set()
+        self._collect_model_observation_groups(self.actor, groups)
+        self._collect_model_observation_groups(self.critic, groups)
+
+        rnd_obs_groups = getattr(self.rnd, "obs_groups", None)
+        if isinstance(rnd_obs_groups, dict):
+            for group_names in rnd_obs_groups.values():
+                groups.update(str(group_name) for group_name in group_names)
+        elif rnd_obs_groups is not None:
+            groups.update(str(group_name) for group_name in rnd_obs_groups)
+
+        if self._actor_has_slow_latent_aux():
+            groups.add("latent_labels")
+        if self._teacher_guidance_requires_observations() and self.teacher is not None:
+            self._collect_model_observation_groups(self.teacher, groups)
+        return tuple(sorted(groups))
 
     def _actor_has_slow_latent_aux(self) -> bool:
         """Return whether the actor exposes slow-latent auxiliary heads."""
@@ -536,22 +572,18 @@ class PPOTeacherKL(PPO):
         latent_write = mode_bool_shape == 1.0
         latent_memory = mode_bool_shape == 2.0
 
-        logs["slow_latent_memory_while_env_normal_ratio"] = (
-            self._distributed_mean_scalar((latent_memory & ~env_stair).float().mean())
-            .item()
-        )
-        logs["slow_latent_write_while_env_normal_ratio"] = (
-            self._distributed_mean_scalar((latent_write & ~env_stair).float().mean())
-            .item()
-        )
-        logs["slow_latent_env_stair_while_latent_normal_ratio"] = (
-            self._distributed_mean_scalar((env_stair & latent_normal).float().mean())
-            .item()
-        )
-        logs["slow_latent_memory_while_env_stair_ratio"] = (
-            self._distributed_mean_scalar((latent_memory & env_stair).float().mean())
-            .item()
-        )
+        logs["slow_latent_memory_while_env_normal_ratio"] = self._distributed_mean_scalar(
+            (latent_memory & ~env_stair).float().mean()
+        ).item()
+        logs["slow_latent_write_while_env_normal_ratio"] = self._distributed_mean_scalar(
+            (latent_write & ~env_stair).float().mean()
+        ).item()
+        logs["slow_latent_env_stair_while_latent_normal_ratio"] = self._distributed_mean_scalar(
+            (env_stair & latent_normal).float().mean()
+        ).item()
+        logs["slow_latent_memory_while_env_stair_ratio"] = self._distributed_mean_scalar(
+            (latent_memory & env_stair).float().mean()
+        ).item()
 
         if dones is None:
             return
@@ -561,16 +593,12 @@ class PPOTeacherKL(PPO):
         if dones_float.numel() != stair_labels.numel():
             return
         dones_bool = dones_float.reshape(stair_labels.shape) > 0.5
-        logs["slow_latent_done_while_memory_ratio"] = (
-            self._distributed_mean_scalar((dones_bool & latent_memory).float().mean())
-            .item()
-        )
-        logs["slow_latent_done_while_env_normal_memory_ratio"] = (
-            self._distributed_mean_scalar(
-                (dones_bool & ~env_stair & latent_memory).float().mean()
-            )
-            .item()
-        )
+        logs["slow_latent_done_while_memory_ratio"] = self._distributed_mean_scalar(
+            (dones_bool & latent_memory).float().mean()
+        ).item()
+        logs["slow_latent_done_while_env_normal_memory_ratio"] = self._distributed_mean_scalar(
+            (dones_bool & ~env_stair & latent_memory).float().mean()
+        ).item()
 
     def _compute_slow_latent_aux_loss(
         self,
@@ -804,9 +832,7 @@ class PPOTeacherKL(PPO):
             event_neg_count = event_negative.float().sum().clamp_min(1.0)
             event_pred_0p6_count = event_pred_0p6.float().sum().clamp_min(1.0)
             event_true_positive_0p6 = (event_pred_0p6 & event_positive).float().sum()
-            event_raw_true_positive_0p6 = (
-                event_pred_0p6 & event_positive_raw
-            ).float().sum()
+            event_raw_true_positive_0p6 = (event_pred_0p6 & event_positive_raw).float().sum()
             flat_event_prob = event_prob.float().reshape(-1)
             event_loss_raw = functional.binary_cross_entropy_with_logits(
                 aux_outputs["event_logit"],
@@ -825,21 +851,19 @@ class PPOTeacherKL(PPO):
             logs["slow_latent_event_label_mean"] = self._distributed_mean_scalar(
                 event_labels_detached.float().mean()
             ).item()
-            logs["slow_latent_event_raw_label_positive_ratio"] = (
-                self._distributed_mean_scalar(event_positive_raw.float().mean()).item()
-            )
+            logs["slow_latent_event_raw_label_positive_ratio"] = self._distributed_mean_scalar(
+                event_positive_raw.float().mean()
+            ).item()
             logs["slow_latent_event_label_positive_ratio"] = self._distributed_mean_scalar(
                 event_positive.float().mean()
             ).item()
-            logs["slow_latent_event_prob_max"] = self._distributed_mean_scalar(
-                flat_event_prob.max()
-            ).item()
+            logs["slow_latent_event_prob_max"] = self._distributed_mean_scalar(flat_event_prob.max()).item()
             logs["slow_latent_event_prob_p99"] = self._distributed_mean_scalar(
                 torch.quantile(flat_event_prob, 0.99)
             ).item()
-            logs["slow_latent_event_prob_gt_on_threshold_ratio"] = (
-                self._distributed_mean_scalar(event_pred_on_threshold.float().mean()).item()
-            )
+            logs["slow_latent_event_prob_gt_on_threshold_ratio"] = self._distributed_mean_scalar(
+                event_pred_on_threshold.float().mean()
+            ).item()
             logs["slow_latent_event_prob_gt_0p6_ratio"] = self._distributed_mean_scalar(
                 event_pred_0p6.float().mean()
             ).item()
@@ -893,12 +917,12 @@ class PPOTeacherKL(PPO):
             logs["slow_latent_stair_prob_neg_mean"] = self._distributed_mean_scalar(
                 (stair_prob * stair_negative.float()).sum() / stair_neg_count
             ).item()
-            logs["slow_latent_stair_prob_gt_0p4_ratio"] = (
-                self._distributed_mean_scalar((stair_prob > 0.4).float().mean()).item()
-            )
-            logs["slow_latent_stair_prob_gt_on_threshold_ratio"] = (
-                self._distributed_mean_scalar((stair_prob > stair_on_threshold).float().mean()).item()
-            )
+            logs["slow_latent_stair_prob_gt_0p4_ratio"] = self._distributed_mean_scalar(
+                (stair_prob > 0.4).float().mean()
+            ).item()
+            logs["slow_latent_stair_prob_gt_on_threshold_ratio"] = self._distributed_mean_scalar(
+                (stair_prob > stair_on_threshold).float().mean()
+            ).item()
         if future_risk_coef != 0.0 and "future_collision_risk_logit" in aux_outputs:
             risk_loss_raw, risk_mae = self._compute_weighted_bounded_huber(
                 aux_outputs["future_collision_risk_logit"],
@@ -1098,13 +1122,10 @@ class PPOTeacherKL(PPO):
         if memory_age is not None and memory_age.numel() > 0:
             positive_age = memory_age.float()[memory_age.float() > 0.0]
             if positive_age.numel() > 0:
-                logs["slow_latent_memory_age_mean"] = (
-                    self._distributed_mean_scalar(positive_age.mean()).item()
-                )
-                logs["slow_latent_memory_age_p90"] = (
-                    self._distributed_mean_scalar(torch.quantile(positive_age, 0.9))
-                    .item()
-                )
+                logs["slow_latent_memory_age_mean"] = self._distributed_mean_scalar(positive_age.mean()).item()
+                logs["slow_latent_memory_age_p90"] = self._distributed_mean_scalar(
+                    torch.quantile(positive_age, 0.9)
+                ).item()
 
         mode = diagnostics.get("gate_mode")
         if mode is not None and mode.numel() > 0:

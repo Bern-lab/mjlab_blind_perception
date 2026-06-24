@@ -62,6 +62,7 @@ class OnPolicyRunner:
             )
 
         # Start learning
+        self._set_env_observation_groups()
         obs = self.env.get_observations().to(self.device)
         self.alg.train_mode()  # switch to train mode (for dropout for example)
 
@@ -78,6 +79,7 @@ class OnPolicyRunner:
         total_it = start_it + num_learning_iterations
         for it in range(start_it, total_it):
             start = time.time()
+            self._set_env_observation_groups()
             # Rollout
             with torch.inference_mode():
                 for _ in range(self.cfg["num_steps_per_env"]):
@@ -166,6 +168,16 @@ class OnPolicyRunner:
         """Return the policy on the requested device for inference."""
         self.alg.eval_mode()  # Switch to evaluation mode (e.g. for dropout)
         return self.alg.get_policy().to(device)  # type: ignore
+
+    def _set_env_observation_groups(self) -> None:
+        """Let algorithms drop observation groups that are no longer needed."""
+        setter = getattr(self.env, "set_observation_groups", None)
+        if not callable(setter):
+            return
+
+        getter = getattr(self.alg, "get_required_observation_groups", None)
+        group_names = getter() if callable(getter) else None
+        setter(group_names)
 
     def export_policy_to_jit(self, path: str, filename: str = "policy.pt") -> None:
         """Export the model to a Torch JIT file."""

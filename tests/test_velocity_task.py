@@ -342,7 +342,7 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert foot_asset_cfg is not toe_asset_cfg
   assert (
     env_cfg.rewards["foot_step_lip_volume_penalty"].params["ignore_boundary_layers"]
-    == 2
+    == 0
   )
   assert toe_reward_params["contact_sensor_name"] == "toe_terrain_contact"
   assert toe_reward_params["contact_penalty_scale"] == 0.5
@@ -358,6 +358,8 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert toe_reward_params["collision_risk_margin"] == 0.06
   assert not any("probe" in name for name in toe_reward_params)
   assert toe_reward_params["ground_contact_sensor_name"] == "feet_ground_contact"
+  algorithm_cfg = cast(RslRlPpoTeacherKLAlgorithmCfg, rl_cfg.algorithm)
+  assert algorithm_cfg.teacher_kl_cfg.log_kl_when_lambda_zero is False
   foot_gait = env_cfg.rewards["foot_gait"]
   assert foot_gait.func is stair_aware_feet_gait
   assert foot_gait.params["heading_cos"] == 0.70

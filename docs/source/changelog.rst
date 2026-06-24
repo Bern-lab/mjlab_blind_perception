@@ -76,6 +76,10 @@ Changed
   lift/forward shaping from slow-latent stair rewards. Riser, slab, and lip
   danger penalties remain active, while heading-aligned stair entry and
   following use the same phase-free alternating gait reward.
+- Slow-latent G1 foot-lip danger penalties now stay active on the first two
+  stair boundary layers instead of skipping them during stair entry.
+- Slow-latent G1 Teacher-KL training now stops requesting teacher/camera
+  observations after the teacher guidance weight has fully annealed to zero.
 - Slow-latent auxiliary labels now use the env-side stair-entry pulse, stair
   phase, and safe-stride validity directly while retaining the existing
   event/stair/shape ordering. Stage-2 following landings target the validated

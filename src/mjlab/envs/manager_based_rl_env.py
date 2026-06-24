@@ -1,6 +1,6 @@
 import math
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterable
 
 import mujoco
 import numpy as np
@@ -166,6 +166,7 @@ class ManagerBasedRlEnv:
     self._sim_step_counter = 0
     self.extras = {}
     self.obs_buf = {}
+    self._observation_group_names: tuple[str, ...] | None = None
 
     # Initialize scene and simulation.
     self.scene = Scene(self.cfg.scene, device=device)
@@ -259,6 +260,12 @@ class ManagerBasedRlEnv:
 
   # Methods.
 
+  def set_observation_groups(self, group_names: Iterable[str] | None) -> None:
+    """Restrict per-step observation computation to the requested groups."""
+    self._observation_group_names = (
+      None if group_names is None else tuple(dict.fromkeys(group_names))
+    )
+
   def setup_manager_visualizers(self) -> None:
     self.manager_visualizers = {}
     if getattr(self.command_manager, "active_terms", None):
@@ -335,7 +342,10 @@ class ManagerBasedRlEnv:
     self.sim.forward()
     self.command_manager.compute(dt=0.0)
     self.sim.sense()
-    self.obs_buf = self.observation_manager.compute(update_history=True)
+    self.obs_buf = self.observation_manager.compute(
+      update_history=True,
+      group_names=self._observation_group_names,
+    )
     return self.obs_buf, self.extras
 
   def step(self, action: torch.Tensor) -> types.VecEnvStepReturn:
@@ -411,7 +421,10 @@ class ManagerBasedRlEnv:
       self.event_manager.apply(mode="interval", dt=self.step_dt)
 
     self.sim.sense()
-    self.obs_buf = self.observation_manager.compute(update_history=True)
+    self.obs_buf = self.observation_manager.compute(
+      update_history=True,
+      group_names=self._observation_group_names,
+    )
 
     return (
       self.obs_buf,

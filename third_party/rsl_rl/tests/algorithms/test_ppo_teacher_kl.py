@@ -284,19 +284,13 @@ def test_stair_aux_logs_phase_mismatch_and_uses_positive_weight() -> None:
     assert logs["slow_latent_stair_label_mean"] == pytest.approx(0.5)
     assert logs["slow_latent_stair_prob_pos_mean"] == pytest.approx(0.75)
     assert logs["slow_latent_stair_prob_neg_mean"] == pytest.approx(0.15)
-    assert logs["slow_latent_stair_prob_gt_on_threshold_ratio"] == pytest.approx(
-        0.75
-    )
+    assert logs["slow_latent_stair_prob_gt_on_threshold_ratio"] == pytest.approx(0.75)
     assert logs["slow_latent_memory_while_env_normal_ratio"] == pytest.approx(0.25)
     assert logs["slow_latent_write_while_env_normal_ratio"] == pytest.approx(0.25)
-    assert logs["slow_latent_env_stair_while_latent_normal_ratio"] == pytest.approx(
-        0.25
-    )
+    assert logs["slow_latent_env_stair_while_latent_normal_ratio"] == pytest.approx(0.25)
     assert logs["slow_latent_memory_while_env_stair_ratio"] == pytest.approx(0.25)
     assert logs["slow_latent_done_while_memory_ratio"] == pytest.approx(0.5)
-    assert logs["slow_latent_done_while_env_normal_memory_ratio"] == pytest.approx(
-        0.25
-    )
+    assert logs["slow_latent_done_while_env_normal_memory_ratio"] == pytest.approx(0.25)
 
 
 def test_safe_stride_aux_loss_uses_seventh_label_as_valid_mask() -> None:
@@ -415,6 +409,27 @@ def test_disabled_guidance_runs_without_teacher() -> None:
     assert logs["teacher_loss_for_update"] == 0.0
     assert logs["teacher_kl_lambda"] == 0.0
     assert logs["teacher_guidance_enabled"] == 0.0
+
+
+def test_zero_lambda_without_logging_skips_teacher_observations() -> None:
+    """A fully annealed teacher should leave the training hot path."""
+    alg = _build_teacher_kl({
+        "lambda_start": 0.0,
+        "lambda_end": 0.0,
+        "anneal_iters": 0,
+        "log_kl_when_lambda_zero": False,
+    })
+
+    loss, logs = alg._compute_additional_loss(
+        batch=RolloutStorage.Batch(observations=_build_obs(), hidden_states=(None, None)),
+        original_batch_size=NUM_ENVS,
+        distribution_params=(),
+    )
+
+    assert loss.item() == 0.0
+    assert logs["teacher_kl_lambda"] == 0.0
+    assert logs["teacher_guidance_active"] == 0.0
+    assert alg.get_required_observation_groups() == ("actor", "critic")
 
 
 def test_mlp_actor_skips_slow_latent_aux_path() -> None:

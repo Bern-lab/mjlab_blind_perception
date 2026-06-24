@@ -2,7 +2,7 @@
 
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Literal, Sequence
+from typing import Iterable, Literal, Sequence
 
 import numpy as np
 import torch
@@ -146,6 +146,7 @@ class ObservationManager(ManagerBase):
         self._group_obs_dim[group_name] = group_term_dims
 
     self._obs_buffer: dict[str, torch.Tensor | dict[str, torch.Tensor]] | None = None
+    self._obs_buffer_group_names: frozenset[str] | None = None
 
   def __str__(self) -> str:
     msg = f"<ObservationManager> contains {len(self._group_obs_term_names)} groups.\n"
@@ -302,18 +303,32 @@ class ObservationManager(ManagerBase):
     return torch.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0)
 
   def compute(
-    self, update_history: bool = False
+    self,
+    update_history: bool = False,
+    group_names: Iterable[str] | None = None,
   ) -> dict[str, torch.Tensor | dict[str, torch.Tensor]]:
     # Return cached observations if not updating and cache exists.
     # This prevents double-pushing to delay buffers when compute() is called
     # multiple times per control step (e.g., in get_observations() after step()).
-    if not update_history and self._obs_buffer is not None:
-      return self._obs_buffer
+    requested_group_names = (
+      tuple(self._group_obs_term_names) if group_names is None else tuple(group_names)
+    )
+    requested_group_set = frozenset(requested_group_names)
+    if (
+      not update_history
+      and self._obs_buffer is not None
+      and self._obs_buffer_group_names is not None
+      and requested_group_set.issubset(self._obs_buffer_group_names)
+    ):
+      return {
+        group_name: self._obs_buffer[group_name] for group_name in requested_group_names
+      }
 
     obs_buffer: dict[str, torch.Tensor | dict[str, torch.Tensor]] = dict()
-    for group_name in self._group_obs_term_names:
+    for group_name in requested_group_names:
       obs_buffer[group_name] = self.compute_group(group_name, update_history)
     self._obs_buffer = obs_buffer
+    self._obs_buffer_group_names = requested_group_set
     return obs_buffer
 
   def compute_group(
@@ -481,5 +496,14 @@ class ObservationManager(ManagerBase):
             obs_dims = (obs_dims[0], int(np.prod(obs_dims[1:])))
 
         self._group_obs_term_dim[group_name].append(obs_dims[1:])
+      if not self._group_obs_term_names[group_name]:
+        del self._group_obs_term_names[group_name]
+        del self._group_obs_term_dim[group_name]
+        del self._group_obs_term_cfgs[group_name]
+        del self._group_obs_class_term_cfgs[group_name]
+        del self._group_obs_concatenate[group_name]
+        del self._group_obs_concatenate_dim[group_name]
+        continue
+
       self._group_obs_term_delay_buffer[group_name] = group_entry_delay_buffer
       self._group_obs_term_history_buffer[group_name] = group_entry_history_buffer

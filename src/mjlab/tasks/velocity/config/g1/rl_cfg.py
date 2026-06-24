@@ -1,6 +1,7 @@
 """RL configuration for Unitree G1 velocity task."""
 
 from dataclasses import dataclass, field
+from typing import cast
 
 from mjlab.rl import (
   RslRlGatedStairLatentModelCfg,
@@ -487,6 +488,8 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
     latent_obs_set = model_params.latent_obs_set
 
   cfg = unitree_g1_blind_rough_target_navigation_teacherkl_runner_cfg()
+  algorithm_cfg = cast(RslRlPpoTeacherKLAlgorithmCfg, cfg.algorithm)
+  algorithm_cfg.teacher_kl_cfg.log_kl_when_lambda_zero = False
   cfg.actor = _unitree_g1_gated_stair_latent_policy_model_cfg(
     hidden_dims=hidden_dims,
     activation=activation,
