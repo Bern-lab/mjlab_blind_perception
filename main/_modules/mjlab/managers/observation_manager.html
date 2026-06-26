@@ -56,7 +56,7 @@
     <link rel="search" title="Search" href="../../../search.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-    <meta name="docbuild:last-update" content="Jun 23, 2026"/>
+    <meta name="docbuild:last-update" content="Jun 26, 2026"/>
   </head>
   
   
@@ -402,7 +402,7 @@ document.write(`
 
 <span class="kn">from</span><span class="w"> </span><span class="nn">copy</span><span class="w"> </span><span class="kn">import</span> <span class="n">deepcopy</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Literal</span><span class="p">,</span> <span class="n">Sequence</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Iterable</span><span class="p">,</span> <span class="n">Literal</span><span class="p">,</span> <span class="n">Sequence</span>
 
 <span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
@@ -555,7 +555,8 @@ document.write(`
       <span class="k">else</span><span class="p">:</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_group_obs_dim</span><span class="p">[</span><span class="n">group_name</span><span class="p">]</span> <span class="o">=</span> <span class="n">group_term_dims</span>
 
-    <span class="bp">self</span><span class="o">.</span><span class="n">_obs_buffer</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span> <span class="o">|</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">]]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span></div>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_obs_buffer</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span> <span class="o">|</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">]]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_obs_buffer_group_names</span><span class="p">:</span> <span class="nb">frozenset</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span></div>
 
 
   <span class="k">def</span><span class="w"> </span><span class="fm">__str__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
@@ -716,18 +717,32 @@ document.write(`
     <span class="k">return</span> <span class="n">torch</span><span class="o">.</span><span class="n">nan_to_num</span><span class="p">(</span><span class="n">tensor</span><span class="p">,</span> <span class="n">nan</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">posinf</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">neginf</span><span class="o">=</span><span class="mf">0.0</span><span class="p">)</span>
 
   <span class="k">def</span><span class="w"> </span><span class="nf">compute</span><span class="p">(</span>
-    <span class="bp">self</span><span class="p">,</span> <span class="n">update_history</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span>
+    <span class="bp">self</span><span class="p">,</span>
+    <span class="n">update_history</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="n">group_names</span><span class="p">:</span> <span class="n">Iterable</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
   <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span> <span class="o">|</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">]]:</span>
     <span class="c1"># Return cached observations if not updating and cache exists.</span>
     <span class="c1"># This prevents double-pushing to delay buffers when compute() is called</span>
     <span class="c1"># multiple times per control step (e.g., in get_observations() after step()).</span>
-    <span class="k">if</span> <span class="ow">not</span> <span class="n">update_history</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_obs_buffer</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-      <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_obs_buffer</span>
+    <span class="n">requested_group_names</span> <span class="o">=</span> <span class="p">(</span>
+      <span class="nb">tuple</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_group_obs_term_names</span><span class="p">)</span> <span class="k">if</span> <span class="n">group_names</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">group_names</span><span class="p">)</span>
+    <span class="p">)</span>
+    <span class="n">requested_group_set</span> <span class="o">=</span> <span class="nb">frozenset</span><span class="p">(</span><span class="n">requested_group_names</span><span class="p">)</span>
+    <span class="k">if</span> <span class="p">(</span>
+      <span class="ow">not</span> <span class="n">update_history</span>
+      <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_obs_buffer</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+      <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_obs_buffer_group_names</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+      <span class="ow">and</span> <span class="n">requested_group_set</span><span class="o">.</span><span class="n">issubset</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_obs_buffer_group_names</span><span class="p">)</span>
+    <span class="p">):</span>
+      <span class="k">return</span> <span class="p">{</span>
+        <span class="n">group_name</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_obs_buffer</span><span class="p">[</span><span class="n">group_name</span><span class="p">]</span> <span class="k">for</span> <span class="n">group_name</span> <span class="ow">in</span> <span class="n">requested_group_names</span>
+      <span class="p">}</span>
 
     <span class="n">obs_buffer</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span> <span class="o">|</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">]]</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">()</span>
-    <span class="k">for</span> <span class="n">group_name</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_group_obs_term_names</span><span class="p">:</span>
+    <span class="k">for</span> <span class="n">group_name</span> <span class="ow">in</span> <span class="n">requested_group_names</span><span class="p">:</span>
       <span class="n">obs_buffer</span><span class="p">[</span><span class="n">group_name</span><span class="p">]</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">compute_group</span><span class="p">(</span><span class="n">group_name</span><span class="p">,</span> <span class="n">update_history</span><span class="p">)</span>
     <span class="bp">self</span><span class="o">.</span><span class="n">_obs_buffer</span> <span class="o">=</span> <span class="n">obs_buffer</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_obs_buffer_group_names</span> <span class="o">=</span> <span class="n">requested_group_set</span>
     <span class="k">return</span> <span class="n">obs_buffer</span>
 
   <span class="k">def</span><span class="w"> </span><span class="nf">compute_group</span><span class="p">(</span>
@@ -895,6 +910,15 @@ document.write(`
             <span class="n">obs_dims</span> <span class="o">=</span> <span class="p">(</span><span class="n">obs_dims</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="nb">int</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">prod</span><span class="p">(</span><span class="n">obs_dims</span><span class="p">[</span><span class="mi">1</span><span class="p">:])))</span>
 
         <span class="bp">self</span><span class="o">.</span><span class="n">_group_obs_term_dim</span><span class="p">[</span><span class="n">group_name</span><span class="p">]</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">obs_dims</span><span class="p">[</span><span class="mi">1</span><span class="p">:])</span>
+      <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_group_obs_term_names</span><span class="p">[</span><span class="n">group_name</span><span class="p">]:</span>
+        <span class="k">del</span> <span class="bp">self</span><span class="o">.</span><span class="n">_group_obs_term_names</span><span class="p">[</span><span class="n">group_name</span><span class="p">]</span>
+        <span class="k">del</span> <span class="bp">self</span><span class="o">.</span><span class="n">_group_obs_term_dim</span><span class="p">[</span><span class="n">group_name</span><span class="p">]</span>
+        <span class="k">del</span> <span class="bp">self</span><span class="o">.</span><span class="n">_group_obs_term_cfgs</span><span class="p">[</span><span class="n">group_name</span><span class="p">]</span>
+        <span class="k">del</span> <span class="bp">self</span><span class="o">.</span><span class="n">_group_obs_class_term_cfgs</span><span class="p">[</span><span class="n">group_name</span><span class="p">]</span>
+        <span class="k">del</span> <span class="bp">self</span><span class="o">.</span><span class="n">_group_obs_concatenate</span><span class="p">[</span><span class="n">group_name</span><span class="p">]</span>
+        <span class="k">del</span> <span class="bp">self</span><span class="o">.</span><span class="n">_group_obs_concatenate_dim</span><span class="p">[</span><span class="n">group_name</span><span class="p">]</span>
+        <span class="k">continue</span>
+
       <span class="bp">self</span><span class="o">.</span><span class="n">_group_obs_term_delay_buffer</span><span class="p">[</span><span class="n">group_name</span><span class="p">]</span> <span class="o">=</span> <span class="n">group_entry_delay_buffer</span>
       <span class="bp">self</span><span class="o">.</span><span class="n">_group_obs_term_history_buffer</span><span class="p">[</span><span class="n">group_name</span><span class="p">]</span> <span class="o">=</span> <span class="n">group_entry_history_buffer</span></div>
 
@@ -945,7 +969,7 @@ By The mjlab Developers
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Jun 23, 2026.
+  Last updated on Jun 26, 2026.
   <br/>
 </p>
   </div>

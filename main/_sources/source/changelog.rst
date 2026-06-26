@@ -76,6 +76,10 @@ Changed
   lift/forward shaping from slow-latent stair rewards. Riser, slab, and lip
   danger penalties remain active, while heading-aligned stair entry and
   following use the same phase-free alternating gait reward.
+- Slow-latent G1 foot-lip danger penalties now stay active on the first two
+  stair boundary layers instead of skipping them during stair entry.
+- Slow-latent G1 Teacher-KL training now stops requesting teacher/camera
+  observations after the teacher guidance weight has fully annealed to zero.
 - Slow-latent auxiliary labels now use the env-side stair-entry pulse, stair
   phase, and safe-stride validity directly while retaining the existing
   event/stair/shape ordering. Stage-2 following landings target the validated
@@ -90,6 +94,14 @@ Changed
 - Slow-latent stair memory now requires stair-state confirmation before
   promoting a sparse entry event from write mode into persistent memory,
   reducing false stair-memory holds on flat ground.
+- Slow-latent event-head supervision now labels only strict stair-entry events,
+  while arbitrary toe-riser hits remain collision/risk signals instead of WRITE
+  trigger targets.
+- Slow-latent stair-state supervision and stair-aware gait now use a short
+  recent stair-entry evidence window, keeping stair context separate from later
+  riser-collision traces.
+- Slow-latent event/stair gate defaults are more conservative, with a shorter
+  event label window and lower event positive weight for better calibration.
 - Slow-latent stair following now exits through a two-flat-touchdown
   confirmation instead of resetting immediately after passing the last stair
   boundary, making the stair-to-flat transition state explicit.

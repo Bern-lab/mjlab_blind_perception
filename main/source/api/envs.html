@@ -59,7 +59,7 @@
     <link rel="prev" title="API Reference" href="index.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-    <meta name="docbuild:last-update" content="Jun 23, 2026"/>
+    <meta name="docbuild:last-update" content="Jun 26, 2026"/>
   </head>
   
   
@@ -471,6 +471,7 @@ document.write(`
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#mjlab.envs.ManagerBasedRlEnv.max_episode_length_s"><code class="docutils literal notranslate"><span class="pre">ManagerBasedRlEnv.max_episode_length_s</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#mjlab.envs.ManagerBasedRlEnv.max_episode_length"><code class="docutils literal notranslate"><span class="pre">ManagerBasedRlEnv.max_episode_length</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#mjlab.envs.ManagerBasedRlEnv.unwrapped"><code class="docutils literal notranslate"><span class="pre">ManagerBasedRlEnv.unwrapped</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#mjlab.envs.ManagerBasedRlEnv.set_observation_groups"><code class="docutils literal notranslate"><span class="pre">ManagerBasedRlEnv.set_observation_groups()</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#mjlab.envs.ManagerBasedRlEnv.load_managers"><code class="docutils literal notranslate"><span class="pre">ManagerBasedRlEnv.load_managers()</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#mjlab.envs.ManagerBasedRlEnv.step"><code class="docutils literal notranslate"><span class="pre">ManagerBasedRlEnv.step()</span></code></a></li>
 </ul>
@@ -581,6 +582,12 @@ document.write(`
 <dt class="sig sig-object py" id="mjlab.envs.ManagerBasedRlEnv.unwrapped">
 <em class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">unwrapped</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#mjlab.envs.ManagerBasedRlEnv" title="mjlab.envs.manager_based_rl_env.ManagerBasedRlEnv"><span class="pre">ManagerBasedRlEnv</span></a></em><a class="headerlink" href="#mjlab.envs.ManagerBasedRlEnv.unwrapped" title="Link to this definition">#</a></dt>
 <dd><p>Get the unwrapped environment (base case for wrapper chains).</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="mjlab.envs.ManagerBasedRlEnv.set_observation_groups">
+<span class="sig-name descname"><span class="pre">set_observation_groups</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">group_names</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Iterable" title="(in Python v3.14)"><span class="pre">Iterable</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span></span><a class="reference internal" href="../../_modules/mjlab/envs/manager_based_rl_env.html#ManagerBasedRlEnv.set_observation_groups"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#mjlab.envs.ManagerBasedRlEnv.set_observation_groups" title="Link to this definition">#</a></dt>
+<dd><p>Restrict per-step observation computation to the requested groups.</p>
 </dd></dl>
 
 <dl class="py method">
@@ -874,6 +881,7 @@ If iterable is specified the tuple is initialized from iterable’s items.</p>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#mjlab.envs.ManagerBasedRlEnv.max_episode_length_s"><code class="docutils literal notranslate"><span class="pre">ManagerBasedRlEnv.max_episode_length_s</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#mjlab.envs.ManagerBasedRlEnv.max_episode_length"><code class="docutils literal notranslate"><span class="pre">ManagerBasedRlEnv.max_episode_length</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#mjlab.envs.ManagerBasedRlEnv.unwrapped"><code class="docutils literal notranslate"><span class="pre">ManagerBasedRlEnv.unwrapped</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#mjlab.envs.ManagerBasedRlEnv.set_observation_groups"><code class="docutils literal notranslate"><span class="pre">ManagerBasedRlEnv.set_observation_groups()</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#mjlab.envs.ManagerBasedRlEnv.load_managers"><code class="docutils literal notranslate"><span class="pre">ManagerBasedRlEnv.load_managers()</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#mjlab.envs.ManagerBasedRlEnv.step"><code class="docutils literal notranslate"><span class="pre">ManagerBasedRlEnv.step()</span></code></a></li>
 </ul>
@@ -940,7 +948,7 @@ By The mjlab Developers
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Jun 23, 2026.
+  Last updated on Jun 26, 2026.
   <br/>
 </p>
   </div>
