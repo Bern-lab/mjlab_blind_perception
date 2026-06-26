@@ -26,13 +26,13 @@ from .stair_geometry import (
   SAFE_TREAD_LOWER_BOUND_KEY,
   STAIR_ASCENT_DIR_KEY,
   STAIR_ENTRY_EVENT_KEY,
+  STAIR_ENTRY_EVIDENCE_ASCENT_DIR_KEY,
+  STAIR_ENTRY_RECENT_EVIDENCE_KEY,
   STAIR_EXIT_EVENT_KEY,
   STAIR_PHASE_KEY,
   STAIR_TARGET_FOOT_KEY,
   TOE_RISER_CONTACT_KEY,
-  TOE_RISER_EVIDENCE_ASCENT_DIR_KEY,
   TOE_RISER_NEW_HIT_KEY,
-  TOE_RISER_RECENT_EVIDENCE_KEY,
   cached_stair_shape,
 )
 
@@ -79,11 +79,11 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     self._toe_riser_contact = torch.zeros(
       env.num_envs, device=env.device, dtype=torch.bool
     )
-    self._toe_riser_evidence_timer = torch.zeros(env.num_envs, device=env.device)
-    self._toe_riser_recent_evidence = torch.zeros(
+    self._entry_evidence_timer = torch.zeros(env.num_envs, device=env.device)
+    self._recent_entry_evidence = torch.zeros(
       env.num_envs, device=env.device, dtype=torch.bool
     )
-    self._toe_riser_evidence_ascent_dir = torch.zeros(
+    self._entry_evidence_ascent_dir = torch.zeros(
       env.num_envs, 2, device=env.device, dtype=torch.float32
     )
     self._first_foot = torch.full(
@@ -130,8 +130,8 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     env.extras[STAIR_EXIT_EVENT_KEY] = self._exit_event
     env.extras[TOE_RISER_NEW_HIT_KEY] = self._toe_riser_new_hit
     env.extras[TOE_RISER_CONTACT_KEY] = self._toe_riser_contact
-    env.extras[TOE_RISER_RECENT_EVIDENCE_KEY] = self._toe_riser_recent_evidence
-    env.extras[TOE_RISER_EVIDENCE_ASCENT_DIR_KEY] = self._toe_riser_evidence_ascent_dir
+    env.extras[STAIR_ENTRY_RECENT_EVIDENCE_KEY] = self._recent_entry_evidence
+    env.extras[STAIR_ENTRY_EVIDENCE_ASCENT_DIR_KEY] = self._entry_evidence_ascent_dir
     env.extras[STAIR_TARGET_FOOT_KEY] = self._target_foot
     env.extras[STAIR_ASCENT_DIR_KEY] = self._ascent_dir
     env.extras[SAFE_STRIDE_VALID_KEY] = self._safe_stride_valid
@@ -151,9 +151,9 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     self._exit_event[env_ids] = False
     self._toe_riser_new_hit[env_ids] = False
     self._toe_riser_contact[env_ids] = False
-    self._toe_riser_evidence_timer[env_ids] = 0.0
-    self._toe_riser_recent_evidence[env_ids] = False
-    self._toe_riser_evidence_ascent_dir[env_ids] = 0.0
+    self._entry_evidence_timer[env_ids] = 0.0
+    self._recent_entry_evidence[env_ids] = False
+    self._entry_evidence_ascent_dir[env_ids] = 0.0
     self._first_foot[env_ids] = -1
     self._target_foot[env_ids] = -1
     self._entry_timer[env_ids] = 0
@@ -413,7 +413,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     stair_touchdown_lip_clearance: float = 0.02,
     stair_touchdown_lip_height_band: float = 0.06,
     stair_following_timeout: float = 1.50,
-    toe_riser_evidence_time: float = 0.80,
+    stair_entry_evidence_time: float = 0.80,
     collision_risk_margin: float = 0.06,
     command_name: str = "twist",
     command_threshold: float = 0.05,
@@ -421,20 +421,23 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     asset_cfg: SceneEntityCfg = _DEFAULT_FOOT_BODY_CFG,
     **_unused: object,
   ) -> torch.Tensor:
+    legacy_evidence_time = _unused.get("toe_riser_evidence_time")
+    if isinstance(legacy_evidence_time, int | float):
+      stair_entry_evidence_time = float(legacy_evidence_time)
     self._entry_event.zero_()
     self._exit_event.zero_()
     self._toe_riser_new_hit.zero_()
     self._toe_riser_contact.zero_()
-    self._toe_riser_evidence_timer = torch.clamp(
-      self._toe_riser_evidence_timer - env.step_dt,
+    self._entry_evidence_timer = torch.clamp(
+      self._entry_evidence_timer - env.step_dt,
       min=0.0,
     )
-    self._toe_riser_recent_evidence.copy_(self._toe_riser_evidence_timer > 0.0)
-    self._toe_riser_evidence_ascent_dir.copy_(
+    self._recent_entry_evidence.copy_(self._entry_evidence_timer > 0.0)
+    self._entry_evidence_ascent_dir.copy_(
       torch.where(
-        self._toe_riser_recent_evidence[:, None],
-        self._toe_riser_evidence_ascent_dir,
-        torch.zeros_like(self._toe_riser_evidence_ascent_dir),
+        self._recent_entry_evidence[:, None],
+        self._entry_evidence_ascent_dir,
+        torch.zeros_like(self._entry_evidence_ascent_dir),
       )
     )
     self._collision_risk_now.zero_()
@@ -594,50 +597,6 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       num_slots = contact_layers.shape[-1]
       root_xy = asset.data.root_link_pos_w[:, :2]
 
-      evidence_contact = boundary_contact & new_hit_by_foot[:, :, None]
-      evidence_has_dir = torch.any(evidence_contact, dim=(1, 2))
-      evidence_score = torch.where(
-        evidence_contact, hit_strength, torch.full_like(hit_strength, -torch.inf)
-      )
-      evidence_flat = torch.argmax(evidence_score.reshape(num_envs, -1), dim=-1)
-      evidence_foot = evidence_flat // num_slots
-      evidence_slot = evidence_flat % num_slots
-      evidence_boundary_idx = contact_boundary_idx[
-        env_ids, evidence_foot, evidence_slot
-      ].clamp_min(0)
-      evidence_normal = self._normalize_xy(
-        boundaries[env_ids, evidence_boundary_idx, 6:8]
-      )
-      evidence_p0 = boundaries[env_ids, evidence_boundary_idx, 0:2]
-      evidence_root_side = torch.sum((root_xy - evidence_p0) * evidence_normal, dim=-1)
-      evidence_ascent_dir = (
-        -torch.where(evidence_root_side >= 0.0, 1.0, -1.0)[:, None] * evidence_normal
-      )
-
-      evidence_time = max(float(toe_riser_evidence_time), 0.0)
-      self._toe_riser_evidence_timer = torch.where(
-        toe_riser_new_hit,
-        torch.full_like(self._toe_riser_evidence_timer, evidence_time),
-        self._toe_riser_evidence_timer,
-      )
-      self._toe_riser_recent_evidence.copy_(self._toe_riser_evidence_timer > 0.0)
-      next_evidence_dir = torch.where(
-        evidence_has_dir[:, None],
-        evidence_ascent_dir,
-        torch.where(
-          toe_riser_new_hit[:, None],
-          torch.zeros_like(self._toe_riser_evidence_ascent_dir),
-          self._toe_riser_evidence_ascent_dir,
-        ),
-      )
-      self._toe_riser_evidence_ascent_dir.copy_(
-        torch.where(
-          self._toe_riser_recent_evidence[:, None],
-          next_evidence_dir,
-          torch.zeros_like(next_evidence_dir),
-        )
-      )
-
       layer1_contact = (
         boundary_contact & (contact_layers == 1) & new_hit_by_foot[:, :, None]
       )
@@ -664,11 +623,32 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         & command_active
       )
       self._entry_event.copy_(entry_mask)
+      evidence_time = max(float(stair_entry_evidence_time), 0.0)
+      self._entry_evidence_timer = torch.where(
+        entry_mask,
+        torch.full_like(self._entry_evidence_timer, evidence_time),
+        self._entry_evidence_timer,
+      )
+      self._recent_entry_evidence.copy_(self._entry_evidence_timer > 0.0)
+      next_entry_dir = torch.where(
+        entry_mask[:, None],
+        ascent_dir,
+        self._entry_evidence_ascent_dir,
+      )
+      self._entry_evidence_ascent_dir.copy_(
+        torch.where(
+          self._recent_entry_evidence[:, None],
+          next_entry_dir,
+          torch.zeros_like(next_entry_dir),
+        )
+      )
       log["Metrics/toe_riser_new_hit_ratio"] = toe_riser_new_hit.float().mean()
       log["Metrics/toe_riser_contact_ratio"] = toe_riser_contact.float().mean()
-      log["Metrics/event_label_from_toe_riser_ratio"] = toe_riser_new_hit.float().mean()
-      log["Metrics/toe_riser_recent_evidence_ratio"] = (
-        self._toe_riser_recent_evidence.float().mean()
+      log["Metrics/stair_entry_layer1_new_hit_ratio"] = (
+        torch.any(layer1_contact, dim=(1, 2)).float().mean()
+      )
+      log["Metrics/stair_entry_recent_evidence_ratio"] = (
+        self._recent_entry_evidence.float().mean()
       )
       if bool(torch.any(entry_mask).item()):
         self._first_foot[entry_mask] = first_foot[entry_mask]
@@ -1145,8 +1125,8 @@ class stair_aware_feet_gait:
     asset: Entity = env.scene[asset_cfg.name]
     stage = env.extras.get(STAIR_PHASE_KEY)
     ascent_dir = env.extras.get(STAIR_ASCENT_DIR_KEY)
-    recent_evidence = env.extras.get(TOE_RISER_RECENT_EVIDENCE_KEY)
-    evidence_ascent_dir = env.extras.get(TOE_RISER_EVIDENCE_ASCENT_DIR_KEY)
+    recent_evidence = env.extras.get(STAIR_ENTRY_RECENT_EVIDENCE_KEY)
+    evidence_ascent_dir = env.extras.get(STAIR_ENTRY_EVIDENCE_ASCENT_DIR_KEY)
     if stage is None or ascent_dir is None:
       stage = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
       ascent_dir = torch.zeros(env.num_envs, 2, device=env.device)

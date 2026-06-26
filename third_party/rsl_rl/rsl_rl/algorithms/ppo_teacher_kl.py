@@ -824,7 +824,7 @@ class PPOTeacherKL(PPO):
             event_negative = ~event_positive
             event_pred_0p6 = event_prob > 0.6
             event_pred_0p4 = event_prob > 0.4
-            event_on_threshold = float(getattr(self.actor, "event_on_threshold", 0.6))
+            event_on_threshold = float(getattr(self.actor, "event_on_threshold", 0.65))
             event_pos_weight = float(getattr(self.actor, "aux_event_pos_weight", 1.0))
             event_pred_on_threshold = event_prob > event_on_threshold
             event_pos_count = event_positive.float().sum().clamp_min(1.0)
@@ -896,7 +896,7 @@ class PPOTeacherKL(PPO):
             stair_pos_count = stair_positive.float().sum().clamp_min(1.0)
             stair_neg_count = stair_negative.float().sum().clamp_min(1.0)
             stair_pos_weight = float(getattr(self.actor, "aux_stair_pos_weight", 1.0))
-            stair_on_threshold = float(getattr(self.actor, "stair_on_threshold", 0.1))
+            stair_on_threshold = float(getattr(self.actor, "stair_on_threshold", 0.35))
             stair_loss_raw = functional.binary_cross_entropy_with_logits(
                 aux_outputs["stair_logit"],
                 stair_labels,

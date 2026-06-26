@@ -17,9 +17,8 @@ from .stair_geometry import (
   SAFE_STRIDE_VALID_KEY,
   SAFE_TREAD_LOWER_BOUND_KEY,
   STAIR_ENTRY_EVENT_KEY,
+  STAIR_ENTRY_RECENT_EVIDENCE_KEY,
   STAIR_PHASE_KEY,
-  TOE_RISER_NEW_HIT_KEY,
-  TOE_RISER_RECENT_EVIDENCE_KEY,
   cached_stair_shape,
 )
 
@@ -375,26 +374,19 @@ def _clear_foot_velocity_cache(env: ManagerBasedRlEnv, env_ids: torch.Tensor) ->
 def toe_riser_event_label(
   env: ManagerBasedRlEnv,
 ) -> torch.Tensor:
-  """One-frame event label for stair-evidence collision.
-
-  Positive when the state machine accepts stair entry or the privileged
-  reward-side detector observes a new toe-riser hit. The latter is training
-  supervision only; actor/event-head inputs remain deployable proprioception.
-  """
+  """One-frame label for a strict stair-entry event that should trigger WRITE."""
   zeros = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
   entry_event = env.extras.get(STAIR_ENTRY_EVENT_KEY, zeros)
-  toe_riser_new_hit = env.extras.get(TOE_RISER_NEW_HIT_KEY, zeros)
-  label = entry_event.bool() | toe_riser_new_hit.bool()
-  return label.float().unsqueeze(-1)
+  return entry_event.bool().float().unsqueeze(-1)
 
 
 def stair_state_label(
   env: ManagerBasedRlEnv,
 ) -> torch.Tensor:
-  """Label env-side stair state plus recent toe-riser evidence."""
+  """Label env-side stair context plus short recent entry evidence."""
   zeros = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
   stair_phase = env.extras.get(STAIR_PHASE_KEY)
-  recent_evidence = env.extras.get(TOE_RISER_RECENT_EVIDENCE_KEY, zeros)
+  recent_evidence = env.extras.get(STAIR_ENTRY_RECENT_EVIDENCE_KEY, zeros)
   if stair_phase is None:
     phase_label = zeros
   else:

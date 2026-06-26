@@ -280,11 +280,11 @@ def test_stair_aux_logs_phase_mismatch_and_uses_positive_weight() -> None:
 
     assert loss.item() > 0.0
     assert logs["slow_latent_stair_pos_weight"] == pytest.approx(3.0)
-    assert logs["slow_latent_stair_on_threshold"] == pytest.approx(0.1)
+    assert logs["slow_latent_stair_on_threshold"] == pytest.approx(0.35)
     assert logs["slow_latent_stair_label_mean"] == pytest.approx(0.5)
     assert logs["slow_latent_stair_prob_pos_mean"] == pytest.approx(0.75)
     assert logs["slow_latent_stair_prob_neg_mean"] == pytest.approx(0.15)
-    assert logs["slow_latent_stair_prob_gt_on_threshold_ratio"] == pytest.approx(0.75)
+    assert logs["slow_latent_stair_prob_gt_on_threshold_ratio"] == pytest.approx(0.5)
     assert logs["slow_latent_memory_while_env_normal_ratio"] == pytest.approx(0.25)
     assert logs["slow_latent_write_while_env_normal_ratio"] == pytest.approx(0.25)
     assert logs["slow_latent_env_stair_while_latent_normal_ratio"] == pytest.approx(0.25)

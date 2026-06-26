@@ -94,12 +94,14 @@ Changed
 - Slow-latent stair memory now requires stair-state confirmation before
   promoting a sparse entry event from write mode into persistent memory,
   reducing false stair-memory holds on flat ground.
-- Slow-latent event-head supervision now also labels new toe-riser impacts,
-  and the default write gate is more permissive so first-riser collisions can
-  trigger stair memory acquisition sooner.
+- Slow-latent event-head supervision now labels only strict stair-entry events,
+  while arbitrary toe-riser hits remain collision/risk signals instead of WRITE
+  trigger targets.
 - Slow-latent stair-state supervision and stair-aware gait now use a short
-  recent toe-riser evidence window after new riser impacts, helping write-mode
-  events hand off into recovery stair state.
+  recent stair-entry evidence window, keeping stair context separate from later
+  riser-collision traces.
+- Slow-latent event/stair gate defaults are more conservative, with a shorter
+  event label window and lower event positive weight for better calibration.
 - Slow-latent stair following now exits through a two-flat-touchdown
   confirmation instead of resetting immediately after passing the last stair
   boundary, making the stair-to-flat transition state explicit.

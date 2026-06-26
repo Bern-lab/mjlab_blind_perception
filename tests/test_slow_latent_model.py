@@ -133,7 +133,7 @@ def test_stair_write_requires_stair_probability_to_enter_memory() -> None:
 
   gate, _alpha = model._advance_gate_state(
     event_prob=torch.zeros(2, 1),
-    stair_prob=torch.tensor([[0.05], [0.2]]),
+    stair_prob=torch.tensor([[0.05], [0.5]]),
     gate_state=gate,
   )
 

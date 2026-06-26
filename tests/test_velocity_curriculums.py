@@ -17,10 +17,10 @@ from mjlab.tasks.velocity.mdp.stair_geometry import (
   SAFE_STRIDE_VALID_KEY,
   SAFE_TREAD_LOWER_BOUND_KEY,
   STAIR_ENTRY_EVENT_KEY,
+  STAIR_ENTRY_EVIDENCE_ASCENT_DIR_KEY,
+  STAIR_ENTRY_RECENT_EVIDENCE_KEY,
   STAIR_PHASE_KEY,
-  TOE_RISER_EVIDENCE_ASCENT_DIR_KEY,
   TOE_RISER_NEW_HIT_KEY,
-  TOE_RISER_RECENT_EVIDENCE_KEY,
   stair_shape_from_boundaries,
 )
 from mjlab.tasks.velocity.mdp.temporal_stair_rewards import (
@@ -318,7 +318,7 @@ def test_stair_following_gait_does_not_require_fixed_phase() -> None:
   assert reward.tolist() == pytest.approx([1.0, 0.5, 0.0])
 
 
-def test_stair_gait_uses_recent_toe_riser_evidence(
+def test_stair_gait_uses_recent_entry_evidence(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   class _FakeContactSensor:
@@ -354,8 +354,8 @@ def test_stair_gait_uses_recent_toe_riser_evidence(
     extras={
       "log": {},
       STAIR_PHASE_KEY: torch.zeros(2, dtype=torch.long),
-      TOE_RISER_RECENT_EVIDENCE_KEY: torch.tensor([True, False]),
-      TOE_RISER_EVIDENCE_ASCENT_DIR_KEY: torch.tensor([[1.0, 0.0], [1.0, 0.0]]),
+      STAIR_ENTRY_RECENT_EVIDENCE_KEY: torch.tensor([True, False]),
+      STAIR_ENTRY_EVIDENCE_ASCENT_DIR_KEY: torch.tensor([[1.0, 0.0], [1.0, 0.0]]),
     },
   )
   gait = stair_aware_feet_gait(cast(Any, SimpleNamespace()), env)
@@ -375,15 +375,17 @@ def test_stair_gait_uses_recent_toe_riser_evidence(
   assert env.extras["log"]["Metrics/stair_gait_active_ratio"] == 0.5
 
 
-def test_stair_state_label_uses_recent_toe_riser_evidence() -> None:
+def test_event_label_ignores_any_toe_riser_hit_and_stair_label_uses_entry_evidence() -> (
+  None
+):
   env = SimpleNamespace(
     num_envs=3,
     device="cpu",
     extras={
       STAIR_ENTRY_EVENT_KEY: torch.zeros(3, dtype=torch.bool),
-      TOE_RISER_NEW_HIT_KEY: torch.zeros(3, dtype=torch.bool),
+      TOE_RISER_NEW_HIT_KEY: torch.tensor([False, True, True]),
       STAIR_PHASE_KEY: torch.tensor([0, 1, 0]),
-      TOE_RISER_RECENT_EVIDENCE_KEY: torch.tensor([True, False, False]),
+      STAIR_ENTRY_RECENT_EVIDENCE_KEY: torch.tensor([True, False, False]),
     },
   )
 
@@ -445,7 +447,7 @@ def test_slow_latent_labels_follow_env_stair_state_machine(
     torch.tensor(
       [
         [1.0, 1.0, 0.30, 0.18, 0.0, 0.0, 0.0, 0.75, 1.0, 0.45],
-        [1.0, 1.0, 0.35, 0.20, 1.0, 0.26, 1.0, 0.10, 0.0, 0.0],
+        [0.0, 1.0, 0.35, 0.20, 1.0, 0.26, 1.0, 0.10, 0.0, 0.0],
       ]
     ),
   )

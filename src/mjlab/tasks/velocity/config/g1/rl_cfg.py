@@ -70,19 +70,19 @@ class G1SlowLatentPolicyModelParams:
   """Consecutive no-event steps required to leave stair-memory mode."""
   cooldown_steps: int = 15
   """Cooldown steps after exiting memory before another trigger is accepted."""
-  event_on_threshold: float = 0.45
+  event_on_threshold: float = 0.65
   """Event probability threshold that triggers stair-memory writing."""
-  event_off_threshold: float = 0.30
+  event_off_threshold: float = 0.35
   """Event probability threshold counted as no-event during exit logic."""
-  stair_on_threshold: float = 0.1
+  stair_on_threshold: float = 0.35
   """Stair-state probability threshold required to confirm write into memory."""
-  stair_off_threshold: float = 0.1
+  stair_off_threshold: float = 0.20
   """Stair-state probability threshold below which exit is allowed."""
   aux_event_coef: float = 0.03
   """BCE loss weight for current toe-riser event prediction."""
-  aux_event_pos_weight: float = 100.0
+  aux_event_pos_weight: float = 50.0
   """Positive-class weight for sparse stair-entry event prediction."""
-  event_label_window_steps: int = 12
+  event_label_window_steps: int = 4
   """Number of frames over which stair-entry event labels stay positive."""
   aux_stair_coef: float = 0.05
   """BCE loss weight for current stair-state prediction."""
@@ -182,13 +182,13 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
   min_stair_steps: int = 30,
   exit_steps: int = 40,
   cooldown_steps: int = 15,
-  event_on_threshold: float = 0.45,
-  event_off_threshold: float = 0.30,
-  stair_on_threshold: float = 0.1,
-  stair_off_threshold: float = 0.1,
+  event_on_threshold: float = 0.65,
+  event_off_threshold: float = 0.35,
+  stair_on_threshold: float = 0.35,
+  stair_off_threshold: float = 0.20,
   aux_event_coef: float = 0.03,
-  aux_event_pos_weight: float = 100.0,
-  event_label_window_steps: int = 12,
+  aux_event_pos_weight: float = 50.0,
+  event_label_window_steps: int = 4,
   aux_stair_coef: float = 0.05,
   aux_stair_pos_weight: float = 3.0,
   aux_future_collision_risk_coef: float = 0.03,
@@ -403,13 +403,13 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
   min_stair_steps: int = 30,
   exit_steps: int = 40,
   cooldown_steps: int = 15,
-  event_on_threshold: float = 0.45,
-  event_off_threshold: float = 0.30,
-  stair_on_threshold: float = 0.1,
-  stair_off_threshold: float = 0.1,
+  event_on_threshold: float = 0.65,
+  event_off_threshold: float = 0.35,
+  stair_on_threshold: float = 0.35,
+  stair_off_threshold: float = 0.20,
   aux_event_coef: float = 0.03,
-  aux_event_pos_weight: float = 100.0,
-  event_label_window_steps: int = 12,
+  aux_event_pos_weight: float = 50.0,
+  event_label_window_steps: int = 4,
   aux_stair_coef: float = 0.05,
   aux_stair_pos_weight: float = 3.0,
   aux_future_collision_risk_coef: float = 0.03,
