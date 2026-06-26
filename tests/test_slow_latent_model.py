@@ -121,6 +121,7 @@ def test_stair_memory_uses_distinct_state_and_shape_hold_rates() -> None:
 
 def test_stair_write_requires_stair_probability_to_enter_memory() -> None:
   model = _make_model()
+  model.write_steps = 2.0
   gate = torch.zeros(2, 5)
 
   gate, _alpha = model._advance_gate_state(

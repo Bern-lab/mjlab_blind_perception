@@ -185,6 +185,7 @@ class G1SlowLatentRewardParams:
   toe_stair_touchdown_lip_clearance: float = 0.02
   toe_stair_touchdown_lip_height_band: float = 0.06
   toe_stair_following_timeout: float = 1.50
+  toe_riser_evidence_time: float = 0.80
   toe_collision_risk_margin: float = 0.06
   toe_stair_command_threshold: float = 0.05
 
@@ -323,6 +324,7 @@ def configure_g1_step_danger_rewards(
       "stair_touchdown_lip_clearance": (params.toe_stair_touchdown_lip_clearance),
       "stair_touchdown_lip_height_band": (params.toe_stair_touchdown_lip_height_band),
       "stair_following_timeout": params.toe_stair_following_timeout,
+      "toe_riser_evidence_time": params.toe_riser_evidence_time,
       "collision_risk_margin": params.toe_collision_risk_margin,
       "command_threshold": params.toe_stair_command_threshold,
       "ground_contact_sensor_name": "feet_ground_contact",

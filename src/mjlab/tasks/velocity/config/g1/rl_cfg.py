@@ -62,7 +62,7 @@ class G1SlowLatentPolicyModelParams:
   """Hold update rate for stable stair-state and timing channels."""
   alpha_hold_shape: float = 0.05
   """Hold update rate for geometry and safe-stride channels."""
-  write_steps: int = 2
+  write_steps: int = 6
   """Number of steps spent in write mode after an event trigger."""
   min_stair_steps: int = 30
   """Minimum memory-hold steps before exit is allowed."""
@@ -70,9 +70,9 @@ class G1SlowLatentPolicyModelParams:
   """Consecutive no-event steps required to leave stair-memory mode."""
   cooldown_steps: int = 15
   """Cooldown steps after exiting memory before another trigger is accepted."""
-  event_on_threshold: float = 0.6
+  event_on_threshold: float = 0.45
   """Event probability threshold that triggers stair-memory writing."""
-  event_off_threshold: float = 0.4
+  event_off_threshold: float = 0.30
   """Event probability threshold counted as no-event during exit logic."""
   stair_on_threshold: float = 0.1
   """Stair-state probability threshold required to confirm write into memory."""
@@ -82,7 +82,7 @@ class G1SlowLatentPolicyModelParams:
   """BCE loss weight for current toe-riser event prediction."""
   aux_event_pos_weight: float = 100.0
   """Positive-class weight for sparse stair-entry event prediction."""
-  event_label_window_steps: int = 5
+  event_label_window_steps: int = 12
   """Number of frames over which stair-entry event labels stay positive."""
   aux_stair_coef: float = 0.05
   """BCE loss weight for current stair-state prediction."""
@@ -178,17 +178,17 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
   alpha_write: float = 0.8,
   alpha_hold_state: float = 0.01,
   alpha_hold_shape: float = 0.05,
-  write_steps: int = 2,
+  write_steps: int = 6,
   min_stair_steps: int = 30,
   exit_steps: int = 40,
   cooldown_steps: int = 15,
-  event_on_threshold: float = 0.6,
-  event_off_threshold: float = 0.4,
+  event_on_threshold: float = 0.45,
+  event_off_threshold: float = 0.30,
   stair_on_threshold: float = 0.1,
   stair_off_threshold: float = 0.1,
   aux_event_coef: float = 0.03,
   aux_event_pos_weight: float = 100.0,
-  event_label_window_steps: int = 5,
+  event_label_window_steps: int = 12,
   aux_stair_coef: float = 0.05,
   aux_stair_pos_weight: float = 3.0,
   aux_future_collision_risk_coef: float = 0.03,
@@ -365,7 +365,7 @@ def unitree_g1_blind_rough_teacherkl_runner_cfg() -> RslRlTeacherKLRunnerCfg:
       "teacher": ("teacher", "camera"),
     },
     experiment_name="g1_blind_rough_teacherkl",
-    save_interval=500,
+    save_interval=1000,
     num_steps_per_env=24,
     max_iterations=40_001,
   )
@@ -399,17 +399,17 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
   alpha_write: float = 0.8,
   alpha_hold_state: float = 0.01,
   alpha_hold_shape: float = 0.05,
-  write_steps: int = 2,
+  write_steps: int = 6,
   min_stair_steps: int = 30,
   exit_steps: int = 40,
   cooldown_steps: int = 15,
-  event_on_threshold: float = 0.6,
-  event_off_threshold: float = 0.4,
+  event_on_threshold: float = 0.45,
+  event_off_threshold: float = 0.30,
   stair_on_threshold: float = 0.1,
   stair_off_threshold: float = 0.1,
   aux_event_coef: float = 0.03,
   aux_event_pos_weight: float = 100.0,
-  event_label_window_steps: int = 5,
+  event_label_window_steps: int = 12,
   aux_stair_coef: float = 0.05,
   aux_stair_pos_weight: float = 3.0,
   aux_future_collision_risk_coef: float = 0.03,

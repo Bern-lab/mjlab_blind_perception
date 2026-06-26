@@ -355,6 +355,7 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert toe_reward_params["stair_touchdown_lip_clearance"] == 0.02
   assert toe_reward_params["stair_touchdown_lip_height_band"] == 0.06
   assert toe_reward_params["stair_following_timeout"] == 1.50
+  assert toe_reward_params["toe_riser_evidence_time"] == 0.80
   assert toe_reward_params["collision_risk_margin"] == 0.06
   assert not any("probe" in name for name in toe_reward_params)
   assert toe_reward_params["ground_contact_sensor_name"] == "feet_ground_contact"
@@ -393,9 +394,12 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert actor_cfg.mlp_encoder_dims == (128, 128)
   assert actor_cfg.alpha_hold_state == 0.01
   assert actor_cfg.alpha_hold_shape == 0.05
+  assert actor_cfg.write_steps == 6
+  assert actor_cfg.event_on_threshold == 0.45
+  assert actor_cfg.event_off_threshold == 0.30
   assert actor_cfg.aux_event_coef == 0.03
   assert actor_cfg.aux_event_pos_weight == 100.0
-  assert actor_cfg.event_label_window_steps == 5
+  assert actor_cfg.event_label_window_steps == 12
   assert actor_cfg.min_stair_steps == 30
   assert actor_cfg.exit_steps == 40
   assert actor_cfg.stair_on_threshold == 0.1
@@ -515,6 +519,7 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
       toe_stair_entry_timeout=0.42,
       toe_stair_min_safe_stride=0.14,
       toe_stair_following_timeout=1.8,
+      toe_riser_evidence_time=0.9,
     ),
     terrain_replay=G1SlowLatentTerrainReplayParams(
       start_level=7,
@@ -554,6 +559,7 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
   assert toe_params["stair_entry_timeout"] == 0.42
   assert toe_params["stair_min_safe_stride"] == 0.14
   assert toe_params["stair_following_timeout"] == 1.8
+  assert toe_params["toe_riser_evidence_time"] == 0.9
   replay_params = train_env_cfg.curriculum["terrain_levels"].params
   assert replay_params["mixed_replay_start_level"] == 7
   assert replay_params["mixed_replay_level_ranges"] == ((0, 1), (2, 4), (5, 9))

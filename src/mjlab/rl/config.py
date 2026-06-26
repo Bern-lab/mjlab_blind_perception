@@ -88,7 +88,7 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """Hold update rate for stable stair-state and timing memory."""
   alpha_hold_shape: float = 0.05
   """Hold update rate for continuously refreshed geometry/stride memory."""
-  write_steps: int = 2
+  write_steps: int = 6
   """Number of steps to stay in STAIR_WRITE mode."""
   min_stair_steps: int = 30
   """Minimum steps in STAIR_MEMORY before exit is allowed."""
@@ -98,9 +98,9 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """Cooldown steps after exiting STAIR_MEMORY before re-triggering."""
 
   # ---- Prediction thresholds ----
-  event_on_threshold: float = 0.6
+  event_on_threshold: float = 0.45
   """p_event threshold to trigger STAIR_WRITE."""
-  event_off_threshold: float = 0.4
+  event_off_threshold: float = 0.30
   """p_event threshold for no-event counting."""
   stair_on_threshold: float = 0.1
   """p_stair threshold required to confirm STAIR_WRITE into STAIR_MEMORY."""
@@ -116,7 +116,7 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """Weight for current toe-riser event BCE loss."""
   aux_event_pos_weight: float = 100.0
   """Positive-class weight for the sparse stair-entry event BCE loss."""
-  event_label_window_steps: int = 5
+  event_label_window_steps: int = 12
   """Number of frames over which one-shot stair-entry event labels stay positive."""
   aux_stair_coef: float = 0.05
   """Weight for stair state BCE loss."""

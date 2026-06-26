@@ -60,19 +60,19 @@ class LSTMSlowLatentMLPModel(MLPModel):
     alpha_hold_state: float = 0.01,
     alpha_hold_shape: float = 0.05,
     alpha_hold: float | None = None,
-    write_steps: int = 2,
+    write_steps: int = 6,
     min_stair_steps: int = 30,
     exit_steps: int = 40,
     cooldown_steps: int = 15,
-    event_on_threshold: float = 0.6,
-    event_off_threshold: float = 0.4,
+    event_on_threshold: float = 0.45,
+    event_off_threshold: float = 0.30,
     stair_on_threshold: float = 0.1,
     stair_off_threshold: float = 0.1,
     aux_future_collision_risk_coef: float = 0.03,
     aux_future_safe_landing_quality_coef: float = 0.03,
     aux_event_coef: float = 0.03,
     aux_event_pos_weight: float = 100.0,
-    event_label_window_steps: int = 5,
+    event_label_window_steps: int = 12,
     aux_stair_coef: float = 0.05,
     aux_stair_pos_weight: float = 3.0,
     aux_stair_shape_coef: float = 0.0,
@@ -578,9 +578,9 @@ class LSTMSlowLatentMLPModel(MLPModel):
       .any(dim=0)
       .to(mode_seq.dtype)
     )
-    memory_age_seq = gate_seq[..., 1:2] * (
-      mode_seq == _MODE_STAIR_MEMORY
-    ).to(gate_seq.dtype)
+    memory_age_seq = gate_seq[..., 1:2] * (mode_seq == _MODE_STAIR_MEMORY).to(
+      gate_seq.dtype
+    )
     self._aux_event_logits = torch.stack(event_logits, dim=0)
     self._aux_stair_logits = torch.stack(stair_logits, dim=0)
     self._aux_future_collision_risk_logits = torch.stack(future_risk_logits, dim=0)
