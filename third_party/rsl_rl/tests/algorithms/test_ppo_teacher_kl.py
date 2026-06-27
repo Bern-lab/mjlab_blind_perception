@@ -90,6 +90,10 @@ def test_slow_latent_diagnostics_are_logged() -> None:
             "gate_memory_age": torch.tensor([[0.0], [0.0], [4.0], [10.0]]),
             "episode_write_ever": torch.tensor([[1.0], [0.0]]),
             "episode_memory_ever": torch.tensor([[1.0], [1.0]]),
+            "gate_event_trigger": torch.tensor([[1.0], [0.0], [0.0], [0.0]]),
+            "gate_write_confirm": torch.tensor([[0.0], [1.0], [0.0], [0.0]]),
+            "gate_write_abort": torch.tensor([[0.0], [0.0], [0.0], [0.0]]),
+            "gate_memory_exit": torch.tensor([[0.0], [0.0], [0.0], [1.0]]),
             "alpha": torch.tensor([[0.3, 0.3], [0.8, 0.8], [0.01, 0.05]]),
             "alpha_state": torch.tensor([[0.3], [0.8], [0.01]]),
             "alpha_shape": torch.tensor([[0.3], [0.8], [0.05]]),
@@ -111,6 +115,11 @@ def test_slow_latent_diagnostics_are_logged() -> None:
     assert logs["slow_latent_mode_memory_count"] == pytest.approx(2.0)
     assert logs["slow_latent_episode_write_ever_ratio"] == pytest.approx(0.5)
     assert logs["slow_latent_episode_memory_ever_ratio"] == pytest.approx(1.0)
+    assert logs["slow_latent_gate_event_trigger_ratio"] == pytest.approx(0.25)
+    assert logs["slow_latent_gate_write_confirm_ratio"] == pytest.approx(0.25)
+    assert logs["slow_latent_gate_write_abort_ratio"] == pytest.approx(0.0)
+    assert logs["slow_latent_gate_write_confirm_rate"] == pytest.approx(1.0)
+    assert logs["slow_latent_gate_memory_exit_ratio"] == pytest.approx(0.25)
     assert logs["slow_latent_memory_age_mean"] == pytest.approx(7.0)
     assert logs["slow_latent_memory_age_p90"] == pytest.approx(9.4)
     assert logs["slow_latent_alpha_min"] == pytest.approx(0.01)
@@ -205,6 +214,9 @@ def test_event_aux_logs_threshold_crossing_and_recall() -> None:
     assert logs["slow_latent_event_prob_max"] == pytest.approx(0.8)
     assert logs["slow_latent_event_prob_p99"] == pytest.approx(0.797)
     assert logs["slow_latent_event_prob_gt_on_threshold_ratio"] == pytest.approx(0.5)
+    assert logs["slow_latent_event_recall_at_on_threshold"] == pytest.approx(0.5)
+    assert logs["slow_latent_event_raw_recall_at_on_threshold"] == pytest.approx(0.5)
+    assert logs["slow_latent_event_precision_at_on_threshold"] == pytest.approx(0.5)
     assert logs["slow_latent_event_prob_gt_0p6_ratio"] == pytest.approx(0.5)
     assert logs["slow_latent_event_prob_gt_0p4_ratio"] == pytest.approx(0.75)
     assert logs["slow_latent_event_prob_pos_mean"] == pytest.approx(0.6)
@@ -243,6 +255,9 @@ def test_event_aux_expands_sparse_labels_and_uses_positive_weight() -> None:
     assert logs["slow_latent_event_raw_label_mean"] == pytest.approx(0.2)
     assert logs["slow_latent_event_label_mean"] == pytest.approx(0.6)
     assert logs["slow_latent_event_prob_gt_0p6_ratio"] == pytest.approx(0.4)
+    assert logs["slow_latent_event_recall_at_on_threshold"] == pytest.approx(2 / 3)
+    assert logs["slow_latent_event_raw_recall_at_on_threshold"] == pytest.approx(1.0)
+    assert logs["slow_latent_event_precision_at_on_threshold"] == pytest.approx(1.0)
     assert logs["slow_latent_event_raw_recall_at_0p6"] == pytest.approx(1.0)
     assert logs["slow_latent_event_recall_at_0p6"] == pytest.approx(2 / 3)
     assert logs["slow_latent_event_precision_at_0p6"] == pytest.approx(1.0)
@@ -255,6 +270,7 @@ def test_stair_aux_logs_phase_mismatch_and_uses_positive_weight() -> None:
     actor.aux_event_coef = 0.0
     actor.aux_stair_coef = 0.1
     actor.aux_stair_pos_weight = 3.0
+    actor.stair_confirm_steps = 2
     actor.aux_future_collision_risk_coef = 0.0
     actor.aux_future_safe_landing_quality_coef = 0.0
     actor.aux_stair_shape_coef = 0.0
@@ -264,6 +280,8 @@ def test_stair_aux_logs_phase_mismatch_and_uses_positive_weight() -> None:
     actor.get_aux_outputs = lambda: {"stair_logit": torch.logit(stair_prob)}
     actor.get_slow_latent_diagnostics = lambda: {
         "gate_mode": torch.tensor([[2.0], [0.0], [2.0], [1.0]]),
+        "gate_write_confirm": torch.tensor([[0.0], [1.0], [0.0], [0.0]]),
+        "gate_memory_exit": torch.tensor([[0.0], [0.0], [1.0], [0.0]]),
     }
     labels = torch.zeros(4, 10)
     labels[:, 1] = torch.tensor([0.0, 1.0, 1.0, 0.0])
@@ -281,14 +299,21 @@ def test_stair_aux_logs_phase_mismatch_and_uses_positive_weight() -> None:
     assert loss.item() > 0.0
     assert logs["slow_latent_stair_pos_weight"] == pytest.approx(3.0)
     assert logs["slow_latent_stair_on_threshold"] == pytest.approx(0.35)
+    assert logs["slow_latent_stair_confirm_steps"] == pytest.approx(2.0)
     assert logs["slow_latent_stair_label_mean"] == pytest.approx(0.5)
     assert logs["slow_latent_stair_prob_pos_mean"] == pytest.approx(0.75)
     assert logs["slow_latent_stair_prob_neg_mean"] == pytest.approx(0.15)
     assert logs["slow_latent_stair_prob_gt_on_threshold_ratio"] == pytest.approx(0.5)
+    assert logs["slow_latent_stair_recall_at_on_threshold"] == pytest.approx(1.0)
+    assert logs["slow_latent_stair_precision_at_on_threshold"] == pytest.approx(1.0)
     assert logs["slow_latent_memory_while_env_normal_ratio"] == pytest.approx(0.25)
     assert logs["slow_latent_write_while_env_normal_ratio"] == pytest.approx(0.25)
     assert logs["slow_latent_env_stair_while_latent_normal_ratio"] == pytest.approx(0.25)
     assert logs["slow_latent_memory_while_env_stair_ratio"] == pytest.approx(0.25)
+    assert logs["slow_latent_gate_confirm_while_env_stair_ratio"] == pytest.approx(0.25)
+    assert logs["slow_latent_gate_confirm_stair_precision"] == pytest.approx(1.0)
+    assert logs["slow_latent_gate_exit_while_env_stair_ratio"] == pytest.approx(0.25)
+    assert logs["slow_latent_gate_exit_stair_fraction"] == pytest.approx(1.0)
     assert logs["slow_latent_done_while_memory_ratio"] == pytest.approx(0.5)
     assert logs["slow_latent_done_while_env_normal_memory_ratio"] == pytest.approx(0.25)
 

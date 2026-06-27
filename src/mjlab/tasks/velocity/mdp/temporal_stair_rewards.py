@@ -92,7 +92,6 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     self._target_foot = torch.full(
       (env.num_envs,), -1, device=env.device, dtype=torch.long
     )
-    self._entry_timer = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
     self._target_start_pos_w = torch.zeros(
       env.num_envs, 3, device=env.device, dtype=torch.float32
     )
@@ -113,9 +112,6 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     )
     self._observed_step_stride = torch.zeros(
       env.num_envs, device=env.device, dtype=torch.float32
-    )
-    self._following_timer = torch.zeros(
-      env.num_envs, device=env.device, dtype=torch.long
     )
     self._exit_flat_steps = torch.zeros(
       env.num_envs, device=env.device, dtype=torch.long
@@ -156,7 +152,6 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     self._entry_evidence_ascent_dir[env_ids] = 0.0
     self._first_foot[env_ids] = -1
     self._target_foot[env_ids] = -1
-    self._entry_timer[env_ids] = 0
     self._target_start_pos_w[env_ids] = 0.0
     self._ascent_dir[env_ids] = 0.0
     self._first_boundary_idx[env_ids] = -1
@@ -164,7 +159,6 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     self._safe_tread_lower_bound[env_ids] = 0.0
     self._safe_landing_center_s[env_ids] = 0.0
     self._observed_step_stride[env_ids] = 0.0
-    self._following_timer[env_ids] = 0
     self._exit_flat_steps[env_ids] = 0
     self._collision_risk_now[env_ids] = 0.0
     self._landing_touchdown_now[env_ids] = False
@@ -201,6 +195,31 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       heading_cos,
       torch.zeros_like(heading_cos),
     )
+
+  @staticmethod
+  def _advance_flat_exit_confirmation(
+    active_phase: torch.Tensor,
+    exit_candidate: torch.Tensor,
+    touchdown_now: torch.Tensor,
+    unsafe_now: torch.Tensor,
+    flat_steps: torch.Tensor,
+    required_steps: int = 2,
+  ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Latch stair context until enough safe flat touchdown events confirm exit."""
+    reset_evidence = (~active_phase) | (~exit_candidate) | unsafe_now
+    next_flat_steps = torch.where(
+      reset_evidence,
+      torch.zeros_like(flat_steps),
+      flat_steps,
+    )
+    flat_exit_step = exit_candidate & touchdown_now & ~unsafe_now
+    next_flat_steps = torch.where(
+      flat_exit_step,
+      next_flat_steps + 1,
+      next_flat_steps,
+    )
+    confirmed_exit = active_phase & (next_flat_steps >= required_steps)
+    return next_flat_steps, confirmed_exit
 
   @staticmethod
   def _tread_support_fraction(
@@ -404,7 +423,6 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     contact_force_scale: float = 60.0,
     contact_vertical_normal_z_max: float = 0.4,
     stair_entry_cooldown_time: float = 0.20,
-    stair_entry_timeout: float = 1.20,
     stair_heading_cos: float = 0.70,
     stair_touchdown_height_tolerance: float = 0.08,
     stair_touchdown_lateral_margin: float = 0.03,
@@ -412,7 +430,6 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     stair_min_safe_stride: float = 0.10,
     stair_touchdown_lip_clearance: float = 0.02,
     stair_touchdown_lip_height_band: float = 0.06,
-    stair_following_timeout: float = 1.50,
     stair_entry_evidence_time: float = 0.80,
     collision_risk_margin: float = 0.06,
     command_name: str = "twist",
@@ -654,8 +671,6 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         self._first_foot[entry_mask] = first_foot[entry_mask]
         self._target_foot[entry_mask] = 1 - first_foot[entry_mask]
         self._stair_phase[entry_mask] = 1
-        self._entry_timer[entry_mask] = 0
-        self._following_timer[entry_mask] = 0
         self._safe_stride_valid[entry_mask] = False
         self._safe_tread_lower_bound[entry_mask] = 0.0
         self._safe_landing_center_s[entry_mask] = 0.0
@@ -666,7 +681,6 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         self._target_start_pos_w[entry_mask] = foot_pos_w[entry_mask, target_at_entry]
 
       phase1 = self._stair_phase == 1
-      self._entry_timer = torch.where(phase1, self._entry_timer + 1, self._entry_timer)
       target_foot = self._target_foot.clamp(0, max(1, num_feet - 1))
       target_pos_w = foot_pos_w[env_ids, target_foot]
       heading_cos = self._base_heading_cos(
@@ -827,7 +841,6 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       ) | (torch.abs(safe_landing_center - landing_center_s) > 1.0e-4)
       if bool(torch.any(safe_touchdown).item()):
         self._stair_phase[safe_touchdown] = 2
-        self._entry_timer[safe_touchdown] = 0
         self._safe_stride_valid[safe_touchdown] = True
         self._safe_tread_lower_bound[safe_touchdown] = safe_tread_lower_bound[
           safe_touchdown
@@ -836,37 +849,9 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
           safe_touchdown
         ]
         self._observed_step_stride[safe_touchdown] = target_forward_gain[safe_touchdown]
-        self._following_timer[safe_touchdown] = 0
 
       following = self._stair_phase == 2
-      following_boundary = base_valid & (boundary_layers >= 2)
-      following_geometry = torch.any(
-        following_boundary[:, None, :]
-        & ref_height_gate
-        & ref_segment_gate
-        & (tread_support_fraction >= stair_safe_support_fraction),
-        dim=-1,
-      )
-      safe_stair_touchdown = (
-        ground_first_contact
-        & following_geometry
-        & ~riser_contact
-        & ~slab_unsafe
-        & ~lip_unsafe
-      )
-      self._following_timer = torch.where(
-        following, self._following_timer + 1, self._following_timer
-      )
-      following_refresh = (
-        following & heading_gate & torch.any(safe_stair_touchdown, dim=-1)
-      )
-      self._following_timer[following_refresh] = 0
-      entry_timeout = phase1 & (
-        self._entry_timer > max(1, int(stair_entry_timeout / env.step_dt))
-      )
-      following_timeout = following & (
-        self._following_timer > max(1, int(stair_following_timeout / env.step_dt))
-      )
+      active_phase = phase1 | following
 
       boundary_ascent = -self._normalize_xy(boundaries[..., 6:8])
       aligned_boundary = base_valid & (
@@ -883,33 +868,28 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       ).values
       root_s = torch.sum(asset.data.root_link_pos_w[:, :2] * self._ascent_dir, dim=-1)
       past_last_boundary = (
-        following
+        active_phase
         & torch.isfinite(last_boundary_s)
         & (root_s > last_boundary_s + tread_depth)
       )
       ahead_boundary = aligned_boundary & (boundary_s > root_s[:, None] + 0.05)
-      no_higher_tread_ahead = following & ~torch.any(ahead_boundary, dim=-1)
+      no_higher_tread_ahead = active_phase & ~torch.any(ahead_boundary, dim=-1)
       exit_candidate = (
-        following & heading_gate & (past_last_boundary | no_higher_tread_ahead)
+        active_phase & heading_gate & (past_last_boundary | no_higher_tread_ahead)
       )
       touchdown_now = torch.any(ground_first_contact, dim=-1)
       unsafe_now = torch.any(riser_contact | slab_unsafe | lip_unsafe, dim=-1)
       flat_exit_step = exit_candidate & touchdown_now & ~unsafe_now
-      reset_exit_evidence = (~following) | (~exit_candidate) | unsafe_now
-      self._exit_flat_steps = torch.where(
-        reset_exit_evidence,
-        torch.zeros_like(self._exit_flat_steps),
+      self._exit_flat_steps, confirmed_exit = self._advance_flat_exit_confirmation(
+        active_phase,
+        exit_candidate,
+        touchdown_now,
+        unsafe_now,
         self._exit_flat_steps,
       )
-      self._exit_flat_steps = torch.where(
-        flat_exit_step,
-        self._exit_flat_steps + 1,
-        self._exit_flat_steps,
-      )
-      confirmed_exit = following & (self._exit_flat_steps >= 2)
 
       phase1_count = phase1.float().sum().clamp_min(1.0)
-      following_count = following.float().sum().clamp_min(1.0)
+      active_phase_count = active_phase.float().sum().clamp_min(1.0)
       touchdown_count = target_touchdown.float().sum().clamp_min(1.0)
       contact_count = target_contact.float().sum().clamp_min(1.0)
       geometry_touchdown = target_touchdown & target_geometry_gate
@@ -978,32 +958,27 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       log["Metrics/stair_touchdown_rejected_lip_ratio"] = (
         geometry_contact & target_lip_unsafe
       ).float().sum() / geometry_contact_count
-      log["Metrics/stair_entry_timeout_ratio"] = (
-        entry_timeout.float().sum() / phase1_count
-      )
       log["Metrics/stair_following_active_ratio"] = following.float().mean()
-      log["Metrics/stair_following_timeout_ratio"] = (
-        following_timeout.float().sum() / following_count
-      )
+      log["Metrics/stair_context_active_ratio"] = active_phase.float().mean()
       log["Metrics/stair_following_past_last_exit_ratio"] = (
-        past_last_boundary.float().sum() / following_count
+        past_last_boundary.float().sum() / active_phase_count
       )
       log["Metrics/stair_exit_candidate_ratio"] = (
-        exit_candidate.float().sum() / following_count
+        exit_candidate.float().sum() / active_phase_count
       )
       log["Metrics/stair_exit_flat_step_ratio"] = (
-        flat_exit_step.float().sum() / following_count
+        flat_exit_step.float().sum() / active_phase_count
       )
       log["Metrics/stair_exit_confirmed_ratio"] = (
-        confirmed_exit.float().sum() / following_count
+        confirmed_exit.float().sum() / active_phase_count
       )
       log["Metrics/stair_exit_flat_steps_mean"] = (
         torch.where(
-          following,
+          active_phase,
           self._exit_flat_steps.float(),
           torch.zeros_like(self._exit_flat_steps, dtype=torch.float32),
         ).sum()
-        / following_count
+        / active_phase_count
       )
       safe_count = self._safe_stride_valid.float().sum().clamp_min(1.0)
       log["Metrics/safe_tread_lower_bound_mean"] = (
@@ -1016,14 +991,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         self._observed_step_stride.sum() / safe_count
       )
 
-      active_phase = phase1 | following
-      reset_mask = (
-        entry_timeout
-        | following_timeout
-        | confirmed_exit
-        | (active_phase & ~level_active)
-      )
-      active_phase_count = active_phase.float().sum().clamp_min(1.0)
+      reset_mask = confirmed_exit | (active_phase & ~level_active)
       reset_count = reset_mask.float().sum().clamp_min(1.0)
       confirmed_exit_count = confirmed_exit.float().sum().clamp_min(1.0)
       log["Metrics/stair_phase_reset_event_ratio"] = (
@@ -1033,8 +1001,8 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       log["Metrics/stair_exit_reset_by_past_last_ratio"] = (
         confirmed_exit & past_last_boundary
       ).float().sum() / confirmed_exit_count
-      log["Metrics/stair_exit_reset_by_timeout_ratio"] = (
-        entry_timeout | following_timeout
+      log["Metrics/stair_exit_reset_by_level_ratio"] = (
+        active_phase & ~level_active
       ).float().sum() / reset_count
       if bool(torch.any(reset_mask).item()):
         reset_ids = reset_mask.nonzero(as_tuple=False).squeeze(-1)
@@ -1053,7 +1021,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       log["Metrics/stair_phase_reset_event_ratio"] = zero
       log["Metrics/stair_phase_reset_population_ratio"] = zero
       log["Metrics/stair_exit_reset_by_past_last_ratio"] = zero
-      log["Metrics/stair_exit_reset_by_timeout_ratio"] = zero
+      log["Metrics/stair_exit_reset_by_level_ratio"] = zero
 
     total_penalty = slab_penalty + contact_penalty
     log["Metrics/toe_riser_total_penalty_mean"] = total_penalty.mean()

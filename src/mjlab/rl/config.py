@@ -90,22 +90,24 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """Hold update rate for continuously refreshed geometry/stride memory."""
   write_steps: int = 6
   """Number of steps to stay in STAIR_WRITE mode."""
+  stair_confirm_steps: int = 2
+  """Minimum WRITE frames with stair evidence required to enter STAIR_MEMORY."""
   min_stair_steps: int = 30
   """Minimum steps in STAIR_MEMORY before exit is allowed."""
   exit_steps: int = 40
-  """Consecutive no-event steps required to exit STAIR_MEMORY."""
+  """Consecutive stair-off steps required to exit STAIR_MEMORY."""
   cooldown_steps: int = 15
   """Cooldown steps after exiting STAIR_MEMORY before re-triggering."""
 
   # ---- Prediction thresholds ----
-  event_on_threshold: float = 0.65
+  event_on_threshold: float = 0.60
   """p_event threshold to trigger STAIR_WRITE."""
-  event_off_threshold: float = 0.35
-  """p_event threshold for no-event counting."""
+  event_off_threshold: float = 0.20
+  """p_event threshold required to re-arm triggering after a gate transition."""
   stair_on_threshold: float = 0.35
-  """p_stair threshold required to confirm STAIR_WRITE into STAIR_MEMORY."""
-  stair_off_threshold: float = 0.20
-  """p_stair threshold to allow exit from STAIR_MEMORY."""
+  """p_stair threshold counted as confirming evidence during STAIR_WRITE."""
+  stair_off_threshold: float = 0.10
+  """p_stair threshold counted as exit evidence during STAIR_MEMORY."""
 
   # ---- Auxiliary loss ----
   aux_future_collision_risk_coef: float = 0.03

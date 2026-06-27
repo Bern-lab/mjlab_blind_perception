@@ -383,7 +383,7 @@ def toe_riser_event_label(
 def stair_state_label(
   env: ManagerBasedRlEnv,
 ) -> torch.Tensor:
-  """Label env-side stair context plus short recent entry evidence."""
+  """Label latched entry-to-flat stair context plus immediate entry evidence."""
   zeros = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
   stair_phase = env.extras.get(STAIR_PHASE_KEY)
   recent_evidence = env.extras.get(STAIR_ENTRY_RECENT_EVIDENCE_KEY, zeros)

@@ -346,7 +346,6 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   )
   assert toe_reward_params["contact_sensor_name"] == "toe_terrain_contact"
   assert toe_reward_params["contact_penalty_scale"] == 0.5
-  assert toe_reward_params["stair_entry_timeout"] == 1.20
   assert toe_reward_params["stair_heading_cos"] == 0.70
   assert toe_reward_params["stair_touchdown_height_tolerance"] == 0.08
   assert toe_reward_params["stair_touchdown_lateral_margin"] == 0.03
@@ -354,7 +353,6 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert toe_reward_params["stair_min_safe_stride"] == 0.10
   assert toe_reward_params["stair_touchdown_lip_clearance"] == 0.02
   assert toe_reward_params["stair_touchdown_lip_height_band"] == 0.06
-  assert toe_reward_params["stair_following_timeout"] == 1.50
   assert toe_reward_params["stair_entry_evidence_time"] == 0.80
   assert toe_reward_params["collision_risk_margin"] == 0.06
   assert not any("probe" in name for name in toe_reward_params)
@@ -395,15 +393,16 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert actor_cfg.alpha_hold_state == 0.01
   assert actor_cfg.alpha_hold_shape == 0.05
   assert actor_cfg.write_steps == 6
-  assert actor_cfg.event_on_threshold == 0.65
-  assert actor_cfg.event_off_threshold == 0.35
+  assert actor_cfg.stair_confirm_steps == 2
+  assert actor_cfg.event_on_threshold == 0.60
+  assert actor_cfg.event_off_threshold == 0.20
   assert actor_cfg.aux_event_coef == 0.03
   assert actor_cfg.aux_event_pos_weight == 50.0
   assert actor_cfg.event_label_window_steps == 4
   assert actor_cfg.min_stair_steps == 30
   assert actor_cfg.exit_steps == 40
   assert actor_cfg.stair_on_threshold == 0.35
-  assert actor_cfg.stair_off_threshold == 0.20
+  assert actor_cfg.stair_off_threshold == 0.10
   assert actor_cfg.aux_stair_coef == 0.05
   assert actor_cfg.aux_stair_pos_weight == 3.0
   assert actor_cfg.aux_future_collision_risk_coef == 0.03
@@ -516,9 +515,7 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
       foot_lip_ignore_boundary_layers=1,
       toe_slab_depth=0.12,
       toe_contact_penalty_scale=0.7,
-      toe_stair_entry_timeout=0.42,
       toe_stair_min_safe_stride=0.14,
-      toe_stair_following_timeout=1.8,
       stair_entry_evidence_time=0.9,
     ),
     terrain_replay=G1SlowLatentTerrainReplayParams(
@@ -556,9 +553,7 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
   assert env_cfg.rewards["toe_step_riser_slab_penalty"].params["slab_depth"] == 0.12
   toe_params = env_cfg.rewards["toe_step_riser_slab_penalty"].params
   assert toe_params["contact_penalty_scale"] == 0.7
-  assert toe_params["stair_entry_timeout"] == 0.42
   assert toe_params["stair_min_safe_stride"] == 0.14
-  assert toe_params["stair_following_timeout"] == 1.8
   assert toe_params["stair_entry_evidence_time"] == 0.9
   replay_params = train_env_cfg.curriculum["terrain_levels"].params
   assert replay_params["mixed_replay_start_level"] == 7
@@ -584,6 +579,7 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
       mlp_encoder_dims=(64,),
       alpha_hold_state=0.006,
       alpha_hold_shape=0.07,
+      stair_confirm_steps=3,
       stair_on_threshold=0.2,
       stair_off_threshold=0.05,
       aux_event_pos_weight=42.0,
@@ -613,6 +609,7 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
   assert actor_cfg.mlp_encoder_dims == (64,)
   assert actor_cfg.alpha_hold_state == 0.006
   assert actor_cfg.alpha_hold_shape == 0.07
+  assert actor_cfg.stair_confirm_steps == 3
   assert actor_cfg.stair_on_threshold == 0.2
   assert actor_cfg.stair_off_threshold == 0.05
   assert actor_cfg.aux_event_pos_weight == 42.0

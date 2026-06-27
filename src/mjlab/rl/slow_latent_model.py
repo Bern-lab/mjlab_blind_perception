@@ -61,13 +61,14 @@ class LSTMSlowLatentMLPModel(MLPModel):
     alpha_hold_shape: float = 0.05,
     alpha_hold: float | None = None,
     write_steps: int = 6,
+    stair_confirm_steps: int = 2,
     min_stair_steps: int = 30,
     exit_steps: int = 40,
     cooldown_steps: int = 15,
-    event_on_threshold: float = 0.65,
-    event_off_threshold: float = 0.35,
+    event_on_threshold: float = 0.60,
+    event_off_threshold: float = 0.20,
     stair_on_threshold: float = 0.35,
-    stair_off_threshold: float = 0.20,
+    stair_off_threshold: float = 0.10,
     aux_future_collision_risk_coef: float = 0.03,
     aux_future_safe_landing_quality_coef: float = 0.03,
     aux_event_coef: float = 0.03,
@@ -212,13 +213,22 @@ class LSTMSlowLatentMLPModel(MLPModel):
         "keep updating while stair state remains stable."
       )
     self.write_steps = float(write_steps)
+    self.stair_confirm_steps = float(stair_confirm_steps)
     self.min_stair_steps = float(min_stair_steps)
     self.exit_steps = float(exit_steps)
     self.cooldown_steps = float(cooldown_steps)
+    if self.write_steps < 1.0:
+      raise ValueError("write_steps must be at least 1.")
+    if not 1.0 <= self.stair_confirm_steps <= self.write_steps:
+      raise ValueError("stair_confirm_steps must be in [1, write_steps].")
+    if self.min_stair_steps < 0.0 or self.exit_steps < 1.0:
+      raise ValueError("min_stair_steps must be non-negative and exit_steps positive.")
     self.event_on_threshold = float(event_on_threshold)
     self.event_off_threshold = float(event_off_threshold)
     self.stair_on_threshold = float(stair_on_threshold)
     self.stair_off_threshold = float(stair_off_threshold)
+    if self.event_on_threshold < self.event_off_threshold:
+      raise ValueError("event_on_threshold must be >= event_off_threshold.")
     if self.stair_on_threshold < self.stair_off_threshold:
       raise ValueError("stair_on_threshold must be >= stair_off_threshold.")
 
@@ -393,24 +403,36 @@ class LSTMSlowLatentMLPModel(MLPModel):
 
     mode = gate_state[:, 0]
     stair_timer = gate_state[:, 1]
-    no_event_timer = gate_state[:, 2]
+    evidence_timer = gate_state[:, 2]
     write_timer = gate_state[:, 3]
     cooldown = torch.clamp(gate_state[:, 4] - 1.0, min=0.0)
 
     in_normal = mode == _MODE_NORMAL
-    trigger = in_normal & (cooldown <= 0.0) & (event_prob > self.event_on_threshold)
+    rearm_event = in_normal & (event_prob < self.event_off_threshold)
+    evidence_timer = torch.where(
+      rearm_event, torch.zeros_like(evidence_timer), evidence_timer
+    )
+    event_armed = evidence_timer >= 0.0
+    trigger = (
+      in_normal
+      & event_armed
+      & (cooldown <= 0.0)
+      & (event_prob > self.event_on_threshold)
+    )
     mode = torch.where(trigger, torch.full_like(mode, _MODE_STAIR_WRITE), mode)
     write_timer = torch.where(trigger, torch.zeros_like(write_timer), write_timer)
     stair_timer = torch.where(trigger, torch.zeros_like(stair_timer), stair_timer)
-    no_event_timer = torch.where(
-      trigger, torch.zeros_like(no_event_timer), no_event_timer
+    evidence_timer = torch.where(
+      trigger, torch.zeros_like(evidence_timer), evidence_timer
     )
 
     in_write = mode == _MODE_STAIR_WRITE
     write_timer = torch.where(in_write, write_timer + 1.0, write_timer)
     stair_timer = torch.where(in_write, stair_timer + 1.0, stair_timer)
+    stair_evidence = in_write & (stair_prob > self.stair_on_threshold)
+    evidence_timer = torch.where(stair_evidence, evidence_timer + 1.0, evidence_timer)
     done_write = in_write & (write_timer >= self.write_steps)
-    confirm_memory = done_write & (stair_prob > self.stair_on_threshold)
+    confirm_memory = done_write & (evidence_timer >= self.stair_confirm_steps)
     abort_write = done_write & ~confirm_memory
     mode = torch.where(confirm_memory, torch.full_like(mode, _MODE_STAIR_MEMORY), mode)
     mode = torch.where(abort_write, torch.full_like(mode, _MODE_NORMAL), mode)
@@ -418,37 +440,38 @@ class LSTMSlowLatentMLPModel(MLPModel):
       abort_write, torch.full_like(cooldown, self.cooldown_steps), cooldown
     )
     stair_timer = torch.where(abort_write, torch.zeros_like(stair_timer), stair_timer)
-    no_event_timer = torch.where(
-      abort_write, torch.zeros_like(no_event_timer), no_event_timer
+    evidence_timer = torch.where(
+      confirm_memory,
+      torch.zeros_like(evidence_timer),
+      torch.where(abort_write, -torch.ones_like(evidence_timer), evidence_timer),
     )
     write_timer = torch.where(abort_write, torch.zeros_like(write_timer), write_timer)
 
     in_memory = mode == _MODE_STAIR_MEMORY
     stair_timer = torch.where(in_memory, stair_timer + 1.0, stair_timer)
-    no_event = event_prob < self.event_off_threshold
-    no_event_timer = torch.where(
-      in_memory & no_event,
-      no_event_timer + 1.0,
-      torch.where(in_memory, torch.zeros_like(no_event_timer), no_event_timer),
+    stair_off = stair_prob < self.stair_off_threshold
+    evidence_timer = torch.where(
+      in_memory & stair_off,
+      evidence_timer + 1.0,
+      torch.where(in_memory, torch.zeros_like(evidence_timer), evidence_timer),
     )
     exit_memory = (
       in_memory
-      & (stair_prob < self.stair_off_threshold)
-      & (no_event_timer > self.exit_steps)
-      & (stair_timer > self.min_stair_steps)
+      & (evidence_timer >= self.exit_steps)
+      & (stair_timer >= self.min_stair_steps)
     )
     mode = torch.where(exit_memory, torch.full_like(mode, _MODE_NORMAL), mode)
     cooldown = torch.where(
       exit_memory, torch.full_like(cooldown, self.cooldown_steps), cooldown
     )
     stair_timer = torch.where(exit_memory, torch.zeros_like(stair_timer), stair_timer)
-    no_event_timer = torch.where(
-      exit_memory, torch.zeros_like(no_event_timer), no_event_timer
+    evidence_timer = torch.where(
+      exit_memory, -torch.ones_like(evidence_timer), evidence_timer
     )
     write_timer = torch.where(exit_memory, torch.zeros_like(write_timer), write_timer)
 
     next_gate = torch.stack(
-      [mode, stair_timer, no_event_timer, write_timer, cooldown], dim=-1
+      [mode, stair_timer, evidence_timer, write_timer, cooldown], dim=-1
     )
     alpha = torch.full(
       (event_prob.shape[0], self.z_dim),
@@ -508,6 +531,10 @@ class LSTMSlowLatentMLPModel(MLPModel):
     alpha_steps: list[torch.Tensor] = []
     mode_steps: list[torch.Tensor] = []
     gate_steps: list[torch.Tensor] = []
+    trigger_steps: list[torch.Tensor] = []
+    confirm_steps: list[torch.Tensor] = []
+    abort_steps: list[torch.Tensor] = []
+    exit_steps: list[torch.Tensor] = []
     event_logits: list[torch.Tensor] = []
     stair_logits: list[torch.Tensor] = []
     future_risk_logits: list[torch.Tensor] = []
@@ -533,6 +560,22 @@ class LSTMSlowLatentMLPModel(MLPModel):
         torch.sigmoid(stair_gate_logit),
         gate,
         valid=valid,
+      )
+      previous_mode = gate[:, 0:1]
+      next_mode = gate_next[:, 0:1]
+      trigger_steps.append(
+        ((previous_mode == _MODE_NORMAL) & (next_mode == _MODE_STAIR_WRITE)).float()
+      )
+      confirm_steps.append(
+        (
+          (previous_mode == _MODE_STAIR_WRITE) & (next_mode == _MODE_STAIR_MEMORY)
+        ).float()
+      )
+      abort_steps.append(
+        ((previous_mode == _MODE_STAIR_WRITE) & (next_mode == _MODE_NORMAL)).float()
+      )
+      exit_steps.append(
+        ((previous_mode == _MODE_STAIR_MEMORY) & (next_mode == _MODE_NORMAL)).float()
       )
       z_next = (1.0 - alpha) * z + alpha * z_candidate
       if valid is not None:
@@ -564,6 +607,10 @@ class LSTMSlowLatentMLPModel(MLPModel):
     alpha_seq = torch.stack(alpha_steps, dim=0)
     mode_seq = torch.stack(mode_steps, dim=0)
     gate_seq = torch.stack(gate_steps, dim=0)
+    trigger_seq = torch.stack(trigger_steps, dim=0)
+    confirm_seq = torch.stack(confirm_steps, dim=0)
+    abort_seq = torch.stack(abort_steps, dim=0)
+    exit_seq = torch.stack(exit_steps, dim=0)
     if valid_masks is None:
       valid_for_episode = torch.ones_like(mode_seq, dtype=torch.bool)
     else:
@@ -598,6 +645,10 @@ class LSTMSlowLatentMLPModel(MLPModel):
         torch.Tensor,
         unpad_trajectories(memory_age_seq, masks),
       )
+      trigger_seq = cast(torch.Tensor, unpad_trajectories(trigger_seq, masks))
+      confirm_seq = cast(torch.Tensor, unpad_trajectories(confirm_seq, masks))
+      abort_seq = cast(torch.Tensor, unpad_trajectories(abort_seq, masks))
+      exit_seq = cast(torch.Tensor, unpad_trajectories(exit_seq, masks))
       actor_obs = cast(torch.Tensor, unpad_trajectories(actor_obs, masks))
       self._aux_event_logits = cast(
         torch.Tensor, unpad_trajectories(self._aux_event_logits, masks)
@@ -626,6 +677,10 @@ class LSTMSlowLatentMLPModel(MLPModel):
       alpha_seq = alpha_seq.squeeze(0)
       mode_seq = mode_seq.squeeze(0)
       memory_age_seq = memory_age_seq.squeeze(0)
+      trigger_seq = trigger_seq.squeeze(0)
+      confirm_seq = confirm_seq.squeeze(0)
+      abort_seq = abort_seq.squeeze(0)
+      exit_seq = exit_seq.squeeze(0)
       actor_obs = actor_obs.squeeze(0)
       self._aux_event_logits = self._aux_event_logits.squeeze(0)
       self._aux_stair_logits = self._aux_stair_logits.squeeze(0)
@@ -645,6 +700,10 @@ class LSTMSlowLatentMLPModel(MLPModel):
       memory_age_seq,
       write_ever,
       memory_ever,
+      trigger_seq,
+      confirm_seq,
+      abort_seq,
+      exit_seq,
     )
 
     if hidden_state is None:
@@ -662,6 +721,10 @@ class LSTMSlowLatentMLPModel(MLPModel):
     memory_age_seq: torch.Tensor,
     write_ever: torch.Tensor,
     memory_ever: torch.Tensor,
+    trigger_seq: torch.Tensor,
+    confirm_seq: torch.Tensor,
+    abort_seq: torch.Tensor,
+    exit_seq: torch.Tensor,
   ) -> None:
     if (
       self._aux_event_logits is None
@@ -687,6 +750,10 @@ class LSTMSlowLatentMLPModel(MLPModel):
       "gate_memory_age": memory_age_seq.detach(),
       "episode_write_ever": write_ever.detach(),
       "episode_memory_ever": memory_ever.detach(),
+      "gate_event_trigger": trigger_seq.detach(),
+      "gate_write_confirm": confirm_seq.detach(),
+      "gate_write_abort": abort_seq.detach(),
+      "gate_memory_exit": exit_seq.detach(),
       "alpha": alpha_seq.detach(),
       "alpha_state": alpha_seq[..., : self.state_latent_dim]
       .detach()
@@ -868,6 +935,7 @@ class _OnnxStairLatentModel(nn.Module):
     self.alpha_hold_state = model.alpha_hold_state
     self.alpha_hold_shape = model.alpha_hold_shape
     self.write_steps = model.write_steps
+    self.stair_confirm_steps = model.stair_confirm_steps
     self.min_stair_steps = model.min_stair_steps
     self.exit_steps = model.exit_steps
     self.cooldown_steps = model.cooldown_steps
@@ -920,27 +988,38 @@ class _OnnxStairLatentModel(nn.Module):
   ) -> tuple[torch.Tensor, torch.Tensor]:
     mode = gate_state[:, 0]
     stair_timer = gate_state[:, 1]
-    no_event_timer = gate_state[:, 2]
+    evidence_timer = gate_state[:, 2]
     write_timer = gate_state[:, 3]
     cooldown = torch.clamp(gate_state[:, 4] - 1.0, min=0.0)
 
+    event_prob = event_prob.squeeze(-1)
+    stair_prob = stair_prob.squeeze(-1)
+    in_normal = mode == _MODE_NORMAL
+    rearm_event = in_normal & (event_prob < self.event_off_threshold)
+    evidence_timer = torch.where(
+      rearm_event, torch.zeros_like(evidence_timer), evidence_timer
+    )
+    event_armed = evidence_timer >= 0.0
     trigger = (
-      (mode == _MODE_NORMAL)
+      in_normal
+      & event_armed
       & (cooldown <= 0.0)
-      & (event_prob.squeeze(-1) > self.event_on_threshold)
+      & (event_prob > self.event_on_threshold)
     )
     mode = torch.where(trigger, torch.full_like(mode, _MODE_STAIR_WRITE), mode)
     write_timer = torch.where(trigger, torch.zeros_like(write_timer), write_timer)
     stair_timer = torch.where(trigger, torch.zeros_like(stair_timer), stair_timer)
-    no_event_timer = torch.where(
-      trigger, torch.zeros_like(no_event_timer), no_event_timer
+    evidence_timer = torch.where(
+      trigger, torch.zeros_like(evidence_timer), evidence_timer
     )
 
     in_write = mode == _MODE_STAIR_WRITE
     write_timer = torch.where(in_write, write_timer + 1.0, write_timer)
     stair_timer = torch.where(in_write, stair_timer + 1.0, stair_timer)
+    stair_evidence = in_write & (stair_prob > self.stair_on_threshold)
+    evidence_timer = torch.where(stair_evidence, evidence_timer + 1.0, evidence_timer)
     done_write = in_write & (write_timer >= self.write_steps)
-    confirm_memory = done_write & (stair_prob.squeeze(-1) > self.stair_on_threshold)
+    confirm_memory = done_write & (evidence_timer >= self.stair_confirm_steps)
     abort_write = done_write & ~confirm_memory
     mode = torch.where(confirm_memory, torch.full_like(mode, _MODE_STAIR_MEMORY), mode)
     mode = torch.where(abort_write, torch.full_like(mode, _MODE_NORMAL), mode)
@@ -948,37 +1027,38 @@ class _OnnxStairLatentModel(nn.Module):
       abort_write, torch.full_like(cooldown, self.cooldown_steps), cooldown
     )
     stair_timer = torch.where(abort_write, torch.zeros_like(stair_timer), stair_timer)
-    no_event_timer = torch.where(
-      abort_write, torch.zeros_like(no_event_timer), no_event_timer
+    evidence_timer = torch.where(
+      confirm_memory,
+      torch.zeros_like(evidence_timer),
+      torch.where(abort_write, -torch.ones_like(evidence_timer), evidence_timer),
     )
     write_timer = torch.where(abort_write, torch.zeros_like(write_timer), write_timer)
 
     in_memory = mode == _MODE_STAIR_MEMORY
     stair_timer = torch.where(in_memory, stair_timer + 1.0, stair_timer)
-    no_event = event_prob.squeeze(-1) < self.event_off_threshold
-    no_event_timer = torch.where(
-      in_memory & no_event,
-      no_event_timer + 1.0,
-      torch.where(in_memory, torch.zeros_like(no_event_timer), no_event_timer),
+    stair_off = stair_prob < self.stair_off_threshold
+    evidence_timer = torch.where(
+      in_memory & stair_off,
+      evidence_timer + 1.0,
+      torch.where(in_memory, torch.zeros_like(evidence_timer), evidence_timer),
     )
     exit_memory = (
       in_memory
-      & (stair_prob.squeeze(-1) < self.stair_off_threshold)
-      & (no_event_timer > self.exit_steps)
-      & (stair_timer > self.min_stair_steps)
+      & (evidence_timer >= self.exit_steps)
+      & (stair_timer >= self.min_stair_steps)
     )
     mode = torch.where(exit_memory, torch.full_like(mode, _MODE_NORMAL), mode)
     cooldown = torch.where(
       exit_memory, torch.full_like(cooldown, self.cooldown_steps), cooldown
     )
     stair_timer = torch.where(exit_memory, torch.zeros_like(stair_timer), stair_timer)
-    no_event_timer = torch.where(
-      exit_memory, torch.zeros_like(no_event_timer), no_event_timer
+    evidence_timer = torch.where(
+      exit_memory, -torch.ones_like(evidence_timer), evidence_timer
     )
     write_timer = torch.where(exit_memory, torch.zeros_like(write_timer), write_timer)
 
     next_gate = torch.stack(
-      [mode, stair_timer, no_event_timer, write_timer, cooldown], dim=-1
+      [mode, stair_timer, evidence_timer, write_timer, cooldown], dim=-1
     )
     alpha = torch.full(
       (event_prob.shape[0], self.z_dim),

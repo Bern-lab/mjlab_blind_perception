@@ -99,6 +99,10 @@ def test_slow_latent_actor_forward_updates_state_and_aux_outputs() -> None:
   assert diagnostics["gate_memory_age"].shape == (4, 1)
   assert diagnostics["episode_write_ever"].shape == (4, 1)
   assert diagnostics["episode_memory_ever"].shape == (4, 1)
+  assert diagnostics["gate_event_trigger"].shape == (4, 1)
+  assert diagnostics["gate_write_confirm"].shape == (4, 1)
+  assert diagnostics["gate_write_abort"].shape == (4, 1)
+  assert diagnostics["gate_memory_exit"].shape == (4, 1)
   assert diagnostics["alpha"].shape == (4, 5)
   assert diagnostics["alpha_state"].shape == (4, 1)
   assert diagnostics["alpha_shape"].shape == (4, 1)
@@ -122,11 +126,12 @@ def test_stair_memory_uses_distinct_state_and_shape_hold_rates() -> None:
 def test_stair_write_requires_stair_probability_to_enter_memory() -> None:
   model = _make_model()
   model.write_steps = 2.0
+  model.stair_confirm_steps = 2.0
   gate = torch.zeros(2, 5)
 
   gate, _alpha = model._advance_gate_state(
     event_prob=torch.ones(2, 1),
-    stair_prob=torch.zeros(2, 1),
+    stair_prob=torch.tensor([[0.0], [0.5]]),
     gate_state=gate,
   )
   torch.testing.assert_close(gate[:, 0], torch.full((2,), 1.0))
@@ -140,6 +145,47 @@ def test_stair_write_requires_stair_probability_to_enter_memory() -> None:
   assert gate[0, 0].item() == 0.0
   assert gate[0, 4].item() == pytest.approx(model.cooldown_steps)
   assert gate[1, 0].item() == 2.0
+
+
+def test_stair_head_alone_controls_memory_exit() -> None:
+  model = _make_model()
+  model.min_stair_steps = 0.0
+  model.exit_steps = 2.0
+  gate = torch.zeros(2, 5)
+  gate[:, 0] = 2.0
+
+  for _ in range(2):
+    gate, _alpha = model._advance_gate_state(
+      event_prob=torch.tensor([[1.0], [0.0]]),
+      stair_prob=torch.tensor([[0.0], [1.0]]),
+      gate_state=gate,
+    )
+
+  assert gate[0, 0].item() == 0.0
+  assert gate[1, 0].item() == 2.0
+
+
+def test_onnx_gate_matches_training_gate_transitions() -> None:
+  model = _make_model()
+  model.write_steps = 3.0
+  model.stair_confirm_steps = 2.0
+  model.min_stair_steps = 0.0
+  model.exit_steps = 2.0
+  onnx_model = model.as_onnx()
+  training_gate = torch.zeros(1, 5)
+  onnx_gate = torch.zeros(1, 5)
+
+  for event, stair in [(0.8, 0.5), (0.0, 0.1), (0.0, 0.5), (0.0, 0.0)]:
+    event_prob = torch.tensor([[event]])
+    stair_prob = torch.tensor([[stair]])
+    training_gate, training_alpha = model._advance_gate_state(
+      event_prob, stair_prob, training_gate
+    )
+    onnx_gate, onnx_alpha = onnx_model._advance_gate_state(
+      event_prob, stair_prob, onnx_gate
+    )
+    torch.testing.assert_close(onnx_gate, training_gate)
+    torch.testing.assert_close(onnx_alpha, training_alpha)
 
 
 def test_safe_stride_output_bounds_must_be_ordered() -> None:

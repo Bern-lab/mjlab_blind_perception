@@ -255,6 +255,36 @@ def test_stair_entry_heading_cos_uses_world_base_forward() -> None:
   assert heading_cos.tolist() == pytest.approx([1.0, 1.0], abs=1.0e-5)
 
 
+def test_stair_context_requires_two_explicit_flat_touchdowns_to_exit() -> None:
+  active = torch.tensor([True, True, True])
+  exit_candidate = torch.tensor([True, True, False])
+  flat_steps = torch.zeros(3, dtype=torch.long)
+
+  flat_steps, confirmed = (
+    temporal_toe_step_riser_slab_penalty._advance_flat_exit_confirmation(
+      active,
+      exit_candidate,
+      touchdown_now=torch.tensor([True, True, True]),
+      unsafe_now=torch.tensor([False, True, False]),
+      flat_steps=flat_steps,
+    )
+  )
+  assert flat_steps.tolist() == [1, 0, 0]
+  assert not bool(torch.any(confirmed))
+
+  flat_steps, confirmed = (
+    temporal_toe_step_riser_slab_penalty._advance_flat_exit_confirmation(
+      active,
+      exit_candidate,
+      touchdown_now=torch.tensor([True, True, False]),
+      unsafe_now=torch.zeros(3, dtype=torch.bool),
+      flat_steps=flat_steps,
+    )
+  )
+  assert flat_steps.tolist() == [2, 1, 0]
+  assert confirmed.tolist() == [True, False, False]
+
+
 def test_stair_entry_tread_support_fraction_detects_sixty_percent() -> None:
   sole_points_w = torch.tensor(
     [

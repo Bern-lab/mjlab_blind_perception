@@ -585,6 +585,30 @@ class PPOTeacherKL(PPO):
             (latent_memory & env_stair).float().mean()
         ).item()
 
+        confirm = diagnostics.get("gate_write_confirm")
+        if confirm is not None and confirm.numel() == stair_labels.numel():
+            confirm = confirm.reshape(stair_labels.shape) > 0.5
+            confirm_count = confirm.float().sum().clamp_min(1.0)
+            confirm_on_stair = confirm & env_stair
+            logs["slow_latent_gate_confirm_while_env_stair_ratio"] = self._distributed_mean_scalar(
+                confirm_on_stair.float().mean()
+            ).item()
+            logs["slow_latent_gate_confirm_stair_precision"] = self._distributed_mean_scalar(
+                confirm_on_stair.float().sum() / confirm_count
+            ).item()
+
+        memory_exit = diagnostics.get("gate_memory_exit")
+        if memory_exit is not None and memory_exit.numel() == stair_labels.numel():
+            memory_exit = memory_exit.reshape(stair_labels.shape) > 0.5
+            exit_count = memory_exit.float().sum().clamp_min(1.0)
+            exit_on_stair = memory_exit & env_stair
+            logs["slow_latent_gate_exit_while_env_stair_ratio"] = self._distributed_mean_scalar(
+                exit_on_stair.float().mean()
+            ).item()
+            logs["slow_latent_gate_exit_stair_fraction"] = self._distributed_mean_scalar(
+                exit_on_stair.float().sum() / exit_count
+            ).item()
+
         if dones is None:
             return
         dones_float = dones.float()
@@ -824,13 +848,16 @@ class PPOTeacherKL(PPO):
             event_negative = ~event_positive
             event_pred_0p6 = event_prob > 0.6
             event_pred_0p4 = event_prob > 0.4
-            event_on_threshold = float(getattr(self.actor, "event_on_threshold", 0.65))
+            event_on_threshold = float(getattr(self.actor, "event_on_threshold", 0.6))
             event_pos_weight = float(getattr(self.actor, "aux_event_pos_weight", 1.0))
             event_pred_on_threshold = event_prob > event_on_threshold
             event_pos_count = event_positive.float().sum().clamp_min(1.0)
             event_raw_pos_count = event_positive_raw.float().sum().clamp_min(1.0)
             event_neg_count = event_negative.float().sum().clamp_min(1.0)
+            event_pred_on_count = event_pred_on_threshold.float().sum().clamp_min(1.0)
             event_pred_0p6_count = event_pred_0p6.float().sum().clamp_min(1.0)
+            event_true_positive_on = (event_pred_on_threshold & event_positive).float().sum()
+            event_raw_true_positive_on = (event_pred_on_threshold & event_positive_raw).float().sum()
             event_true_positive_0p6 = (event_pred_0p6 & event_positive).float().sum()
             event_raw_true_positive_0p6 = (event_pred_0p6 & event_positive_raw).float().sum()
             flat_event_prob = event_prob.float().reshape(-1)
@@ -870,6 +897,15 @@ class PPOTeacherKL(PPO):
             logs["slow_latent_event_prob_gt_0p4_ratio"] = self._distributed_mean_scalar(
                 event_pred_0p4.float().mean()
             ).item()
+            logs["slow_latent_event_recall_at_on_threshold"] = self._distributed_mean_scalar(
+                event_true_positive_on / event_pos_count
+            ).item()
+            logs["slow_latent_event_raw_recall_at_on_threshold"] = self._distributed_mean_scalar(
+                event_raw_true_positive_on / event_raw_pos_count
+            ).item()
+            logs["slow_latent_event_precision_at_on_threshold"] = self._distributed_mean_scalar(
+                event_true_positive_on / event_pred_on_count
+            ).item()
             logs["slow_latent_event_prob_pos_mean"] = self._distributed_mean_scalar(
                 (event_prob * event_positive.float()).sum() / event_pos_count
             ).item()
@@ -897,6 +933,9 @@ class PPOTeacherKL(PPO):
             stair_neg_count = stair_negative.float().sum().clamp_min(1.0)
             stair_pos_weight = float(getattr(self.actor, "aux_stair_pos_weight", 1.0))
             stair_on_threshold = float(getattr(self.actor, "stair_on_threshold", 0.35))
+            stair_pred_on = stair_prob > stair_on_threshold
+            stair_pred_on_count = stair_pred_on.float().sum().clamp_min(1.0)
+            stair_true_positive_on = (stair_pred_on & stair_positive).float().sum()
             stair_loss_raw = functional.binary_cross_entropy_with_logits(
                 aux_outputs["stair_logit"],
                 stair_labels,
@@ -908,6 +947,7 @@ class PPOTeacherKL(PPO):
             logs["slow_latent_stair_loss"] = self._distributed_mean_scalar(stair_loss).item()
             logs["slow_latent_stair_pos_weight"] = stair_pos_weight
             logs["slow_latent_stair_on_threshold"] = stair_on_threshold
+            logs["slow_latent_stair_confirm_steps"] = float(getattr(self.actor, "stair_confirm_steps", 1.0))
             logs["slow_latent_stair_label_mean"] = self._distributed_mean_scalar(
                 stair_labels_detached.float().mean()
             ).item()
@@ -921,7 +961,13 @@ class PPOTeacherKL(PPO):
                 (stair_prob > 0.4).float().mean()
             ).item()
             logs["slow_latent_stair_prob_gt_on_threshold_ratio"] = self._distributed_mean_scalar(
-                (stair_prob > stair_on_threshold).float().mean()
+                stair_pred_on.float().mean()
+            ).item()
+            logs["slow_latent_stair_recall_at_on_threshold"] = self._distributed_mean_scalar(
+                stair_true_positive_on / stair_pos_count
+            ).item()
+            logs["slow_latent_stair_precision_at_on_threshold"] = self._distributed_mean_scalar(
+                stair_true_positive_on / stair_pred_on_count
             ).item()
         if future_risk_coef != 0.0 and "future_collision_risk_logit" in aux_outputs:
             risk_loss_raw, risk_mae = self._compute_weighted_bounded_huber(
@@ -1117,6 +1163,22 @@ class PPOTeacherKL(PPO):
             "slow_latent_episode_memory_ever_ratio",
             diagnostics.get("episode_memory_ever"),
         )
+        add_mean(
+            "slow_latent_gate_event_trigger_ratio",
+            diagnostics.get("gate_event_trigger"),
+        )
+        confirm = diagnostics.get("gate_write_confirm")
+        abort = diagnostics.get("gate_write_abort")
+        add_mean("slow_latent_gate_write_confirm_ratio", confirm)
+        add_mean("slow_latent_gate_write_abort_ratio", abort)
+        add_mean(
+            "slow_latent_gate_memory_exit_ratio",
+            diagnostics.get("gate_memory_exit"),
+        )
+        if confirm is not None and abort is not None:
+            attempts = confirm.float().sum() + abort.float().sum()
+            confirm_rate = confirm.float().sum() / attempts.clamp_min(1.0)
+            logs["slow_latent_gate_write_confirm_rate"] = self._distributed_mean_scalar(confirm_rate).item()
 
         memory_age = diagnostics.get("gate_memory_age")
         if memory_age is not None and memory_age.numel() > 0:

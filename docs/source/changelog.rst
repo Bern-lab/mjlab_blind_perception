@@ -102,6 +102,15 @@ Changed
   riser-collision traces.
 - Slow-latent event/stair gate defaults are more conservative, with a shorter
   event label window and lower event positive weight for better calibration.
+- Slow-latent stair gating now treats the event head as a write proposal,
+  requires repeated stair-head evidence across the write window, and uses
+  sustained stair-off evidence instead of the one-shot event head to leave
+  memory. Training logs now report threshold-specific head accuracy and gate
+  transition outcomes.
+- Slow-latent stair context now remains active from the first accepted riser
+  entry until two explicit flat touchdown events confirm the end of the
+  staircase. Entry/following timeouts and rejected safe landings no longer
+  clear stair-state supervision mid-staircase.
 - Slow-latent stair following now exits through a two-flat-touchdown
   confirmation instead of resetting immediately after passing the last stair
   boundary, making the stair-to-flat transition state explicit.

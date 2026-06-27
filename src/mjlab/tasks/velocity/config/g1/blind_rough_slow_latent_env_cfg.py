@@ -176,7 +176,6 @@ class G1SlowLatentRewardParams:
 
   # Penalty-only stair entry and safe layer-2 touchdown confirmation.
   toe_stair_entry_cooldown_time: float = 0.20
-  toe_stair_entry_timeout: float = 1.20
   toe_stair_heading_cos: float = 0.70
   toe_stair_touchdown_height_tolerance: float = 0.08
   toe_stair_touchdown_lateral_margin: float = 0.03
@@ -184,7 +183,6 @@ class G1SlowLatentRewardParams:
   toe_stair_min_safe_stride: float = 0.10
   toe_stair_touchdown_lip_clearance: float = 0.02
   toe_stair_touchdown_lip_height_band: float = 0.06
-  toe_stair_following_timeout: float = 1.50
   stair_entry_evidence_time: float = 0.80
   toe_collision_risk_margin: float = 0.06
   toe_stair_command_threshold: float = 0.05
@@ -315,7 +313,6 @@ def configure_g1_step_danger_rewards(
       "contact_force_scale": params.toe_contact_force_scale,
       "contact_vertical_normal_z_max": params.toe_contact_vertical_normal_z_max,
       "stair_entry_cooldown_time": params.toe_stair_entry_cooldown_time,
-      "stair_entry_timeout": params.toe_stair_entry_timeout,
       "stair_heading_cos": params.toe_stair_heading_cos,
       "stair_touchdown_height_tolerance": (params.toe_stair_touchdown_height_tolerance),
       "stair_touchdown_lateral_margin": (params.toe_stair_touchdown_lateral_margin),
@@ -323,7 +320,6 @@ def configure_g1_step_danger_rewards(
       "stair_min_safe_stride": params.toe_stair_min_safe_stride,
       "stair_touchdown_lip_clearance": (params.toe_stair_touchdown_lip_clearance),
       "stair_touchdown_lip_height_band": (params.toe_stair_touchdown_lip_height_band),
-      "stair_following_timeout": params.toe_stair_following_timeout,
       "stair_entry_evidence_time": params.stair_entry_evidence_time,
       "collision_risk_margin": params.toe_collision_risk_margin,
       "command_threshold": params.toe_stair_command_threshold,

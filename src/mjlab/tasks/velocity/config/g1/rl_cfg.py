@@ -64,20 +64,22 @@ class G1SlowLatentPolicyModelParams:
   """Hold update rate for geometry and safe-stride channels."""
   write_steps: int = 6
   """Number of steps spent in write mode after an event trigger."""
+  stair_confirm_steps: int = 2
+  """Minimum WRITE frames with stair evidence required to enter memory."""
   min_stair_steps: int = 30
   """Minimum memory-hold steps before exit is allowed."""
   exit_steps: int = 40
-  """Consecutive no-event steps required to leave stair-memory mode."""
+  """Consecutive stair-off steps required to leave stair-memory mode."""
   cooldown_steps: int = 15
   """Cooldown steps after exiting memory before another trigger is accepted."""
-  event_on_threshold: float = 0.65
+  event_on_threshold: float = 0.60
   """Event probability threshold that triggers stair-memory writing."""
-  event_off_threshold: float = 0.35
-  """Event probability threshold counted as no-event during exit logic."""
+  event_off_threshold: float = 0.20
+  """Event probability threshold that re-arms triggering."""
   stair_on_threshold: float = 0.35
-  """Stair-state probability threshold required to confirm write into memory."""
-  stair_off_threshold: float = 0.20
-  """Stair-state probability threshold below which exit is allowed."""
+  """Stair-state threshold counted as confirming evidence during write."""
+  stair_off_threshold: float = 0.10
+  """Stair-state threshold counted as exit evidence during memory."""
   aux_event_coef: float = 0.03
   """BCE loss weight for current toe-riser event prediction."""
   aux_event_pos_weight: float = 50.0
@@ -179,13 +181,14 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
   alpha_hold_state: float = 0.01,
   alpha_hold_shape: float = 0.05,
   write_steps: int = 6,
+  stair_confirm_steps: int = 2,
   min_stair_steps: int = 30,
   exit_steps: int = 40,
   cooldown_steps: int = 15,
-  event_on_threshold: float = 0.65,
-  event_off_threshold: float = 0.35,
+  event_on_threshold: float = 0.60,
+  event_off_threshold: float = 0.20,
   stair_on_threshold: float = 0.35,
-  stair_off_threshold: float = 0.20,
+  stair_off_threshold: float = 0.10,
   aux_event_coef: float = 0.03,
   aux_event_pos_weight: float = 50.0,
   event_label_window_steps: int = 4,
@@ -224,6 +227,7 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
     alpha_hold_state=alpha_hold_state,
     alpha_hold_shape=alpha_hold_shape,
     write_steps=write_steps,
+    stair_confirm_steps=stair_confirm_steps,
     min_stair_steps=min_stair_steps,
     exit_steps=exit_steps,
     cooldown_steps=cooldown_steps,
@@ -400,13 +404,14 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
   alpha_hold_state: float = 0.01,
   alpha_hold_shape: float = 0.05,
   write_steps: int = 6,
+  stair_confirm_steps: int = 2,
   min_stair_steps: int = 30,
   exit_steps: int = 40,
   cooldown_steps: int = 15,
-  event_on_threshold: float = 0.65,
-  event_off_threshold: float = 0.35,
+  event_on_threshold: float = 0.60,
+  event_off_threshold: float = 0.20,
   stair_on_threshold: float = 0.35,
-  stair_off_threshold: float = 0.20,
+  stair_off_threshold: float = 0.10,
   aux_event_coef: float = 0.03,
   aux_event_pos_weight: float = 50.0,
   event_label_window_steps: int = 4,
@@ -458,6 +463,7 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
     alpha_hold_state = model_params.alpha_hold_state
     alpha_hold_shape = model_params.alpha_hold_shape
     write_steps = model_params.write_steps
+    stair_confirm_steps = model_params.stair_confirm_steps
     min_stair_steps = model_params.min_stair_steps
     exit_steps = model_params.exit_steps
     cooldown_steps = model_params.cooldown_steps
@@ -505,6 +511,7 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
     alpha_hold_state=alpha_hold_state,
     alpha_hold_shape=alpha_hold_shape,
     write_steps=write_steps,
+    stair_confirm_steps=stair_confirm_steps,
     min_stair_steps=min_stair_steps,
     exit_steps=exit_steps,
     cooldown_steps=cooldown_steps,
