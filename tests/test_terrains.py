@@ -98,10 +98,16 @@ def test_pyramid_stairs_step_boundaries_use_high_side_lip():
   output = cfg.function(0.0, spec, np.random.default_rng(0))
 
   assert output.step_boundaries is not None
+  assert output.step_boundary_sequence_ids is not None
+  assert output.step_boundary_layers is not None
   np.testing.assert_allclose(output.step_boundaries[0, 0:3], [1.0, 7.0, 0.1])
   np.testing.assert_allclose(output.step_boundaries[0, 3:6], [7.0, 7.0, 0.1])
   np.testing.assert_allclose(output.step_boundaries[0, 6:9], [0.0, 1.0, 0.0])
   np.testing.assert_allclose(output.step_boundaries[0, 9:11], [0.0, 0.1])
+  np.testing.assert_array_equal(output.step_boundary_sequence_ids[:4], [1, 2, 3, 4])
+  np.testing.assert_array_equal(
+    output.step_boundary_layers[:8], [1, 1, 1, 1, 2, 2, 2, 2]
+  )
 
 
 def test_inverted_pyramid_stairs_step_boundaries_point_to_low_side():
@@ -117,10 +123,18 @@ def test_inverted_pyramid_stairs_step_boundaries_point_to_low_side():
   output = cfg.function(0.0, spec, np.random.default_rng(0))
 
   assert output.step_boundaries is not None
+  assert output.step_boundary_sequence_ids is not None
+  assert output.step_boundary_layers is not None
   np.testing.assert_allclose(output.step_boundaries[0, 0:3], [1.0, 7.0, 0.0])
   np.testing.assert_allclose(output.step_boundaries[0, 3:6], [7.0, 7.0, 0.0])
   np.testing.assert_allclose(output.step_boundaries[0, 6:9], [0.0, -1.0, 0.0])
   np.testing.assert_allclose(output.step_boundaries[0, 9:11], [-0.1, 0.0])
+  num_layers = len(output.step_boundary_layers) // 4
+  np.testing.assert_array_equal(
+    output.step_boundary_layers[:4],
+    np.full(4, num_layers),
+  )
+  np.testing.assert_array_equal(output.step_boundary_layers[-4:], np.ones(4))
 
 
 def test_terrain_generator_pads_step_boundaries_by_tile():
@@ -145,8 +159,18 @@ def test_terrain_generator_pads_step_boundaries_by_tile():
   assert generator.step_boundary_counts.shape == (1, 1)
   assert generator.step_boundary_counts[0, 0] == 24
   assert generator.step_boundaries_by_tile.shape == (1, 1, 24, 11)
+  assert generator.step_boundary_sequence_ids_by_tile.shape == (1, 1, 24)
+  assert generator.step_boundary_layers_by_tile.shape == (1, 1, 24)
   np.testing.assert_allclose(
     generator.step_boundaries_by_tile[0, 0, 0, 0:3], [-3.0, 3.0, 0.1]
+  )
+  np.testing.assert_array_equal(
+    generator.step_boundary_sequence_ids_by_tile[0, 0, :4],
+    [1, 2, 3, 4],
+  )
+  np.testing.assert_array_equal(
+    generator.step_boundary_layers_by_tile[0, 0, :8],
+    [1, 1, 1, 1, 2, 2, 2, 2],
   )
 
 

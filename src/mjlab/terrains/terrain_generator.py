@@ -59,6 +59,10 @@ class TerrainOutput:
   """Named sets of flat patch positions, each an (N, 3) array. None if not configured."""
   step_boundaries: np.ndarray | None = None
   """Height-discontinuity boundaries as ``[p0_high, p1_high, normal_to_low, z_low, z_high]`` rows."""
+  step_boundary_sequence_ids: np.ndarray | None = None
+  """Training-only sequence identifier for each step boundary."""
+  step_boundary_layers: np.ndarray | None = None
+  """Training-only one-based layer index measured from each sequence entry."""
 
 
 @dataclass
@@ -204,8 +208,22 @@ class TerrainGenerator:
       [np.zeros((0, 11), dtype=np.float32) for _ in range(self._num_cols)]
       for _ in range(self.cfg.num_rows)
     ]
+    self._step_boundary_sequence_ids_tiles: list[list[np.ndarray]] = [
+      [np.zeros((0,), dtype=np.int32) for _ in range(self._num_cols)]
+      for _ in range(self.cfg.num_rows)
+    ]
+    self._step_boundary_layers_tiles: list[list[np.ndarray]] = [
+      [np.zeros((0,), dtype=np.int32) for _ in range(self._num_cols)]
+      for _ in range(self.cfg.num_rows)
+    ]
     self.step_boundaries_by_tile = np.zeros(
       (self.cfg.num_rows, self._num_cols, 0, 11), dtype=np.float32
+    )
+    self.step_boundary_sequence_ids_by_tile = np.zeros(
+      (self.cfg.num_rows, self._num_cols, 0), dtype=np.int32
+    )
+    self.step_boundary_layers_by_tile = np.zeros(
+      (self.cfg.num_rows, self._num_cols, 0), dtype=np.int32
     )
     self.step_boundary_counts = np.zeros(
       (self.cfg.num_rows, self._num_cols), dtype=np.int32
@@ -384,10 +402,30 @@ class TerrainGenerator:
           "TerrainOutput.step_boundaries must have shape [N, 11], got "
           f"{boundaries.shape}."
         )
+      if (
+        output.step_boundary_sequence_ids is None or output.step_boundary_layers is None
+      ):
+        raise ValueError(
+          "TerrainOutput with step boundaries must provide sequence ids and layers."
+        )
+      sequence_ids = np.asarray(
+        output.step_boundary_sequence_ids, dtype=np.int32
+      ).copy()
+      layers = np.asarray(output.step_boundary_layers, dtype=np.int32).copy()
+      expected_shape = (boundaries.shape[0],)
+      if sequence_ids.shape != expected_shape or layers.shape != expected_shape:
+        raise ValueError(
+          "Step-boundary metadata must have shape "
+          f"{expected_shape}, got {sequence_ids.shape} and {layers.shape}."
+        )
+      if np.any(sequence_ids <= 0) or np.any(layers <= 0):
+        raise ValueError("Step-boundary sequence ids and layers must be positive.")
       boundaries[:, 0:3] += world_position
       boundaries[:, 3:6] += world_position
       boundaries[:, 9:11] += world_position[2]
       self._step_boundaries_tiles[sub_row][sub_col] = boundaries
+      self._step_boundary_sequence_ids_tiles[sub_row][sub_col] = sequence_ids
+      self._step_boundary_layers_tiles[sub_row][sub_col] = layers
       self._add_step_danger_visual_geoms(spec, boundaries)
 
     return spawn_origin
@@ -492,6 +530,12 @@ class TerrainGenerator:
     self.step_boundaries_by_tile = np.zeros(
       (self.cfg.num_rows, self._num_cols, max_count, 11), dtype=np.float32
     )
+    self.step_boundary_sequence_ids_by_tile = np.zeros(
+      (self.cfg.num_rows, self._num_cols, max_count), dtype=np.int32
+    )
+    self.step_boundary_layers_by_tile = np.zeros(
+      (self.cfg.num_rows, self._num_cols, max_count), dtype=np.int32
+    )
     self.step_boundary_counts = np.zeros(
       (self.cfg.num_rows, self._num_cols), dtype=np.int32
     )
@@ -505,6 +549,12 @@ class TerrainGenerator:
         self.step_boundary_counts[row, col] = count
         if count > 0:
           self.step_boundaries_by_tile[row, col, :count] = boundaries
+          self.step_boundary_sequence_ids_by_tile[row, col, :count] = (
+            self._step_boundary_sequence_ids_tiles[row][col]
+          )
+          self.step_boundary_layers_by_tile[row, col, :count] = (
+            self._step_boundary_layers_tiles[row][col]
+          )
 
   def _add_terrain_border(self, spec: mujoco.MjSpec) -> None:
     if self.cfg.border_width <= 0.0:

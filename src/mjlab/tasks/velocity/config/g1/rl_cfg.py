@@ -58,8 +58,8 @@ class G1SlowLatentPolicyModelParams:
   """EMA update rate in normal fast-update mode."""
   alpha_write: float = 0.8
   """EMA update rate while writing stair evidence into memory."""
-  alpha_hold_state: float = 0.01
-  """Hold update rate for stable stair-state and timing channels."""
+  alpha_hold_state: float = 0.0
+  """Freeze rate for stable stair-state and timing channels."""
   alpha_hold_shape: float = 0.05
   """Hold update rate for geometry and safe-stride channels."""
   write_steps: int = 6
@@ -178,7 +178,7 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
   mlp_encoder_dims: tuple[int, ...] = (128, 128),
   alpha_fast: float = 0.3,
   alpha_write: float = 0.8,
-  alpha_hold_state: float = 0.01,
+  alpha_hold_state: float = 0.0,
   alpha_hold_shape: float = 0.05,
   write_steps: int = 6,
   stair_confirm_steps: int = 2,
@@ -401,7 +401,7 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
   mlp_encoder_dims: tuple[int, ...] = (128, 128),
   alpha_fast: float = 0.3,
   alpha_write: float = 0.8,
-  alpha_hold_state: float = 0.01,
+  alpha_hold_state: float = 0.0,
   alpha_hold_shape: float = 0.05,
   write_steps: int = 6,
   stair_confirm_steps: int = 2,

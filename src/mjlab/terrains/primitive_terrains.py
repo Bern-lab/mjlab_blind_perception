@@ -188,6 +188,8 @@ class BoxPyramidStairsTerrainCfg(SubTerrainCfg):
     boxes = []
     box_colors = []
     step_boundaries: list[np.ndarray] = []
+    step_boundary_sequence_ids: list[int] = []
+    step_boundary_layers: list[int] = []
 
     body = spec.body("terrain")
 
@@ -228,6 +230,7 @@ class BoxPyramidStairsTerrainCfg(SubTerrainCfg):
     )
     if not self.holes:
       for boundary_index in range(num_steps + 1):
+        previous_count = len(step_boundaries)
         _append_square_step_boundaries(
           step_boundaries,
           terrain_center,
@@ -238,6 +241,9 @@ class BoxPyramidStairsTerrainCfg(SubTerrainCfg):
           z_high=(boundary_index + 1) * step_height,
           normal_direction="outward",
         )
+        added_count = len(step_boundaries) - previous_count
+        step_boundary_sequence_ids.extend(range(1, added_count + 1))
+        step_boundary_layers.extend([boundary_index + 1] * added_count)
     rgba = brand_ramp(_MUJOCO_BLUE, 0.5)
     for k in range(num_steps):
       t = k / max(num_steps - 1, 1)
@@ -364,7 +370,11 @@ class BoxPyramidStairsTerrainCfg(SubTerrainCfg):
       np.asarray(step_boundaries, dtype=np.float32) if step_boundaries else None
     )
     return TerrainOutput(
-      origin=origin, geometries=geometries, step_boundaries=boundaries
+      origin=origin,
+      geometries=geometries,
+      step_boundaries=boundaries,
+      step_boundary_sequence_ids=np.asarray(step_boundary_sequence_ids, dtype=np.int32),
+      step_boundary_layers=np.asarray(step_boundary_layers, dtype=np.int32),
     )
 
 
@@ -376,6 +386,8 @@ class BoxInvertedPyramidStairsTerrainCfg(BoxPyramidStairsTerrainCfg):
     boxes = []
     box_colors = []
     step_boundaries: list[np.ndarray] = []
+    step_boundary_sequence_ids: list[int] = []
+    step_boundary_layers: list[int] = []
 
     body = spec.body("terrain")
 
@@ -417,6 +429,7 @@ class BoxInvertedPyramidStairsTerrainCfg(BoxPyramidStairsTerrainCfg):
     )
     if not self.holes:
       for boundary_index in range(num_steps + 1):
+        previous_count = len(step_boundaries)
         _append_square_step_boundaries(
           step_boundaries,
           terrain_center,
@@ -427,6 +440,10 @@ class BoxInvertedPyramidStairsTerrainCfg(BoxPyramidStairsTerrainCfg):
           z_high=-boundary_index * step_height,
           normal_direction="inward",
         )
+        added_count = len(step_boundaries) - previous_count
+        step_boundary_sequence_ids.extend(range(1, added_count + 1))
+        layer_from_entry = num_steps - boundary_index + 1
+        step_boundary_layers.extend([layer_from_entry] * added_count)
 
     rgba = brand_ramp(_MUJOCO_RED, 0.5)
     for k in range(num_steps):
@@ -554,7 +571,11 @@ class BoxInvertedPyramidStairsTerrainCfg(BoxPyramidStairsTerrainCfg):
       np.asarray(step_boundaries, dtype=np.float32) if step_boundaries else None
     )
     return TerrainOutput(
-      origin=origin, geometries=geometries, step_boundaries=boundaries
+      origin=origin,
+      geometries=geometries,
+      step_boundaries=boundaries,
+      step_boundary_sequence_ids=np.asarray(step_boundary_sequence_ids, dtype=np.int32),
+      step_boundary_layers=np.asarray(step_boundary_layers, dtype=np.int32),
     )
 
 

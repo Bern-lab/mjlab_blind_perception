@@ -57,7 +57,7 @@ class LSTMSlowLatentMLPModel(MLPModel):
     state_latent_dim: int | None = None,
     alpha_fast: float = 0.3,
     alpha_write: float = 0.8,
-    alpha_hold_state: float = 0.01,
+    alpha_hold_state: float = 0.0,
     alpha_hold_shape: float = 0.05,
     alpha_hold: float | None = None,
     write_steps: int = 6,
@@ -299,8 +299,10 @@ class LSTMSlowLatentMLPModel(MLPModel):
     tensors = [cast(torch.Tensor, obs[name]) for name in group_names]
     return torch.cat(tensors, dim=-1)
 
-  def _state_memory(self, z: torch.Tensor) -> torch.Tensor:
-    return z[..., : self.state_latent_dim]
+  def _stair_logit(self, h_t: torch.Tensor) -> torch.Tensor:
+    """Predict stair continuation without feeding the held state back in."""
+    memory_placeholder = h_t.new_zeros((*h_t.shape[:-1], self.state_latent_dim))
+    return self.stair_state_head(torch.cat([h_t, memory_placeholder], dim=-1))
 
   def _shape_memory(self, z: torch.Tensor) -> torch.Tensor:
     return z[..., self.state_latent_dim :]
@@ -427,10 +429,19 @@ class LSTMSlowLatentMLPModel(MLPModel):
     )
 
     in_write = mode == _MODE_STAIR_WRITE
+    write_active_for_update = in_write
     write_timer = torch.where(in_write, write_timer + 1.0, write_timer)
     stair_timer = torch.where(in_write, stair_timer + 1.0, stair_timer)
     stair_evidence = in_write & (stair_prob > self.stair_on_threshold)
-    evidence_timer = torch.where(stair_evidence, evidence_timer + 1.0, evidence_timer)
+    evidence_timer = torch.where(
+      in_write,
+      torch.where(
+        stair_evidence,
+        evidence_timer + 1.0,
+        torch.zeros_like(evidence_timer),
+      ),
+      evidence_timer,
+    )
     done_write = in_write & (write_timer >= self.write_steps)
     confirm_memory = done_write & (evidence_timer >= self.stair_confirm_steps)
     abort_write = done_write & ~confirm_memory
@@ -479,11 +490,7 @@ class LSTMSlowLatentMLPModel(MLPModel):
       device=event_prob.device,
       dtype=event_prob.dtype,
     )
-    alpha = torch.where(
-      mode[:, None] == _MODE_STAIR_WRITE,
-      self.alpha_write,
-      alpha,
-    )
+    alpha = torch.where(write_active_for_update[:, None], self.alpha_write, alpha)
     hold_alpha = torch.cat(
       [
         torch.full_like(alpha[:, : self.state_latent_dim], self.alpha_hold_state),
@@ -491,7 +498,8 @@ class LSTMSlowLatentMLPModel(MLPModel):
       ],
       dim=-1,
     )
-    alpha = torch.where(mode[:, None] == _MODE_STAIR_MEMORY, hold_alpha, alpha)
+    hold_memory = (mode == _MODE_STAIR_MEMORY) & ~write_active_for_update
+    alpha = torch.where(hold_memory[:, None], hold_alpha, alpha)
 
     if valid is not None:
       valid = valid.bool().squeeze(-1)
@@ -550,14 +558,12 @@ class LSTMSlowLatentMLPModel(MLPModel):
       h_t = lstm_out[step]
       z_candidate = self.z_candidate_head(h_t)
       event_logit = self.event_head(h_t)
-      stair_gate_logit = self.stair_state_head(
-        torch.cat([h_t, self._state_memory(z)], dim=-1)
-      )
+      stair_logit = self._stair_logit(h_t)
       valid = valid_masks[step] if valid_masks is not None else None
 
       gate_next, alpha = self._advance_gate_state(
         torch.sigmoid(event_logit),
-        torch.sigmoid(stair_gate_logit),
+        torch.sigmoid(stair_logit),
         gate,
         valid=valid,
       )
@@ -581,9 +587,6 @@ class LSTMSlowLatentMLPModel(MLPModel):
       if valid is not None:
         z_next = torch.where(valid.bool(), z_next, z)
 
-      stair_logit = self.stair_state_head(
-        torch.cat([h_t, self._state_memory(z_next)], dim=-1)
-      )
       future_risk_logit = self.future_collision_risk_head(z_next)
       future_quality_logit = self.future_safe_landing_quality_head(z_next)
       shape_memory = self._shape_memory(z_next)
@@ -980,6 +983,10 @@ class _OnnxStairLatentModel(nn.Module):
       self.safe_stride_max - self.safe_stride_min
     )
 
+  def _stair_logit(self, h_t: torch.Tensor) -> torch.Tensor:
+    memory_placeholder = h_t.new_zeros((*h_t.shape[:-1], self.state_latent_dim))
+    return self.stair_state_head(torch.cat([h_t, memory_placeholder], dim=-1))
+
   def _advance_gate_state(
     self,
     event_prob: torch.Tensor,
@@ -1014,10 +1021,19 @@ class _OnnxStairLatentModel(nn.Module):
     )
 
     in_write = mode == _MODE_STAIR_WRITE
+    write_active_for_update = in_write
     write_timer = torch.where(in_write, write_timer + 1.0, write_timer)
     stair_timer = torch.where(in_write, stair_timer + 1.0, stair_timer)
     stair_evidence = in_write & (stair_prob > self.stair_on_threshold)
-    evidence_timer = torch.where(stair_evidence, evidence_timer + 1.0, evidence_timer)
+    evidence_timer = torch.where(
+      in_write,
+      torch.where(
+        stair_evidence,
+        evidence_timer + 1.0,
+        torch.zeros_like(evidence_timer),
+      ),
+      evidence_timer,
+    )
     done_write = in_write & (write_timer >= self.write_steps)
     confirm_memory = done_write & (evidence_timer >= self.stair_confirm_steps)
     abort_write = done_write & ~confirm_memory
@@ -1066,11 +1082,7 @@ class _OnnxStairLatentModel(nn.Module):
       device=event_prob.device,
       dtype=event_prob.dtype,
     )
-    alpha = torch.where(
-      mode[:, None] == _MODE_STAIR_WRITE,
-      self.alpha_write,
-      alpha,
-    )
+    alpha = torch.where(write_active_for_update[:, None], self.alpha_write, alpha)
     hold_alpha = torch.cat(
       [
         torch.full_like(alpha[:, : self.state_latent_dim], self.alpha_hold_state),
@@ -1078,7 +1090,8 @@ class _OnnxStairLatentModel(nn.Module):
       ],
       dim=-1,
     )
-    alpha = torch.where(mode[:, None] == _MODE_STAIR_MEMORY, hold_alpha, alpha)
+    hold_memory = (mode == _MODE_STAIR_MEMORY) & ~write_active_for_update
+    alpha = torch.where(hold_memory[:, None], hold_alpha, alpha)
     return next_gate, alpha
 
   def forward(
@@ -1109,16 +1122,11 @@ class _OnnxStairLatentModel(nn.Module):
     h_t = lstm_out.squeeze(0)
     z_candidate = self.z_candidate_head(h_t)
     event_prob = torch.sigmoid(self.event_head(h_t))
-    stair_gate_prob = torch.sigmoid(
-      self.stair_state_head(torch.cat([h_t, z_in[:, : self.state_latent_dim]], dim=-1))
-    )
+    stair_prob = torch.sigmoid(self._stair_logit(h_t))
     gate_state_out, alpha = self._advance_gate_state(
-      event_prob, stair_gate_prob, gate_state_in
+      event_prob, stair_prob, gate_state_in
     )
     z_out = (1.0 - alpha) * z_in + alpha * z_candidate
-    stair_prob = torch.sigmoid(
-      self.stair_state_head(torch.cat([h_t, z_out[:, : self.state_latent_dim]], dim=-1))
-    )
     future_collision_risk = torch.sigmoid(self.future_collision_risk_head(z_out))
     future_safe_landing_quality = torch.sigmoid(
       self.future_safe_landing_quality_head(z_out)

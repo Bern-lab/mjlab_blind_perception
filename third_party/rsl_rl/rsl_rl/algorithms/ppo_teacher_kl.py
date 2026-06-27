@@ -557,6 +557,7 @@ class PPOTeacherKL(PPO):
         self,
         logs: dict[str, float],
         diagnostics: dict[str, torch.Tensor],
+        event_labels: torch.Tensor,
         stair_labels: torch.Tensor,
         dones: torch.Tensor | None,
         masks: torch.Tensor | None,
@@ -571,6 +572,7 @@ class PPOTeacherKL(PPO):
         latent_normal = mode_bool_shape == 0.0
         latent_write = mode_bool_shape == 1.0
         latent_memory = mode_bool_shape == 2.0
+        event_positive = event_labels.reshape(stair_labels.shape) > 0.5
 
         logs["slow_latent_memory_while_env_normal_ratio"] = self._distributed_mean_scalar(
             (latent_memory & ~env_stair).float().mean()
@@ -584,6 +586,32 @@ class PPOTeacherKL(PPO):
         logs["slow_latent_memory_while_env_stair_ratio"] = self._distributed_mean_scalar(
             (latent_memory & env_stair).float().mean()
         ).item()
+        event_count = event_positive.float().sum().clamp_min(1.0)
+        logs["slow_latent_event_with_stair_label_rate"] = self._distributed_mean_scalar(
+            (event_positive & env_stair).float().sum() / event_count
+        ).item()
+
+        stair_prob = diagnostics.get("stair_prob")
+        if stair_prob is not None and stair_prob.numel() == stair_labels.numel():
+            stair_prob = stair_prob.reshape(stair_labels.shape)
+            stair_on_threshold = float(getattr(self.actor, "stair_on_threshold", 0.35))
+            stair_pred_on = stair_prob > stair_on_threshold
+            write_stair = latent_write & env_stair
+            write_stair_count = write_stair.float().sum().clamp_min(1.0)
+            logs["slow_latent_stair_recall_while_write"] = self._distributed_mean_scalar(
+                (stair_pred_on & write_stair).float().sum() / write_stair_count
+            ).item()
+
+        trigger = diagnostics.get("gate_event_trigger")
+        if trigger is not None and trigger.numel() == stair_labels.numel():
+            trigger = trigger.reshape(stair_labels.shape) > 0.5
+            trigger_count = trigger.float().sum().clamp_min(1.0)
+            logs["slow_latent_true_event_to_write_rate"] = self._distributed_mean_scalar(
+                (trigger & event_positive).float().sum() / event_count
+            ).item()
+            logs["slow_latent_write_trigger_event_precision"] = self._distributed_mean_scalar(
+                (trigger & event_positive).float().sum() / trigger_count
+            ).item()
 
         confirm = diagnostics.get("gate_write_confirm")
         if confirm is not None and confirm.numel() == stair_labels.numel():
@@ -595,6 +623,12 @@ class PPOTeacherKL(PPO):
             ).item()
             logs["slow_latent_gate_confirm_stair_precision"] = self._distributed_mean_scalar(
                 confirm_on_stair.float().sum() / confirm_count
+            ).item()
+            logs["slow_latent_true_event_to_memory_rate"] = self._distributed_mean_scalar(
+                confirm_on_stair.float().sum() / event_count
+            ).item()
+            logs["slow_latent_false_memory_confirm_ratio"] = self._distributed_mean_scalar(
+                (confirm & ~env_stair).float().sum() / confirm_count
             ).item()
 
         memory_exit = diagnostics.get("gate_memory_exit")
@@ -835,6 +869,7 @@ class PPOTeacherKL(PPO):
         self._add_slow_latent_phase_alignment_logs(
             logs,
             diagnostics,
+            event_labels_raw,
             stair_labels,
             batch.dones,
             batch.masks,
@@ -874,6 +909,9 @@ class PPOTeacherKL(PPO):
             logs["slow_latent_event_label_window_steps"] = float(event_label_window_steps)
             logs["slow_latent_event_raw_label_mean"] = self._distributed_mean_scalar(
                 event_labels_raw_detached.float().mean()
+            ).item()
+            logs["slow_latent_event_raw_label_positive_count"] = self._distributed_mean_scalar(
+                event_positive_raw.float().sum()
             ).item()
             logs["slow_latent_event_label_mean"] = self._distributed_mean_scalar(
                 event_labels_detached.float().mean()
@@ -950,6 +988,9 @@ class PPOTeacherKL(PPO):
             logs["slow_latent_stair_confirm_steps"] = float(getattr(self.actor, "stair_confirm_steps", 1.0))
             logs["slow_latent_stair_label_mean"] = self._distributed_mean_scalar(
                 stair_labels_detached.float().mean()
+            ).item()
+            logs["slow_latent_stair_label_positive_count"] = self._distributed_mean_scalar(
+                stair_positive.float().sum()
             ).item()
             logs["slow_latent_stair_prob_pos_mean"] = self._distributed_mean_scalar(
                 (stair_prob * stair_positive.float()).sum() / stair_pos_count

@@ -426,6 +426,15 @@ def test_event_label_ignores_any_toe_riser_hit_and_stair_label_uses_entry_eviden
   torch.testing.assert_close(stair_label, torch.tensor([[1.0], [1.0], [0.0]]))
 
 
+def test_strict_stair_entry_event_only_requires_normal_phase_and_layer1_hit() -> None:
+  entry = temporal_stair_rewards._strict_stair_entry_event(
+    stair_phase=torch.tensor([0, 1, 0, 2]),
+    layer1_new_hit=torch.tensor([True, True, False, True]),
+  )
+
+  torch.testing.assert_close(entry, torch.tensor([True, False, False, False]))
+
+
 def test_slow_latent_labels_follow_env_stair_state_machine(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -390,7 +390,7 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert actor_cfg.state_latent_dim == 8
   assert actor_cfg.latent_hidden_dim == 128
   assert actor_cfg.mlp_encoder_dims == (128, 128)
-  assert actor_cfg.alpha_hold_state == 0.01
+  assert actor_cfg.alpha_hold_state == 0.0
   assert actor_cfg.alpha_hold_shape == 0.05
   assert actor_cfg.write_steps == 6
   assert actor_cfg.stair_confirm_steps == 2

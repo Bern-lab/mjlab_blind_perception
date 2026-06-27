@@ -51,7 +51,7 @@ def _make_model() -> LSTMSlowLatentMLPModel:
     state_latent_dim=2,
     alpha_fast=0.3,
     alpha_write=0.8,
-    alpha_hold_state=0.01,
+    alpha_hold_state=0.0,
     alpha_hold_shape=0.05,
     aux_safe_stride_coef=0.03,
   )
@@ -106,6 +106,9 @@ def test_slow_latent_actor_forward_updates_state_and_aux_outputs() -> None:
   assert diagnostics["alpha"].shape == (4, 5)
   assert diagnostics["alpha_state"].shape == (4, 1)
   assert diagnostics["alpha_shape"].shape == (4, 1)
+  torch.testing.assert_close(
+    torch.sigmoid(aux["stair_logit"]), diagnostics["stair_prob"]
+  )
 
 
 def test_stair_memory_uses_distinct_state_and_shape_hold_rates() -> None:
@@ -119,7 +122,7 @@ def test_stair_memory_uses_distinct_state_and_shape_hold_rates() -> None:
     gate_state=gate,
   )
 
-  torch.testing.assert_close(alpha[:, :2], torch.full((2, 2), 0.01))
+  torch.testing.assert_close(alpha[:, :2], torch.zeros(2, 2))
   torch.testing.assert_close(alpha[:, 2:], torch.full((2, 3), 0.05))
 
 
@@ -145,6 +148,70 @@ def test_stair_write_requires_stair_probability_to_enter_memory() -> None:
   assert gate[0, 0].item() == 0.0
   assert gate[0, 4].item() == pytest.approx(model.cooldown_steps)
   assert gate[1, 0].item() == 2.0
+
+
+def test_stair_write_requires_consecutive_evidence() -> None:
+  model = _make_model()
+  model.write_steps = 3.0
+  model.stair_confirm_steps = 2.0
+  gate = torch.zeros(1, 5)
+
+  for event, stair in [(1.0, 0.5), (0.0, 0.0), (0.0, 0.5)]:
+    gate, _alpha = model._advance_gate_state(
+      event_prob=torch.tensor([[event]]),
+      stair_prob=torch.tensor([[stair]]),
+      gate_state=gate,
+    )
+
+  assert gate[0, 0].item() == 0.0
+  assert gate[0, 4].item() == pytest.approx(model.cooldown_steps)
+
+
+def test_final_write_frame_uses_write_alpha_before_memory_hold() -> None:
+  model = _make_model()
+  model.write_steps = 2.0
+  model.stair_confirm_steps = 2.0
+  gate = torch.zeros(1, 5)
+
+  gate, first_alpha = model._advance_gate_state(
+    event_prob=torch.ones(1, 1),
+    stair_prob=torch.ones(1, 1),
+    gate_state=gate,
+  )
+  gate, final_alpha = model._advance_gate_state(
+    event_prob=torch.zeros(1, 1),
+    stair_prob=torch.ones(1, 1),
+    gate_state=gate,
+  )
+
+  assert gate[0, 0].item() == 2.0
+  torch.testing.assert_close(first_alpha, torch.full((1, 5), 0.8))
+  torch.testing.assert_close(final_alpha, torch.full((1, 5), 0.8))
+
+  _gate, held_alpha = model._advance_gate_state(
+    event_prob=torch.zeros(1, 1),
+    stair_prob=torch.ones(1, 1),
+    gate_state=gate,
+  )
+  torch.testing.assert_close(held_alpha[:, :2], torch.zeros(1, 2))
+  torch.testing.assert_close(held_alpha[:, 2:], torch.full((1, 3), 0.05))
+
+
+def test_stair_head_does_not_read_held_memory_channels() -> None:
+  model = _make_model()
+  h_t = torch.randn(3, model.latent_hidden_dim)
+
+  expected = model._stair_logit(h_t)
+  first_linear = cast(torch.nn.Linear, model.stair_state_head[0])
+  memory_weights = first_linear.weight[:, model.latent_hidden_dim :]
+
+  torch.testing.assert_close(
+    expected,
+    model.stair_state_head(
+      torch.cat([h_t, torch.zeros(3, model.state_latent_dim)], dim=-1)
+    ),
+  )
+  assert memory_weights.shape[-1] == model.state_latent_dim
 
 
 def test_stair_head_alone_controls_memory_exit() -> None:
@@ -348,9 +415,9 @@ def test_slow_latent_export_metadata() -> None:
 
   assert metadata["policy_has_slow_latent"] == "true"
   assert metadata["policy_slow_latent_dim"] == "5"
-  assert metadata["policy_slow_latent_alpha"] == "0.01"
+  assert metadata["policy_slow_latent_alpha"] == "0.0"
   assert metadata["policy_slow_latent_state_dim"] == "2"
-  assert metadata["policy_slow_latent_alpha_hold_state"] == "0.01"
+  assert metadata["policy_slow_latent_alpha_hold_state"] == "0.0"
   assert metadata["policy_slow_latent_alpha_hold_shape"] == "0.05"
   assert metadata["policy_latent_obs_dim"] == "11"
   assert metadata["policy_stair_tread_depth_min"] == "0.25"

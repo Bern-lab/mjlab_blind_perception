@@ -84,8 +84,8 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """EMA rate in STAIR_WRITE mode (rapid memory acquisition)."""
   state_latent_dim: int = 8
   """Leading z-memory channels reserved for stair state and timing."""
-  alpha_hold_state: float = 0.01
-  """Hold update rate for stable stair-state and timing memory."""
+  alpha_hold_state: float = 0.0
+  """Freeze rate for stable stair-state and timing memory."""
   alpha_hold_shape: float = 0.05
   """Hold update rate for continuously refreshed geometry/stride memory."""
   write_steps: int = 6

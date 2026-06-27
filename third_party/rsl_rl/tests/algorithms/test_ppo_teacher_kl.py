@@ -279,11 +279,14 @@ def test_stair_aux_logs_phase_mismatch_and_uses_positive_weight() -> None:
     stair_prob = torch.tensor([[0.1], [0.8], [0.7], [0.2]])
     actor.get_aux_outputs = lambda: {"stair_logit": torch.logit(stair_prob)}
     actor.get_slow_latent_diagnostics = lambda: {
+        "stair_prob": stair_prob,
         "gate_mode": torch.tensor([[2.0], [0.0], [2.0], [1.0]]),
+        "gate_event_trigger": torch.tensor([[0.0], [1.0], [0.0], [0.0]]),
         "gate_write_confirm": torch.tensor([[0.0], [1.0], [0.0], [0.0]]),
         "gate_memory_exit": torch.tensor([[0.0], [0.0], [1.0], [0.0]]),
     }
     labels = torch.zeros(4, 10)
+    labels[:, 0] = torch.tensor([0.0, 1.0, 0.0, 0.0])
     labels[:, 1] = torch.tensor([0.0, 1.0, 1.0, 0.0])
     dones = torch.tensor([[1.0], [0.0], [1.0], [0.0]])
     observations = TensorDict({"latent_labels": labels}, batch_size=[NUM_ENVS])
@@ -301,6 +304,7 @@ def test_stair_aux_logs_phase_mismatch_and_uses_positive_weight() -> None:
     assert logs["slow_latent_stair_on_threshold"] == pytest.approx(0.35)
     assert logs["slow_latent_stair_confirm_steps"] == pytest.approx(2.0)
     assert logs["slow_latent_stair_label_mean"] == pytest.approx(0.5)
+    assert logs["slow_latent_stair_label_positive_count"] == pytest.approx(2.0)
     assert logs["slow_latent_stair_prob_pos_mean"] == pytest.approx(0.75)
     assert logs["slow_latent_stair_prob_neg_mean"] == pytest.approx(0.15)
     assert logs["slow_latent_stair_prob_gt_on_threshold_ratio"] == pytest.approx(0.5)
@@ -310,8 +314,14 @@ def test_stair_aux_logs_phase_mismatch_and_uses_positive_weight() -> None:
     assert logs["slow_latent_write_while_env_normal_ratio"] == pytest.approx(0.25)
     assert logs["slow_latent_env_stair_while_latent_normal_ratio"] == pytest.approx(0.25)
     assert logs["slow_latent_memory_while_env_stair_ratio"] == pytest.approx(0.25)
+    assert logs["slow_latent_event_with_stair_label_rate"] == pytest.approx(1.0)
+    assert logs["slow_latent_stair_recall_while_write"] == pytest.approx(0.0)
+    assert logs["slow_latent_true_event_to_write_rate"] == pytest.approx(1.0)
+    assert logs["slow_latent_write_trigger_event_precision"] == pytest.approx(1.0)
     assert logs["slow_latent_gate_confirm_while_env_stair_ratio"] == pytest.approx(0.25)
     assert logs["slow_latent_gate_confirm_stair_precision"] == pytest.approx(1.0)
+    assert logs["slow_latent_true_event_to_memory_rate"] == pytest.approx(1.0)
+    assert logs["slow_latent_false_memory_confirm_ratio"] == pytest.approx(0.0)
     assert logs["slow_latent_gate_exit_while_env_stair_ratio"] == pytest.approx(0.25)
     assert logs["slow_latent_gate_exit_stair_fraction"] == pytest.approx(1.0)
     assert logs["slow_latent_done_while_memory_ratio"] == pytest.approx(0.5)

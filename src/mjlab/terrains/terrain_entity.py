@@ -153,6 +153,12 @@ class TerrainEntity(Entity):
       self._step_boundaries_by_tile = torch.from_numpy(
         terrain_generator.step_boundaries_by_tile
       ).to(device=self._device, dtype=torch.float)
+      self._step_boundary_sequence_ids_by_tile = torch.from_numpy(
+        terrain_generator.step_boundary_sequence_ids_by_tile
+      ).to(device=self._device, dtype=torch.long)
+      self._step_boundary_layers_by_tile = torch.from_numpy(
+        terrain_generator.step_boundary_layers_by_tile
+      ).to(device=self._device, dtype=torch.long)
       self._step_boundary_counts = torch.from_numpy(
         terrain_generator.step_boundary_counts
       ).to(device=self._device, dtype=torch.long)
@@ -163,6 +169,12 @@ class TerrainEntity(Entity):
       self._flat_patch_radii: dict[str, float] = {}
       self._step_boundaries_by_tile = torch.zeros(
         (0, 0, 0, 11), device=self._device, dtype=torch.float
+      )
+      self._step_boundary_sequence_ids_by_tile = torch.zeros(
+        (0, 0, 0), device=self._device, dtype=torch.long
+      )
+      self._step_boundary_layers_by_tile = torch.zeros(
+        (0, 0, 0), device=self._device, dtype=torch.long
       )
       self._step_boundary_counts = torch.zeros(
         (0, 0), device=self._device, dtype=torch.long
@@ -194,6 +206,14 @@ class TerrainEntity(Entity):
   @property
   def step_boundary_counts(self) -> torch.Tensor:
     return self._step_boundary_counts
+
+  @property
+  def step_boundary_sequence_ids_by_tile(self) -> torch.Tensor:
+    return self._step_boundary_sequence_ids_by_tile
+
+  @property
+  def step_boundary_layers_by_tile(self) -> torch.Tensor:
+    return self._step_boundary_layers_by_tile
 
   # Terrain origin management.
 

@@ -82,6 +82,25 @@ def _current_step_boundaries(
   return boundaries, valid
 
 
+def _current_step_boundary_metadata(
+  env: ManagerBasedRlEnv,
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+  """Return training-only sequence ids and entry-relative boundary layers."""
+  terrain = getattr(env.scene, "terrain", None)
+  if terrain is None or getattr(terrain, "terrain_levels", None) is None:
+    return None, None
+  if not hasattr(terrain, "step_boundary_sequence_ids_by_tile") or not hasattr(
+    terrain, "step_boundary_layers_by_tile"
+  ):
+    return None, None
+
+  levels = terrain.terrain_levels
+  terrain_types = terrain.terrain_types
+  sequence_ids = terrain.step_boundary_sequence_ids_by_tile[levels, terrain_types]
+  layers = terrain.step_boundary_layers_by_tile[levels, terrain_types]
+  return sequence_ids, layers
+
+
 def _terrain_level_active(
   env: ManagerBasedRlEnv, min_terrain_level: int | None
 ) -> torch.Tensor:
