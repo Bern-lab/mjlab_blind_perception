@@ -598,6 +598,8 @@ document.write(`
     <span class="n">boxes</span> <span class="o">=</span> <span class="p">[]</span>
     <span class="n">box_colors</span> <span class="o">=</span> <span class="p">[]</span>
     <span class="n">step_boundaries</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="n">step_boundary_sequence_ids</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="n">step_boundary_layers</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
 
     <span class="n">body</span> <span class="o">=</span> <span class="n">spec</span><span class="o">.</span><span class="n">body</span><span class="p">(</span><span class="s2">&quot;terrain&quot;</span><span class="p">)</span>
 
@@ -638,6 +640,7 @@ document.write(`
     <span class="p">)</span>
     <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">holes</span><span class="p">:</span>
       <span class="k">for</span> <span class="n">boundary_index</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">num_steps</span> <span class="o">+</span> <span class="mi">1</span><span class="p">):</span>
+        <span class="n">previous_count</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">step_boundaries</span><span class="p">)</span>
         <span class="n">_append_square_step_boundaries</span><span class="p">(</span>
           <span class="n">step_boundaries</span><span class="p">,</span>
           <span class="n">terrain_center</span><span class="p">,</span>
@@ -648,6 +651,9 @@ document.write(`
           <span class="n">z_high</span><span class="o">=</span><span class="p">(</span><span class="n">boundary_index</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">*</span> <span class="n">step_height</span><span class="p">,</span>
           <span class="n">normal_direction</span><span class="o">=</span><span class="s2">&quot;outward&quot;</span><span class="p">,</span>
         <span class="p">)</span>
+        <span class="n">added_count</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">step_boundaries</span><span class="p">)</span> <span class="o">-</span> <span class="n">previous_count</span>
+        <span class="n">step_boundary_sequence_ids</span><span class="o">.</span><span class="n">extend</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">added_count</span> <span class="o">+</span> <span class="mi">1</span><span class="p">))</span>
+        <span class="n">step_boundary_layers</span><span class="o">.</span><span class="n">extend</span><span class="p">([</span><span class="n">boundary_index</span> <span class="o">+</span> <span class="mi">1</span><span class="p">]</span> <span class="o">*</span> <span class="n">added_count</span><span class="p">)</span>
     <span class="n">rgba</span> <span class="o">=</span> <span class="n">brand_ramp</span><span class="p">(</span><span class="n">_MUJOCO_BLUE</span><span class="p">,</span> <span class="mf">0.5</span><span class="p">)</span>
     <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">num_steps</span><span class="p">):</span>
       <span class="n">t</span> <span class="o">=</span> <span class="n">k</span> <span class="o">/</span> <span class="nb">max</span><span class="p">(</span><span class="n">num_steps</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
@@ -774,7 +780,11 @@ document.write(`
       <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">step_boundaries</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span> <span class="k">if</span> <span class="n">step_boundaries</span> <span class="k">else</span> <span class="kc">None</span>
     <span class="p">)</span>
     <span class="k">return</span> <span class="n">TerrainOutput</span><span class="p">(</span>
-      <span class="n">origin</span><span class="o">=</span><span class="n">origin</span><span class="p">,</span> <span class="n">geometries</span><span class="o">=</span><span class="n">geometries</span><span class="p">,</span> <span class="n">step_boundaries</span><span class="o">=</span><span class="n">boundaries</span>
+      <span class="n">origin</span><span class="o">=</span><span class="n">origin</span><span class="p">,</span>
+      <span class="n">geometries</span><span class="o">=</span><span class="n">geometries</span><span class="p">,</span>
+      <span class="n">step_boundaries</span><span class="o">=</span><span class="n">boundaries</span><span class="p">,</span>
+      <span class="n">step_boundary_sequence_ids</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">step_boundary_sequence_ids</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">int32</span><span class="p">),</span>
+      <span class="n">step_boundary_layers</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">step_boundary_layers</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">int32</span><span class="p">),</span>
     <span class="p">)</span></div>
 </div>
 
@@ -792,6 +802,8 @@ document.write(`
     <span class="n">boxes</span> <span class="o">=</span> <span class="p">[]</span>
     <span class="n">box_colors</span> <span class="o">=</span> <span class="p">[]</span>
     <span class="n">step_boundaries</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="n">step_boundary_sequence_ids</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="n">step_boundary_layers</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
 
     <span class="n">body</span> <span class="o">=</span> <span class="n">spec</span><span class="o">.</span><span class="n">body</span><span class="p">(</span><span class="s2">&quot;terrain&quot;</span><span class="p">)</span>
 
@@ -833,6 +845,7 @@ document.write(`
     <span class="p">)</span>
     <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">holes</span><span class="p">:</span>
       <span class="k">for</span> <span class="n">boundary_index</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">num_steps</span> <span class="o">+</span> <span class="mi">1</span><span class="p">):</span>
+        <span class="n">previous_count</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">step_boundaries</span><span class="p">)</span>
         <span class="n">_append_square_step_boundaries</span><span class="p">(</span>
           <span class="n">step_boundaries</span><span class="p">,</span>
           <span class="n">terrain_center</span><span class="p">,</span>
@@ -843,6 +856,10 @@ document.write(`
           <span class="n">z_high</span><span class="o">=-</span><span class="n">boundary_index</span> <span class="o">*</span> <span class="n">step_height</span><span class="p">,</span>
           <span class="n">normal_direction</span><span class="o">=</span><span class="s2">&quot;inward&quot;</span><span class="p">,</span>
         <span class="p">)</span>
+        <span class="n">added_count</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">step_boundaries</span><span class="p">)</span> <span class="o">-</span> <span class="n">previous_count</span>
+        <span class="n">step_boundary_sequence_ids</span><span class="o">.</span><span class="n">extend</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">added_count</span> <span class="o">+</span> <span class="mi">1</span><span class="p">))</span>
+        <span class="n">layer_from_entry</span> <span class="o">=</span> <span class="n">num_steps</span> <span class="o">-</span> <span class="n">boundary_index</span> <span class="o">+</span> <span class="mi">1</span>
+        <span class="n">step_boundary_layers</span><span class="o">.</span><span class="n">extend</span><span class="p">([</span><span class="n">layer_from_entry</span><span class="p">]</span> <span class="o">*</span> <span class="n">added_count</span><span class="p">)</span>
 
     <span class="n">rgba</span> <span class="o">=</span> <span class="n">brand_ramp</span><span class="p">(</span><span class="n">_MUJOCO_RED</span><span class="p">,</span> <span class="mf">0.5</span><span class="p">)</span>
     <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">num_steps</span><span class="p">):</span>
@@ -970,7 +987,11 @@ document.write(`
       <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">step_boundaries</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span> <span class="k">if</span> <span class="n">step_boundaries</span> <span class="k">else</span> <span class="kc">None</span>
     <span class="p">)</span>
     <span class="k">return</span> <span class="n">TerrainOutput</span><span class="p">(</span>
-      <span class="n">origin</span><span class="o">=</span><span class="n">origin</span><span class="p">,</span> <span class="n">geometries</span><span class="o">=</span><span class="n">geometries</span><span class="p">,</span> <span class="n">step_boundaries</span><span class="o">=</span><span class="n">boundaries</span>
+      <span class="n">origin</span><span class="o">=</span><span class="n">origin</span><span class="p">,</span>
+      <span class="n">geometries</span><span class="o">=</span><span class="n">geometries</span><span class="p">,</span>
+      <span class="n">step_boundaries</span><span class="o">=</span><span class="n">boundaries</span><span class="p">,</span>
+      <span class="n">step_boundary_sequence_ids</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">step_boundary_sequence_ids</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">int32</span><span class="p">),</span>
+      <span class="n">step_boundary_layers</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">step_boundary_layers</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">int32</span><span class="p">),</span>
     <span class="p">)</span></div>
 </div>
 

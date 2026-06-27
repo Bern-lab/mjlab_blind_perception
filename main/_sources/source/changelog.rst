@@ -59,6 +59,16 @@ Added
 Changed
 ^^^^^^^
 
+- Slow-latent stair entry now uses explicit training-only sequence and
+  entry-relative layer metadata, so regular and inverted stairs agree on the
+  first riser. A first-riser hit starts the privileged stair label without
+  heading or command filtering, and the label remains active until geometric
+  flat exit confirmation.
+- Slow-latent WRITE now requires consecutive StairHead evidence and performs
+  every configured fast-write update before entering MEMORY. StairHead uses
+  the same proprioceptive LSTM output for training and gating, while MEMORY
+  freezes state channels and continues refreshing shape channels. Deployment
+  observations are unchanged, and no new reward term was added.
 - Slow-latent stair geometry and safe-stride heads now decode to physical ranges
   in meters and are exported as explicit ONNX outputs without changing the actor
   control input. Stair depth is fixed to 0.25--0.35 m and riser height is bounded
