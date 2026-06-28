@@ -69,6 +69,12 @@ Changed
   the same proprioceptive LSTM output for training and gating, while MEMORY
   freezes state channels and continues refreshing shape channels. Deployment
   observations are unchanged, and no new reward term was added.
+- Slow-latent stair gating now requires three consecutive confirmation frames
+  and treats StairHead probabilities below 0.20 as MEMORY exit evidence. New
+  diagnostics track repeated layer-1 hits after entry without changing reward.
+- Slow-latent MEMORY exit now releases held state and shape channels over the
+  existing 15-step cooldown instead of immediately switching to the normal
+  latent update rate.
 - Slow-latent stair geometry and safe-stride heads now decode to physical ranges
   in meters and are exported as explicit ONNX outputs without changing the actor
   control input. Stair depth is fixed to 0.25--0.35 m and riser height is bounded

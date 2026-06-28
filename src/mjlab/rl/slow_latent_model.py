@@ -61,14 +61,14 @@ class LSTMSlowLatentMLPModel(MLPModel):
     alpha_hold_shape: float = 0.05,
     alpha_hold: float | None = None,
     write_steps: int = 6,
-    stair_confirm_steps: int = 2,
+    stair_confirm_steps: int = 3,
     min_stair_steps: int = 30,
     exit_steps: int = 40,
     cooldown_steps: int = 15,
     event_on_threshold: float = 0.60,
     event_off_threshold: float = 0.20,
     stair_on_threshold: float = 0.35,
-    stair_off_threshold: float = 0.10,
+    stair_off_threshold: float = 0.20,
     aux_future_collision_risk_coef: float = 0.03,
     aux_future_safe_landing_quality_coef: float = 0.03,
     aux_event_coef: float = 0.03,
@@ -410,6 +410,10 @@ class LSTMSlowLatentMLPModel(MLPModel):
     cooldown = torch.clamp(gate_state[:, 4] - 1.0, min=0.0)
 
     in_normal = mode == _MODE_NORMAL
+    release_finished = in_normal & (write_timer < 0.0) & (cooldown <= 0.0)
+    write_timer = torch.where(
+      release_finished, torch.zeros_like(write_timer), write_timer
+    )
     rearm_event = in_normal & (event_prob < self.event_off_threshold)
     evidence_timer = torch.where(
       rearm_event, torch.zeros_like(evidence_timer), evidence_timer
@@ -479,7 +483,7 @@ class LSTMSlowLatentMLPModel(MLPModel):
     evidence_timer = torch.where(
       exit_memory, -torch.ones_like(evidence_timer), evidence_timer
     )
-    write_timer = torch.where(exit_memory, torch.zeros_like(write_timer), write_timer)
+    write_timer = torch.where(exit_memory, -torch.ones_like(write_timer), write_timer)
 
     next_gate = torch.stack(
       [mode, stair_timer, evidence_timer, write_timer, cooldown], dim=-1
@@ -500,6 +504,16 @@ class LSTMSlowLatentMLPModel(MLPModel):
     )
     hold_memory = (mode == _MODE_STAIR_MEMORY) & ~write_active_for_update
     alpha = torch.where(hold_memory[:, None], hold_alpha, alpha)
+    release_active = (mode == _MODE_NORMAL) & (write_timer < 0.0) & (cooldown > 0.0)
+    release_progress = torch.clamp(
+      (self.cooldown_steps - cooldown) / max(self.cooldown_steps, 1.0),
+      min=0.0,
+      max=1.0,
+    )
+    release_alpha = hold_alpha + release_progress[:, None] * (
+      self.alpha_fast - hold_alpha
+    )
+    alpha = torch.where(release_active[:, None], release_alpha, alpha)
 
     if valid is not None:
       valid = valid.bool().squeeze(-1)
@@ -631,6 +645,11 @@ class LSTMSlowLatentMLPModel(MLPModel):
     memory_age_seq = gate_seq[..., 1:2] * (mode_seq == _MODE_STAIR_MEMORY).to(
       gate_seq.dtype
     )
+    release_seq = (
+      (mode_seq == _MODE_NORMAL)
+      & (gate_seq[..., 3:4] < 0.0)
+      & (gate_seq[..., 4:5] > 0.0)
+    ).to(gate_seq.dtype)
     self._aux_event_logits = torch.stack(event_logits, dim=0)
     self._aux_stair_logits = torch.stack(stair_logits, dim=0)
     self._aux_future_collision_risk_logits = torch.stack(future_risk_logits, dim=0)
@@ -648,6 +667,7 @@ class LSTMSlowLatentMLPModel(MLPModel):
         torch.Tensor,
         unpad_trajectories(memory_age_seq, masks),
       )
+      release_seq = cast(torch.Tensor, unpad_trajectories(release_seq, masks))
       trigger_seq = cast(torch.Tensor, unpad_trajectories(trigger_seq, masks))
       confirm_seq = cast(torch.Tensor, unpad_trajectories(confirm_seq, masks))
       abort_seq = cast(torch.Tensor, unpad_trajectories(abort_seq, masks))
@@ -680,6 +700,7 @@ class LSTMSlowLatentMLPModel(MLPModel):
       alpha_seq = alpha_seq.squeeze(0)
       mode_seq = mode_seq.squeeze(0)
       memory_age_seq = memory_age_seq.squeeze(0)
+      release_seq = release_seq.squeeze(0)
       trigger_seq = trigger_seq.squeeze(0)
       confirm_seq = confirm_seq.squeeze(0)
       abort_seq = abort_seq.squeeze(0)
@@ -701,6 +722,7 @@ class LSTMSlowLatentMLPModel(MLPModel):
       alpha_seq,
       mode_seq,
       memory_age_seq,
+      release_seq,
       write_ever,
       memory_ever,
       trigger_seq,
@@ -722,6 +744,7 @@ class LSTMSlowLatentMLPModel(MLPModel):
     alpha_seq: torch.Tensor,
     mode_seq: torch.Tensor,
     memory_age_seq: torch.Tensor,
+    release_seq: torch.Tensor,
     write_ever: torch.Tensor,
     memory_ever: torch.Tensor,
     trigger_seq: torch.Tensor,
@@ -751,6 +774,7 @@ class LSTMSlowLatentMLPModel(MLPModel):
       "z_norm": z_seq.detach().norm(dim=-1, keepdim=True),
       "gate_mode": mode_seq.detach(),
       "gate_memory_age": memory_age_seq.detach(),
+      "gate_release": release_seq.detach(),
       "episode_write_ever": write_ever.detach(),
       "episode_memory_ever": memory_ever.detach(),
       "gate_event_trigger": trigger_seq.detach(),
@@ -1002,6 +1026,10 @@ class _OnnxStairLatentModel(nn.Module):
     event_prob = event_prob.squeeze(-1)
     stair_prob = stair_prob.squeeze(-1)
     in_normal = mode == _MODE_NORMAL
+    release_finished = in_normal & (write_timer < 0.0) & (cooldown <= 0.0)
+    write_timer = torch.where(
+      release_finished, torch.zeros_like(write_timer), write_timer
+    )
     rearm_event = in_normal & (event_prob < self.event_off_threshold)
     evidence_timer = torch.where(
       rearm_event, torch.zeros_like(evidence_timer), evidence_timer
@@ -1071,7 +1099,7 @@ class _OnnxStairLatentModel(nn.Module):
     evidence_timer = torch.where(
       exit_memory, -torch.ones_like(evidence_timer), evidence_timer
     )
-    write_timer = torch.where(exit_memory, torch.zeros_like(write_timer), write_timer)
+    write_timer = torch.where(exit_memory, -torch.ones_like(write_timer), write_timer)
 
     next_gate = torch.stack(
       [mode, stair_timer, evidence_timer, write_timer, cooldown], dim=-1
@@ -1092,6 +1120,16 @@ class _OnnxStairLatentModel(nn.Module):
     )
     hold_memory = (mode == _MODE_STAIR_MEMORY) & ~write_active_for_update
     alpha = torch.where(hold_memory[:, None], hold_alpha, alpha)
+    release_active = (mode == _MODE_NORMAL) & (write_timer < 0.0) & (cooldown > 0.0)
+    release_progress = torch.clamp(
+      (self.cooldown_steps - cooldown) / max(self.cooldown_steps, 1.0),
+      min=0.0,
+      max=1.0,
+    )
+    release_alpha = hold_alpha + release_progress[:, None] * (
+      self.alpha_fast - hold_alpha
+    )
+    alpha = torch.where(release_active[:, None], release_alpha, alpha)
     return next_gate, alpha
 
   def forward(

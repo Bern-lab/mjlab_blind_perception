@@ -393,7 +393,7 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert actor_cfg.alpha_hold_state == 0.0
   assert actor_cfg.alpha_hold_shape == 0.05
   assert actor_cfg.write_steps == 6
-  assert actor_cfg.stair_confirm_steps == 2
+  assert actor_cfg.stair_confirm_steps == 3
   assert actor_cfg.event_on_threshold == 0.60
   assert actor_cfg.event_off_threshold == 0.20
   assert actor_cfg.aux_event_coef == 0.03
@@ -402,7 +402,7 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert actor_cfg.min_stair_steps == 30
   assert actor_cfg.exit_steps == 40
   assert actor_cfg.stair_on_threshold == 0.35
-  assert actor_cfg.stair_off_threshold == 0.10
+  assert actor_cfg.stair_off_threshold == 0.20
   assert actor_cfg.aux_stair_coef == 0.05
   assert actor_cfg.aux_stair_pos_weight == 3.0
   assert actor_cfg.aux_future_collision_risk_coef == 0.03

@@ -61,6 +61,8 @@ def test_slow_latent_actor_forward_updates_state_and_aux_outputs() -> None:
   model = _make_model()
   obs = _make_obs()
 
+  assert model.stair_confirm_steps == 3.0
+  assert model.stair_off_threshold == 0.20
   actions = model(obs, stochastic_output=False)
   hidden_state = model.get_hidden_state()
   aux = model.get_aux_outputs()
@@ -103,6 +105,7 @@ def test_slow_latent_actor_forward_updates_state_and_aux_outputs() -> None:
   assert diagnostics["gate_write_confirm"].shape == (4, 1)
   assert diagnostics["gate_write_abort"].shape == (4, 1)
   assert diagnostics["gate_memory_exit"].shape == (4, 1)
+  assert diagnostics["gate_release"].shape == (4, 1)
   assert diagnostics["alpha"].shape == (4, 5)
   assert diagnostics["alpha_state"].shape == (4, 1)
   assert diagnostics["alpha_shape"].shape == (4, 1)
@@ -232,6 +235,78 @@ def test_stair_head_alone_controls_memory_exit() -> None:
   assert gate[1, 0].item() == 2.0
 
 
+def test_memory_exit_smoothly_releases_latent_update_rate() -> None:
+  model = _make_model()
+  model.min_stair_steps = 0.0
+  model.exit_steps = 1.0
+  gate = torch.zeros(1, 5)
+  gate[:, 0] = 2.0
+
+  gate, exit_alpha = model._advance_gate_state(
+    event_prob=torch.zeros(1, 1),
+    stair_prob=torch.zeros(1, 1),
+    gate_state=gate,
+  )
+
+  assert gate[0, 0].item() == 0.0
+  assert gate[0, 3].item() == -1.0
+  assert gate[0, 4].item() == pytest.approx(model.cooldown_steps)
+  torch.testing.assert_close(exit_alpha[:, :2], torch.zeros(1, 2))
+  torch.testing.assert_close(exit_alpha[:, 2:], torch.full((1, 3), 0.05))
+
+  gate, first_release_alpha = model._advance_gate_state(
+    event_prob=torch.zeros(1, 1),
+    stair_prob=torch.zeros(1, 1),
+    gate_state=gate,
+  )
+  expected_state_alpha = model.alpha_fast / model.cooldown_steps
+  expected_shape_alpha = (
+    model.alpha_hold_shape
+    + (model.alpha_fast - model.alpha_hold_shape) / model.cooldown_steps
+  )
+  torch.testing.assert_close(
+    first_release_alpha[:, :2],
+    torch.full((1, 2), expected_state_alpha),
+  )
+  torch.testing.assert_close(
+    first_release_alpha[:, 2:],
+    torch.full((1, 3), expected_shape_alpha),
+  )
+
+  for _ in range(int(model.cooldown_steps) - 1):
+    gate, alpha = model._advance_gate_state(
+      event_prob=torch.zeros(1, 1),
+      stair_prob=torch.zeros(1, 1),
+      gate_state=gate,
+    )
+
+  assert gate[0, 3].item() == 0.0
+  torch.testing.assert_close(alpha, torch.full((1, 5), model.alpha_fast))
+
+
+def test_write_abort_does_not_enter_memory_release() -> None:
+  model = _make_model()
+  model.write_steps = 1.0
+  model.stair_confirm_steps = 1.0
+  gate = torch.zeros(1, 5)
+
+  gate, write_alpha = model._advance_gate_state(
+    event_prob=torch.ones(1, 1),
+    stair_prob=torch.zeros(1, 1),
+    gate_state=gate,
+  )
+  assert gate[0, 0].item() == 0.0
+  assert gate[0, 3].item() == 0.0
+  torch.testing.assert_close(write_alpha, torch.full((1, 5), model.alpha_write))
+
+  _gate, normal_alpha = model._advance_gate_state(
+    event_prob=torch.zeros(1, 1),
+    stair_prob=torch.zeros(1, 1),
+    gate_state=gate,
+  )
+  torch.testing.assert_close(normal_alpha, torch.full((1, 5), model.alpha_fast))
+
+
 def test_onnx_gate_matches_training_gate_transitions() -> None:
   model = _make_model()
   model.write_steps = 3.0
@@ -245,6 +320,28 @@ def test_onnx_gate_matches_training_gate_transitions() -> None:
   for event, stair in [(0.8, 0.5), (0.0, 0.1), (0.0, 0.5), (0.0, 0.0)]:
     event_prob = torch.tensor([[event]])
     stair_prob = torch.tensor([[stair]])
+    training_gate, training_alpha = model._advance_gate_state(
+      event_prob, stair_prob, training_gate
+    )
+    onnx_gate, onnx_alpha = onnx_model._advance_gate_state(
+      event_prob, stair_prob, onnx_gate
+    )
+    torch.testing.assert_close(onnx_gate, training_gate)
+    torch.testing.assert_close(onnx_alpha, training_alpha)
+
+
+def test_onnx_gate_matches_memory_release_transition() -> None:
+  model = _make_model()
+  model.min_stair_steps = 0.0
+  model.exit_steps = 1.0
+  onnx_model = model.as_onnx()
+  training_gate = torch.zeros(1, 5)
+  training_gate[:, 0] = 2.0
+  onnx_gate = training_gate.clone()
+
+  for _ in range(int(model.cooldown_steps) + 1):
+    event_prob = torch.zeros(1, 1)
+    stair_prob = torch.zeros(1, 1)
     training_gate, training_alpha = model._advance_gate_state(
       event_prob, stair_prob, training_gate
     )

@@ -1216,6 +1216,10 @@ class PPOTeacherKL(PPO):
             "slow_latent_gate_memory_exit_ratio",
             diagnostics.get("gate_memory_exit"),
         )
+        add_mean(
+            "slow_latent_gate_release_ratio",
+            diagnostics.get("gate_release"),
+        )
         if confirm is not None and abort is not None:
             attempts = confirm.float().sum() + abort.float().sum()
             confirm_rate = confirm.float().sum() / attempts.clamp_min(1.0)

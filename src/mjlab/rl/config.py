@@ -90,7 +90,7 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """Hold update rate for continuously refreshed geometry/stride memory."""
   write_steps: int = 6
   """Number of steps to stay in STAIR_WRITE mode."""
-  stair_confirm_steps: int = 2
+  stair_confirm_steps: int = 3
   """Minimum WRITE frames with stair evidence required to enter STAIR_MEMORY."""
   min_stair_steps: int = 30
   """Minimum steps in STAIR_MEMORY before exit is allowed."""
@@ -106,7 +106,7 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """p_event threshold required to re-arm triggering after a gate transition."""
   stair_on_threshold: float = 0.35
   """p_stair threshold counted as confirming evidence during STAIR_WRITE."""
-  stair_off_threshold: float = 0.10
+  stair_off_threshold: float = 0.20
   """p_stair threshold counted as exit evidence during STAIR_MEMORY."""
 
   # ---- Auxiliary loss ----

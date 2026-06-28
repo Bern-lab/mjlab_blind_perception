@@ -94,6 +94,7 @@ def test_slow_latent_diagnostics_are_logged() -> None:
             "gate_write_confirm": torch.tensor([[0.0], [1.0], [0.0], [0.0]]),
             "gate_write_abort": torch.tensor([[0.0], [0.0], [0.0], [0.0]]),
             "gate_memory_exit": torch.tensor([[0.0], [0.0], [0.0], [1.0]]),
+            "gate_release": torch.tensor([[0.0], [0.0], [0.0], [1.0]]),
             "alpha": torch.tensor([[0.3, 0.3], [0.8, 0.8], [0.01, 0.05]]),
             "alpha_state": torch.tensor([[0.3], [0.8], [0.01]]),
             "alpha_shape": torch.tensor([[0.3], [0.8], [0.05]]),
@@ -120,6 +121,7 @@ def test_slow_latent_diagnostics_are_logged() -> None:
     assert logs["slow_latent_gate_write_abort_ratio"] == pytest.approx(0.0)
     assert logs["slow_latent_gate_write_confirm_rate"] == pytest.approx(1.0)
     assert logs["slow_latent_gate_memory_exit_ratio"] == pytest.approx(0.25)
+    assert logs["slow_latent_gate_release_ratio"] == pytest.approx(0.25)
     assert logs["slow_latent_memory_age_mean"] == pytest.approx(7.0)
     assert logs["slow_latent_memory_age_p90"] == pytest.approx(9.4)
     assert logs["slow_latent_alpha_min"] == pytest.approx(0.01)

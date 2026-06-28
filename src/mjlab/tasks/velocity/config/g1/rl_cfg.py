@@ -64,7 +64,7 @@ class G1SlowLatentPolicyModelParams:
   """Hold update rate for geometry and safe-stride channels."""
   write_steps: int = 6
   """Number of steps spent in write mode after an event trigger."""
-  stair_confirm_steps: int = 2
+  stair_confirm_steps: int = 3
   """Minimum WRITE frames with stair evidence required to enter memory."""
   min_stair_steps: int = 30
   """Minimum memory-hold steps before exit is allowed."""
@@ -78,7 +78,7 @@ class G1SlowLatentPolicyModelParams:
   """Event probability threshold that re-arms triggering."""
   stair_on_threshold: float = 0.35
   """Stair-state threshold counted as confirming evidence during write."""
-  stair_off_threshold: float = 0.10
+  stair_off_threshold: float = 0.20
   """Stair-state threshold counted as exit evidence during memory."""
   aux_event_coef: float = 0.03
   """BCE loss weight for current toe-riser event prediction."""
@@ -181,14 +181,14 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
   alpha_hold_state: float = 0.0,
   alpha_hold_shape: float = 0.05,
   write_steps: int = 6,
-  stair_confirm_steps: int = 2,
+  stair_confirm_steps: int = 3,
   min_stair_steps: int = 30,
   exit_steps: int = 40,
   cooldown_steps: int = 15,
   event_on_threshold: float = 0.60,
   event_off_threshold: float = 0.20,
   stair_on_threshold: float = 0.35,
-  stair_off_threshold: float = 0.10,
+  stair_off_threshold: float = 0.20,
   aux_event_coef: float = 0.03,
   aux_event_pos_weight: float = 50.0,
   event_label_window_steps: int = 4,
@@ -404,14 +404,14 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
   alpha_hold_state: float = 0.0,
   alpha_hold_shape: float = 0.05,
   write_steps: int = 6,
-  stair_confirm_steps: int = 2,
+  stair_confirm_steps: int = 3,
   min_stair_steps: int = 30,
   exit_steps: int = 40,
   cooldown_steps: int = 15,
   event_on_threshold: float = 0.60,
   event_off_threshold: float = 0.20,
   stair_on_threshold: float = 0.35,
-  stair_off_threshold: float = 0.10,
+  stair_off_threshold: float = 0.20,
   aux_event_coef: float = 0.03,
   aux_event_pos_weight: float = 50.0,
   event_label_window_steps: int = 4,

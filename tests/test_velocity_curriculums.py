@@ -435,6 +435,19 @@ def test_strict_stair_entry_event_only_requires_normal_phase_and_layer1_hit() ->
   torch.testing.assert_close(entry, torch.tensor([True, False, False, False]))
 
 
+def test_repeat_layer1_hit_requires_active_phase_and_matching_sequence() -> None:
+  repeat_hit = temporal_stair_rewards._repeat_sequence_layer1_hit(
+    stair_phase=torch.tensor([0, 1, 2]),
+    boundary_contact=torch.ones(3, 2, 1, dtype=torch.bool),
+    contact_layers=torch.ones(3, 2, 1, dtype=torch.long),
+    new_hit_by_foot=torch.tensor([[True, False], [True, False], [False, True]]),
+    contact_sequence_ids=torch.tensor([[[4], [4]], [[5], [5]], [[6], [7]]]),
+    sequence_id=torch.tensor([4, 5, 6]),
+  )
+
+  torch.testing.assert_close(repeat_hit, torch.tensor([False, True, False]))
+
+
 def test_slow_latent_labels_follow_env_stair_state_machine(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:

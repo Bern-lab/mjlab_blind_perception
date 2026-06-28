@@ -63,6 +63,25 @@ def _strict_stair_entry_event(
   return (stair_phase == 0) & layer1_new_hit
 
 
+def _repeat_sequence_layer1_hit(
+  stair_phase: torch.Tensor,
+  boundary_contact: torch.Tensor,
+  contact_layers: torch.Tensor,
+  new_hit_by_foot: torch.Tensor,
+  contact_sequence_ids: torch.Tensor,
+  sequence_id: torch.Tensor,
+) -> torch.Tensor:
+  """Detect post-entry layer-1 hits on the active stair sequence."""
+  repeat_contact = (
+    (stair_phase[:, None, None] >= 1)
+    & boundary_contact
+    & (contact_layers == 1)
+    & new_hit_by_foot[:, :, None]
+    & (contact_sequence_ids == sequence_id[:, None, None])
+  )
+  return torch.any(repeat_contact, dim=(1, 2))
+
+
 class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
   """Penalty-only riser slab term plus safe stair-entry state tracking.
 
@@ -115,6 +134,11 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       (env.num_envs,), -1, device=env.device, dtype=torch.long
     )
     self._context_steps = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
+    self._repeat_layer1_hit_count = torch.zeros(
+      env.num_envs, device=env.device, dtype=torch.long
+    )
+    self._layer1_entry_candidate_total = torch.zeros((), device=env.device)
+    self._entry_event_total = torch.zeros((), device=env.device)
     self._safe_stride_valid = torch.zeros(
       env.num_envs, device=env.device, dtype=torch.bool
     )
@@ -171,6 +195,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     self._first_boundary_idx[env_ids] = -1
     self._sequence_id[env_ids] = -1
     self._context_steps[env_ids] = 0
+    self._repeat_layer1_hit_count[env_ids] = 0
     self._safe_stride_valid[env_ids] = False
     self._safe_tread_lower_bound[env_ids] = 0.0
     self._safe_landing_center_s[env_ids] = 0.0
@@ -630,6 +655,14 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       boundary_contact = contact["boundary_contact"].bool()
       contact_layers = contact["contact_layers"].long()
       contact_boundary_idx = contact["contact_boundary_idx"].long()
+      expanded_sequence_ids = boundary_sequence_ids[:, None, None, :].expand(
+        *contact_boundary_idx.shape, boundary_sequence_ids.shape[-1]
+      )
+      contact_sequence_ids = torch.gather(
+        expanded_sequence_ids,
+        dim=-1,
+        index=contact_boundary_idx[..., None],
+      ).squeeze(-1)
       hit_strength = contact["hit_strength"]
       foot_pos_w = contact["foot_pos_w"]
       env_ids = torch.arange(num_envs, device=env.device)
@@ -661,6 +694,15 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         self._stair_phase, layer1_new_hit
       )
       entry_mask = layer1_entry_candidate
+      repeat_layer1_hit = _repeat_sequence_layer1_hit(
+        self._stair_phase,
+        boundary_contact,
+        contact_layers,
+        new_hit_by_foot,
+        contact_sequence_ids,
+        self._sequence_id,
+      )
+      self._repeat_layer1_hit_count += repeat_layer1_hit.long()
       self._entry_event.copy_(entry_mask)
       evidence_time = max(float(stair_entry_evidence_time), 0.0)
       self._entry_evidence_timer = torch.where(
@@ -684,16 +726,26 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       log["Metrics/toe_riser_new_hit_ratio"] = toe_riser_new_hit.float().mean()
       log["Metrics/toe_riser_contact_ratio"] = toe_riser_contact.float().mean()
       log["Metrics/stair_entry_layer1_new_hit_ratio"] = layer1_new_hit.float().mean()
-      layer1_candidate_count = layer1_entry_candidate.float().sum().clamp_min(1.0)
+      layer1_candidate_count = layer1_entry_candidate.float().sum()
+      self._layer1_entry_candidate_total += layer1_candidate_count
+      self._entry_event_total += entry_mask.float().sum()
       log["Metrics/stair_layer1_hit_to_event_rate"] = (
-        entry_mask.float().sum() / layer1_candidate_count
+        self._entry_event_total / self._layer1_entry_candidate_total.clamp_min(1.0)
       )
+      log["Metrics/stair_layer1_entry_candidate_ratio"] = (
+        layer1_entry_candidate.float().mean()
+      )
+      log["Metrics/stair_repeat_layer1_new_hit_ratio"] = (
+        repeat_layer1_hit.float().mean()
+      )
+      log["Metrics/stair_repeat_layer1_new_hit_count"] = repeat_layer1_hit.float().sum()
+      candidate_count_for_metrics = layer1_candidate_count.clamp_min(1.0)
       log["Metrics/stair_entry_heading_valid_ratio"] = (
         layer1_entry_candidate & (entry_heading >= stair_heading_cos)
-      ).float().sum() / layer1_candidate_count
+      ).float().sum() / candidate_count_for_metrics
       log["Metrics/stair_entry_command_active_ratio"] = (
         layer1_entry_candidate & command_active
-      ).float().sum() / layer1_candidate_count
+      ).float().sum() / candidate_count_for_metrics
       log["Metrics/stair_entry_recent_evidence_ratio"] = (
         self._recent_entry_evidence.float().mean()
       )
@@ -1048,6 +1100,9 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       log["Metrics/stair_completed_sequence_count"] = confirmed_exit.float().sum()
       log["Metrics/stair_completed_duration_mean"] = (
         self._context_steps.float() * confirmed_exit.float()
+      ).sum() / confirmed_exit_count
+      log["Metrics/stair_completed_repeat_layer1_hits_mean"] = (
+        self._repeat_layer1_hit_count.float() * confirmed_exit.float()
       ).sum() / confirmed_exit_count
       log["Metrics/stair_exit_flat_steps_mean"] = (
         torch.where(
