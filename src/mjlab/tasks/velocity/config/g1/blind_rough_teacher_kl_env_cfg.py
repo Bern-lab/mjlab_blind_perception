@@ -18,10 +18,6 @@ from mjlab.tasks.velocity.mdp.teacher_target_heading_rewards import (
 )
 from mjlab.terrains import FlatPatchSamplingCfg, TerrainGeneratorCfg
 from mjlab.terrains.config import BLIND_HIGH_STAIRS_TERRAINS_CFG
-from mjlab.terrains.primitive_terrains import (
-  BoxInvertedPyramidStairsTerrainCfg,
-  BoxPyramidStairsTerrainCfg,
-)
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
 from .blind_rough_toe_contact_cfg import (
@@ -263,16 +259,6 @@ def _configure_teacherkl_target_navigation(
       ),
     },
   )
-
-  # Randomize step width per terrain tile within [0.25, 0.35].
-  terrain_gen = cfg.scene.terrain.terrain_generator
-  for name in ("high_stairs", "high_stairs_inv"):
-    sub = terrain_gen.sub_terrains.get(name)
-    if isinstance(
-      sub,
-      BoxPyramidStairsTerrainCfg | BoxInvertedPyramidStairsTerrainCfg,
-    ):
-      sub.step_width_range = (0.25, 0.35)
 
 
 def _reset_teacher_term_temporal_state(term: ObservationTermCfg) -> None:

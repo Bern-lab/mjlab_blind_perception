@@ -16,6 +16,13 @@ from mjlab.utils.lab_api.string import (
   resolve_matching_names_values,
 )
 
+from .stair_geometry import (
+  STAIR_CLEARANCE_ASCENT_DIR_KEY,
+  STAIR_CLEARANCE_FOOT_LAYERS_KEY,
+  STAIR_CLEARANCE_FOOT_LAYERS_VALID_KEY,
+  STAIR_CLEARANCE_SEQUENCE_ID_KEY,
+)
+
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
   from mjlab.tasks.velocity.mdp.target_heading_command import (
@@ -29,6 +36,11 @@ _DEFAULT_FOOT_BODY_CFG = SceneEntityCfg(
   "robot", body_names=("left_ankle_roll_link", "right_ankle_roll_link")
 )
 _DEFAULT_FOOT_SITE_CFG = SceneEntityCfg("robot", site_names=("left_foot", "right_foot"))
+_DEFAULT_SHANK_BODY_CFG = SceneEntityCfg(
+  "robot",
+  body_names=("left_knee_link", "right_knee_link"),
+  preserve_order=True,
+)
 
 
 def _make_foot_volume_points(
@@ -419,6 +431,299 @@ class _StepBoundaryFootVolume:
       ).squeeze(-1)
       point_layers = torch.where(active, point_layers, torch.zeros_like(point_layers))
     return point_penalty, active, impact_speed_per_point, point_layers
+
+
+def _segment_to_segment_distance(
+  first_start: torch.Tensor,
+  first_end: torch.Tensor,
+  second_start: torch.Tensor,
+  second_end: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+  """Return closest 3D segment distance and clamped parameters."""
+  first_direction = first_end - first_start
+  second_direction = second_end - second_start
+  relative_start = first_start - second_start
+  first_length_sq = torch.sum(first_direction * first_direction, dim=-1)
+  second_length_sq = torch.sum(second_direction * second_direction, dim=-1)
+  cross_direction = torch.sum(first_direction * second_direction, dim=-1)
+  first_projection = torch.sum(first_direction * relative_start, dim=-1)
+  second_projection = torch.sum(second_direction * relative_start, dim=-1)
+  eps = 1.0e-12
+
+  denominator = first_length_sq * second_length_sq - cross_direction.square()
+  first_parameter = torch.where(
+    denominator > eps,
+    torch.clamp(
+      (cross_direction * second_projection - first_projection * second_length_sq)
+      / denominator.clamp_min(eps),
+      0.0,
+      1.0,
+    ),
+    torch.zeros_like(denominator),
+  )
+  second_parameter = (
+    cross_direction * first_parameter + second_projection
+  ) / second_length_sq.clamp_min(eps)
+
+  below_second = second_parameter < 0.0
+  above_second = second_parameter > 1.0
+  first_at_second_start = torch.clamp(
+    -first_projection / first_length_sq.clamp_min(eps),
+    0.0,
+    1.0,
+  )
+  first_at_second_end = torch.clamp(
+    (cross_direction - first_projection) / first_length_sq.clamp_min(eps),
+    0.0,
+    1.0,
+  )
+  first_parameter = torch.where(
+    below_second,
+    first_at_second_start,
+    torch.where(above_second, first_at_second_end, first_parameter),
+  )
+  second_parameter = torch.where(
+    below_second,
+    torch.zeros_like(second_parameter),
+    torch.where(
+      above_second,
+      torch.ones_like(second_parameter),
+      second_parameter,
+    ),
+  )
+
+  first_is_point = first_length_sq <= eps
+  second_is_point = second_length_sq <= eps
+  first_parameter = torch.where(
+    first_is_point,
+    torch.zeros_like(first_parameter),
+    first_parameter,
+  )
+  second_parameter = torch.where(
+    first_is_point & ~second_is_point,
+    torch.clamp(
+      second_projection / second_length_sq.clamp_min(eps),
+      0.0,
+      1.0,
+    ),
+    second_parameter,
+  )
+  first_parameter = torch.where(
+    second_is_point & ~first_is_point,
+    torch.clamp(
+      -first_projection / first_length_sq.clamp_min(eps),
+      0.0,
+      1.0,
+    ),
+    first_parameter,
+  )
+  second_parameter = torch.where(
+    second_is_point,
+    torch.zeros_like(second_parameter),
+    second_parameter,
+  )
+
+  closest_first = first_start + first_parameter[..., None] * first_direction
+  closest_second = second_start + second_parameter[..., None] * second_direction
+  distance = torch.norm(closest_first - closest_second, dim=-1)
+  return distance, first_parameter, second_parameter
+
+
+def _semantic_shank_edge_candidates(
+  boundaries: torch.Tensor,
+  valid_boundaries: torch.Tensor,
+  boundary_sequence_ids: torch.Tensor,
+  boundary_layers: torch.Tensor,
+  foot_layers: torch.Tensor,
+  foot_layers_valid: torch.Tensor,
+  sequence_id: torch.Tensor,
+  ascent_dir: torch.Tensor,
+  shank_start_w: torch.Tensor,
+  shank_end_w: torch.Tensor,
+  min_riser_height: float,
+  direction_cos_threshold: float,
+  lateral_margin: float,
+) -> torch.Tensor:
+  """Select each leg's next sequence-local edge without nearest-edge fallback."""
+  edge_layers = foot_layers + 1
+  riser_height = boundaries[..., 10] - boundaries[..., 9]
+  boundary_ascent = -boundaries[..., 6:8]
+  boundary_ascent = boundary_ascent / torch.norm(
+    boundary_ascent,
+    dim=-1,
+    keepdim=True,
+  ).clamp_min(1.0e-6)
+  direction_cos = torch.sum(
+    boundary_ascent[:, None, :, :] * ascent_dir[:, None, None, :],
+    dim=-1,
+  )
+  edge_vector_xy = boundaries[..., 3:5] - boundaries[..., 0:2]
+  edge_length = torch.norm(edge_vector_xy, dim=-1)
+  edge_tangent = edge_vector_xy / edge_length[..., None].clamp_min(1.0e-6)
+  shank_lateral_start = torch.sum(
+    (shank_start_w[:, :, None, :2] - boundaries[:, None, :, 0:2])
+    * edge_tangent[:, None, :, :],
+    dim=-1,
+  )
+  shank_lateral_end = torch.sum(
+    (shank_end_w[:, :, None, :2] - boundaries[:, None, :, 0:2])
+    * edge_tangent[:, None, :, :],
+    dim=-1,
+  )
+  shank_lateral_min = torch.minimum(shank_lateral_start, shank_lateral_end)
+  shank_lateral_max = torch.maximum(shank_lateral_start, shank_lateral_end)
+  lateral_gate = (shank_lateral_max >= -lateral_margin) & (
+    shank_lateral_min <= edge_length[:, None, :] + lateral_margin
+  )
+  return (
+    valid_boundaries[:, None, :]
+    & foot_layers_valid[:, :, None].bool()
+    & (boundary_sequence_ids[:, None, :] == sequence_id[:, None, None])
+    & (boundary_layers[:, None, :] == edge_layers[:, :, None])
+    & (riser_height[:, None, :] > min_riser_height)
+    & (direction_cos >= direction_cos_threshold)
+    & lateral_gate
+  )
+
+
+class shank_front_edge_clearance_penalty:
+  """Penalize each shank front segment near its next semantic stair edge."""
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv) -> None:
+    self._front_start_local = torch.tensor(
+      cfg.params.get("front_start_local", (0.055, 0.0, -0.06)),
+      device=env.device,
+      dtype=torch.float32,
+    )
+    self._front_end_local = torch.tensor(
+      cfg.params.get("front_end_local", (0.040, 0.0, -0.24)),
+      device=env.device,
+      dtype=torch.float32,
+    )
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    clearance_margin: float = 0.05,
+    min_riser_height: float = 0.04,
+    direction_cos_threshold: float = 0.85,
+    lateral_margin: float = 0.05,
+    asset_cfg: SceneEntityCfg = _DEFAULT_SHANK_BODY_CFG,
+    **_unused: object,
+  ) -> torch.Tensor:
+    if clearance_margin <= 0.0:
+      raise ValueError("clearance_margin must be positive.")
+
+    boundaries, valid_boundaries = _current_step_boundaries(env)
+    boundary_sequence_ids, boundary_layers = _current_step_boundary_metadata(env)
+    foot_layers = env.extras.get(STAIR_CLEARANCE_FOOT_LAYERS_KEY)
+    foot_layers_valid = env.extras.get(STAIR_CLEARANCE_FOOT_LAYERS_VALID_KEY)
+    sequence_id = env.extras.get(STAIR_CLEARANCE_SEQUENCE_ID_KEY)
+    ascent_dir = env.extras.get(STAIR_CLEARANCE_ASCENT_DIR_KEY)
+    if (
+      boundaries is None
+      or valid_boundaries is None
+      or boundary_sequence_ids is None
+      or boundary_layers is None
+      or not isinstance(foot_layers, torch.Tensor)
+      or not isinstance(foot_layers_valid, torch.Tensor)
+      or not isinstance(sequence_id, torch.Tensor)
+      or not isinstance(ascent_dir, torch.Tensor)
+    ):
+      return torch.zeros(env.num_envs, device=env.device)
+
+    asset: Entity = env.scene[asset_cfg.name]
+    shank_pos_w = asset.data.body_link_pos_w[:, asset_cfg.body_ids, :]
+    shank_quat_w = asset.data.body_link_quat_w[:, asset_cfg.body_ids, :]
+    if shank_pos_w.shape[1] != 2:
+      raise RuntimeError(
+        "shank_front_edge_clearance_penalty requires exactly two shank bodies."
+      )
+
+    local_start = self._front_start_local.view(1, 1, 3).expand(env.num_envs, 2, 3)
+    local_end = self._front_end_local.view(1, 1, 3).expand(env.num_envs, 2, 3)
+    shank_start_w = shank_pos_w + quat_apply(shank_quat_w, local_start)
+    shank_end_w = shank_pos_w + quat_apply(shank_quat_w, local_end)
+
+    candidate = _semantic_shank_edge_candidates(
+      boundaries,
+      valid_boundaries,
+      boundary_sequence_ids,
+      boundary_layers,
+      foot_layers,
+      foot_layers_valid,
+      sequence_id,
+      ascent_dir,
+      shank_start_w,
+      shank_end_w,
+      min_riser_height,
+      direction_cos_threshold,
+      lateral_margin,
+    )
+    candidate_count = candidate.sum(dim=-1)
+    unique_edge = candidate_count == 1
+    edge_idx = torch.argmax(candidate.long(), dim=-1)
+    expanded_boundaries = boundaries[:, None, :, :].expand(env.num_envs, 2, -1, -1)
+    selected_edge = torch.gather(
+      expanded_boundaries,
+      dim=2,
+      index=edge_idx[..., None, None].expand(env.num_envs, 2, 1, 11),
+    ).squeeze(2)
+    edge_start_w = selected_edge[..., 0:3]
+    edge_end_w = selected_edge[..., 3:6]
+
+    distance, closest_shank_t, closest_edge_u = _segment_to_segment_distance(
+      shank_start_w,
+      shank_end_w,
+      edge_start_w,
+      edge_end_w,
+    )
+    violation = torch.relu((clearance_margin - distance) / clearance_margin)
+    violation = violation * unique_edge.float()
+    per_leg_penalty = violation.square()
+    penalty = per_leg_penalty.mean(dim=-1)
+
+    log = env.extras["log"]
+    valid_count = unique_edge.float().sum().clamp_min(1.0)
+    active_env = torch.any(unique_edge, dim=-1)
+    active_env_count = active_env.float().sum().clamp_min(1.0)
+    env_min_distance = torch.min(
+      torch.where(
+        unique_edge,
+        distance,
+        torch.full_like(distance, torch.inf),
+      ),
+      dim=-1,
+    ).values
+    log["Metrics/shank_front_edge_clearance_penalty_mean"] = penalty.mean()
+    log["Metrics/shank_front_edge_min_distance_mean"] = (
+      torch.where(
+        active_env, env_min_distance, torch.zeros_like(env_min_distance)
+      ).sum()
+      / active_env_count
+    )
+    log["Metrics/shank_front_edge_violation_ratio"] = (
+      (distance < clearance_margin) & unique_edge
+    ).float().sum() / valid_count
+    for leg_index, leg_name in enumerate(("left", "right")):
+      leg_valid = unique_edge[:, leg_index]
+      leg_count = leg_valid.float().sum().clamp_min(1.0)
+      log[f"Metrics/{leg_name}_shank_front_edge_violation_ratio"] = (
+        (distance[:, leg_index] < clearance_margin) & leg_valid
+      ).float().sum() / leg_count
+    log["Metrics/shank_front_edge_missing_ratio"] = (
+      foot_layers_valid.bool() & (candidate_count == 0)
+    ).float().sum() / foot_layers_valid.float().sum().clamp_min(1.0)
+    log["Metrics/shank_front_edge_ambiguous_ratio"] = (
+      candidate_count > 1
+    ).float().sum() / foot_layers_valid.float().sum().clamp_min(1.0)
+    log["Metrics/shank_front_edge_closest_t_mean"] = (
+      closest_shank_t * unique_edge.float()
+    ).sum() / valid_count
+    log["Metrics/shank_front_edge_closest_u_mean"] = (
+      closest_edge_u * unique_edge.float()
+    ).sum() / valid_count
+    return penalty
 
 
 class foot_step_lip_volume_penalty(_StepBoundaryFootVolume):

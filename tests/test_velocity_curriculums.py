@@ -7,20 +7,30 @@ import pytest
 import torch
 
 import mjlab.tasks.velocity.mdp.observations as velocity_observations
+import mjlab.tasks.velocity.mdp.rewards as velocity_rewards
 import mjlab.tasks.velocity.mdp.temporal_stair_rewards as temporal_stair_rewards
 from mjlab.envs.mdp.events import randomize_terrain
-from mjlab.tasks.velocity.mdp.curriculums import terrain_levels_vel
+from mjlab.tasks.velocity.mdp.curriculums import (
+  _terrain_family_name,
+  terrain_levels_vel,
+)
 from mjlab.tasks.velocity.mdp.stair_geometry import (
   COLLISION_RISK_KEY,
   LANDING_QUALITY_KEY,
   LANDING_TOUCHDOWN_KEY,
-  SAFE_STRIDE_VALID_KEY,
-  SAFE_TREAD_LOWER_BOUND_KEY,
+  MINIMUM_SAFE_STRIDE_EXACT_KEY,
+  MINIMUM_SAFE_STRIDE_KEY,
+  MINIMUM_SAFE_STRIDE_VALID_KEY,
+  MINIMUM_SAFE_STRIDE_WEIGHT_KEY,
   STAIR_ENTRY_EVENT_KEY,
   STAIR_ENTRY_EVIDENCE_ASCENT_DIR_KEY,
   STAIR_ENTRY_RECENT_EVIDENCE_KEY,
   STAIR_PHASE_KEY,
+  STAIR_RISER_HEIGHT_LABEL_KEY,
+  STAIR_SHAPE_LABEL_VALID_KEY,
+  STAIR_TREAD_DEPTH_LABEL_KEY,
   TOE_RISER_NEW_HIT_KEY,
+  stair_shape_for_sequence,
   stair_shape_from_boundaries,
 )
 from mjlab.tasks.velocity.mdp.temporal_stair_rewards import (
@@ -153,6 +163,13 @@ def test_terrain_levels_vel_keeps_distance_rule_without_target_state() -> None:
   assert "target_reached" not in result
 
 
+def test_fixed_width_terrain_variants_share_family_name() -> None:
+  assert _terrain_family_name("high_stairs_w00") == "high_stairs"
+  assert _terrain_family_name("high_stairs_w07") == "high_stairs"
+  assert _terrain_family_name("high_stairs_inv_w03") == "high_stairs_inv"
+  assert _terrain_family_name("gentle_slope") == "gentle_slope"
+
+
 def test_terrain_levels_vel_mixed_replay_sticks_after_high_level() -> None:
   command_term = SimpleNamespace(command=torch.zeros(2, 3))
   env, terrain = _make_env(
@@ -253,6 +270,96 @@ def test_stair_entry_heading_cos_uses_world_base_forward() -> None:
   )
 
   assert heading_cos.tolist() == pytest.approx([1.0, 1.0], abs=1.0e-5)
+
+
+def test_segment_distance_finds_interior_shank_edge_clearance() -> None:
+  shank_start = torch.tensor([[0.0, 0.0, 0.0]])
+  shank_end = torch.tensor([[0.0, 0.0, 1.0]])
+  edge_start = torch.tensor([[-1.0, 0.03, 0.5]])
+  edge_end = torch.tensor([[1.0, 0.03, 0.5]])
+
+  distance, shank_t, edge_u = velocity_rewards._segment_to_segment_distance(
+    shank_start,
+    shank_end,
+    edge_start,
+    edge_end,
+  )
+
+  assert distance.tolist() == pytest.approx([0.03])
+  assert shank_t.tolist() == pytest.approx([0.5])
+  assert edge_u.tolist() == pytest.approx([0.5])
+
+
+def test_segment_distance_clamps_to_edge_endpoint() -> None:
+  shank_start = torch.tensor([[0.0, 0.0, 0.0]])
+  shank_end = torch.tensor([[0.0, 0.0, 1.0]])
+  edge_start = torch.tensor([[1.0, 0.0, 0.5]])
+  edge_end = torch.tensor([[2.0, 0.0, 0.5]])
+
+  distance, shank_t, edge_u = velocity_rewards._segment_to_segment_distance(
+    shank_start,
+    shank_end,
+    edge_start,
+    edge_end,
+  )
+
+  assert distance.tolist() == pytest.approx([1.0])
+  assert shank_t.tolist() == pytest.approx([0.5])
+  assert edge_u.tolist() == pytest.approx([0.0])
+
+
+def test_semantic_shank_edge_filter_selects_per_leg_direction_and_layer() -> None:
+  boundaries = torch.zeros(1, 5, 11)
+  boundaries[0, :, 0:3] = torch.tensor(
+    [
+      [0.20, -1.0, 0.20],
+      [0.20, -1.0, 0.20],
+      [0.20, -1.0, 0.20],
+      [0.20, 2.0, 0.20],
+      [0.45, -1.0, 0.40],
+    ]
+  )
+  boundaries[0, :, 3:6] = torch.tensor(
+    [
+      [0.20, 1.0, 0.20],
+      [0.20, 1.0, 0.20],
+      [0.20, 1.0, 0.20],
+      [0.20, 3.0, 0.20],
+      [0.45, 1.0, 0.40],
+    ]
+  )
+  boundaries[0, :, 6:9] = torch.tensor(
+    [
+      [-1.0, 0.0, 0.0],
+      [1.0, 0.0, 0.0],
+      [-1.0, 0.0, 0.0],
+      [-1.0, 0.0, 0.0],
+      [-1.0, 0.0, 0.0],
+    ]
+  )
+  boundaries[0, :, 9] = torch.tensor([0.0, 0.0, 0.0, 0.0, 0.2])
+  boundaries[0, :, 10] = torch.tensor([0.2, 0.2, 0.2, 0.2, 0.4])
+  shank_start = torch.tensor([[[0.0, 0.0, 0.5], [0.0, 0.0, 0.5]]])
+  shank_end = torch.tensor([[[0.0, 0.0, 0.2], [0.0, 0.0, 0.2]]])
+
+  candidate = velocity_rewards._semantic_shank_edge_candidates(
+    boundaries=boundaries,
+    valid_boundaries=torch.ones(1, 5, dtype=torch.bool),
+    boundary_sequence_ids=torch.tensor([[7, 7, 8, 7, 7]]),
+    boundary_layers=torch.tensor([[1, 1, 1, 1, 2]]),
+    foot_layers=torch.tensor([[0, 1]]),
+    foot_layers_valid=torch.ones(1, 2, dtype=torch.bool),
+    sequence_id=torch.tensor([7]),
+    ascent_dir=torch.tensor([[1.0, 0.0]]),
+    shank_start_w=shank_start,
+    shank_end_w=shank_end,
+    min_riser_height=0.04,
+    direction_cos_threshold=0.85,
+    lateral_margin=0.05,
+  )
+
+  assert candidate[0, 0].nonzero(as_tuple=False).flatten().tolist() == [0]
+  assert candidate[0, 1].nonzero(as_tuple=False).flatten().tolist() == [4]
 
 
 def test_stair_context_requires_two_explicit_flat_touchdowns_to_exit() -> None:
@@ -448,9 +555,137 @@ def test_repeat_layer1_hit_requires_active_phase_and_matching_sequence() -> None
   torch.testing.assert_close(repeat_hit, torch.tensor([False, True, False]))
 
 
-def test_slow_latent_labels_follow_env_stair_state_machine(
-  monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_stair_attempt_always_alternates_but_only_expected_tread_advances() -> None:
+  next_target, reached_layer, expected_layer = (
+    temporal_stair_rewards._advance_stair_attempt(
+      target_foot=torch.tensor([0, 1, 0, 1]),
+      reached_layer=torch.tensor([0, 1, 2, 3]),
+      expected_layer=torch.tensor([1, 2, 3, 4]),
+      expected_tread_contact=torch.tensor([True, False, True, False]),
+    )
+  )
+
+  torch.testing.assert_close(next_target, torch.tensor([1, 0, 1, 0]))
+  torch.testing.assert_close(reached_layer, torch.tensor([1, 1, 3, 3]))
+  torch.testing.assert_close(expected_layer, torch.tensor([2, 2, 4, 4]))
+
+
+def test_clearance_layer_tracking_accepts_partial_tread_overlap() -> None:
+  observed = temporal_stair_rewards._stair_tread_overlap_contact(
+    active=torch.tensor([True, True, True, False]),
+    ground_contact=torch.ones(4, 2, dtype=torch.bool),
+    has_support_candidate=torch.ones(4, 2, dtype=torch.bool),
+    support_fraction=torch.tensor(
+      [[0.10, 0.60], [0.0, 0.20], [0.30, 0.40], [0.50, 0.50]]
+    ),
+    support_layer=torch.tensor([[1, 1], [1, 1], [0, 2], [1, 1]]),
+  )
+
+  torch.testing.assert_close(
+    observed,
+    torch.tensor(
+      [
+        [True, True],
+        [False, True],
+        [False, True],
+        [False, False],
+      ]
+    ),
+  )
+
+
+def test_safe_stride_tracking_masks_only_stale_unreachable_targets() -> None:
+  tracking_valid, stale = temporal_stair_rewards._safe_stride_tracking_masks(
+    geometry_valid=torch.tensor([True, True, True, False]),
+    raw_stride=torch.tensor([0.55, 0.80, 0.81, 4.0]),
+    max_tracking_stride=0.80,
+  )
+
+  torch.testing.assert_close(
+    tracking_valid,
+    torch.tensor([True, True, False, False]),
+  )
+  torch.testing.assert_close(stale, torch.tensor([False, False, True, False]))
+
+
+def test_blocked_swing_event_uses_abrupt_or_persistent_motion_residual() -> None:
+  abrupt, persistent, event = temporal_stair_rewards._blocked_swing_event_evidence(
+    vertical_boundary_contact=torch.ones(5, 1, dtype=torch.bool),
+    previous_forward_speed=torch.tensor([[0.12], [0.01], [0.01], [0.12], [0.01]]),
+    current_forward_speed=torch.tensor([[0.02], [0.01], [0.01], [0.10], [0.01]]),
+    contact_steps=torch.tensor([[1], [3], [3], [1], [2]]),
+    command_forward=torch.tensor([0.0, 0.2, 0.0, 0.2, 0.2]),
+    min_forward_intent_speed=0.04,
+    min_forward_speed_drop=0.04,
+    blocked_forward_speed=0.03,
+    persistent_steps=3,
+    command_threshold=0.05,
+  )
+
+  torch.testing.assert_close(
+    abrupt.squeeze(-1),
+    torch.tensor([True, False, False, False, False]),
+  )
+  torch.testing.assert_close(
+    persistent.squeeze(-1),
+    torch.tensor([False, True, False, False, False]),
+  )
+  torch.testing.assert_close(
+    event.squeeze(-1),
+    torch.tensor([True, True, False, False, False]),
+  )
+
+
+def test_stair_touchdown_progress_uses_support_layer_delta() -> None:
+  delta, normal_step, skipped_layers = temporal_stair_rewards._stair_touchdown_progress(
+    touchdown_layer=torch.tensor([1, 2, 3, 0]),
+    support_layer=torch.tensor([0, 0, 1, 1]),
+  )
+
+  torch.testing.assert_close(delta, torch.tensor([1, 2, 2, -1]))
+  torch.testing.assert_close(
+    normal_step,
+    torch.tensor([True, False, False, False]),
+  )
+  torch.testing.assert_close(skipped_layers, torch.tensor([0, 1, 1, 0]))
+
+
+def test_minimum_safe_stride_uses_requested_layer_and_target_foot_geometry() -> None:
+  boundaries = torch.zeros(2, 2, 11)
+  boundaries[:, :, 6] = -1.0
+  boundaries[:, 1, 0] = 0.30
+  valid_boundaries = torch.tensor([[True, True], [True, False]])
+  sequence_ids = torch.ones(2, 2, dtype=torch.long)
+  layers = torch.tensor([[1, 2], [1, 2]])
+  target_ref_w = torch.zeros(2, 3)
+  sole_points_w = torch.tensor(
+    [
+      [[-0.10, 0.0, 0.0], [0.0, 0.0, 0.0], [0.10, 0.0, 0.0]],
+      [[-0.10, 0.0, 0.0], [0.0, 0.0, 0.0], [0.10, 0.0, 0.0]],
+    ]
+  )
+
+  stride, geometry_valid = temporal_stair_rewards._minimum_safe_stride_to_layer(
+    boundaries,
+    valid_boundaries,
+    sequence_ids,
+    layers,
+    torch.ones(2, dtype=torch.long),
+    torch.full((2,), 2, dtype=torch.long),
+    target_ref_w,
+    sole_points_w,
+    torch.tensor([[1.0, 0.0], [1.0, 0.0]]),
+    torch.full((2,), 0.30),
+    required_support_fraction=2.0 / 3.0,
+    rear_clearance=0.02,
+    front_clearance=0.02,
+  )
+
+  torch.testing.assert_close(stride, torch.tensor([0.32, 0.0]))
+  torch.testing.assert_close(geometry_valid, torch.tensor([True, False]))
+
+
+def test_slow_latent_labels_follow_env_stair_state_machine() -> None:
   env = SimpleNamespace(
     num_envs=2,
     device="cpu",
@@ -458,30 +693,18 @@ def test_slow_latent_labels_follow_env_stair_state_machine(
       STAIR_ENTRY_EVENT_KEY: torch.tensor([True, False]),
       TOE_RISER_NEW_HIT_KEY: torch.tensor([False, True]),
       STAIR_PHASE_KEY: torch.tensor([1, 2]),
-      SAFE_STRIDE_VALID_KEY: torch.tensor([False, True]),
-      SAFE_TREAD_LOWER_BOUND_KEY: torch.tensor([0.0, 0.26]),
+      STAIR_TREAD_DEPTH_LABEL_KEY: torch.tensor([0.30, 0.35]),
+      STAIR_RISER_HEIGHT_LABEL_KEY: torch.tensor([0.18, 0.20]),
+      STAIR_SHAPE_LABEL_VALID_KEY: torch.tensor([True, True]),
+      MINIMUM_SAFE_STRIDE_VALID_KEY: torch.tensor([False, True]),
+      MINIMUM_SAFE_STRIDE_EXACT_KEY: torch.tensor([False, True]),
+      MINIMUM_SAFE_STRIDE_WEIGHT_KEY: torch.tensor([0.0, 3.0]),
+      MINIMUM_SAFE_STRIDE_KEY: torch.tensor([0.0, 0.41]),
       COLLISION_RISK_KEY: torch.tensor([0.75, 0.10]),
       LANDING_TOUCHDOWN_KEY: torch.tensor([True, False]),
       LANDING_QUALITY_KEY: torch.tensor([0.45, 0.0]),
     },
   )
-  boundaries = torch.zeros(2, 1, 11)
-  valid_boundaries = torch.ones(2, 1, dtype=torch.bool)
-  monkeypatch.setattr(
-    velocity_observations,
-    "_current_step_boundaries",
-    lambda _env: (boundaries, valid_boundaries),
-  )
-  monkeypatch.setattr(
-    velocity_observations,
-    "cached_stair_shape",
-    lambda _env, _boundaries, _valid: (
-      torch.tensor([0.30, 0.35]),
-      torch.tensor([0.18, 0.20]),
-      torch.tensor([True, True]),
-    ),
-  )
-
   labels = torch.cat(
     [
       velocity_observations.toe_riser_event_label(cast(Any, env)),
@@ -493,15 +716,36 @@ def test_slow_latent_labels_follow_env_stair_state_machine(
     dim=-1,
   )
 
-  assert labels.shape == (2, 10)
+  assert labels.shape == (2, 12)
   torch.testing.assert_close(
     labels,
     torch.tensor(
       [
-        [1.0, 1.0, 0.30, 0.18, 0.0, 0.0, 0.0, 0.75, 1.0, 0.45],
-        [0.0, 1.0, 0.35, 0.20, 1.0, 0.26, 1.0, 0.10, 0.0, 0.0],
+        [1.0, 1.0, 0.30, 0.18, 1.0, 0.0, 0.0, 0.0, 0.0, 0.75, 1.0, 0.45],
+        [0.0, 1.0, 0.35, 0.20, 1.0, 0.41, 1.0, 1.0, 3.0, 0.10, 0.0, 0.0],
       ]
     ),
+  )
+
+
+def test_safe_stride_label_masks_latched_values_while_flat() -> None:
+  env = SimpleNamespace(
+    num_envs=2,
+    device="cpu",
+    extras={
+      STAIR_PHASE_KEY: torch.tensor([0, 2]),
+      MINIMUM_SAFE_STRIDE_KEY: torch.tensor([0.40, 0.41]),
+      MINIMUM_SAFE_STRIDE_VALID_KEY: torch.tensor([True, True]),
+      MINIMUM_SAFE_STRIDE_EXACT_KEY: torch.tensor([True, True]),
+      MINIMUM_SAFE_STRIDE_WEIGHT_KEY: torch.tensor([3.0, 2.0]),
+    },
+  )
+
+  labels = velocity_observations.safe_stride_label(cast(Any, env))
+
+  torch.testing.assert_close(
+    labels,
+    torch.tensor([[0.40, 0.0, 0.0, 0.0], [0.41, 1.0, 1.0, 2.0]]),
   )
 
 
@@ -535,3 +779,55 @@ def test_stair_shape_uses_parallel_boundary_spacing_and_riser_height() -> None:
   assert tread_depth.tolist() == pytest.approx([0.30])
   assert riser_height.tolist() == pytest.approx([0.10])
   assert shape_valid.tolist() == [True]
+
+
+def test_stair_shape_uses_only_selected_sequence_boundaries() -> None:
+  boundaries = torch.tensor(
+    [
+      [
+        [0.0, 0.0, 0.10, 1.0, 0.0, 0.10, 0.0, -1.0, 0.0, 0.0, 0.10],
+        [0.0, 0.30, 0.20, 1.0, 0.30, 0.20, 0.0, -1.0, 0.0, 0.10, 0.20],
+        [0.0, 0.50, 0.12, 1.0, 0.50, 0.12, 0.0, -1.0, 0.0, 0.0, 0.12],
+        [0.0, 0.75, 0.24, 1.0, 0.75, 0.24, 0.0, -1.0, 0.0, 0.12, 0.24],
+      ]
+    ]
+  )
+  valid = torch.ones(1, 4, dtype=torch.bool)
+  boundary_sequence_ids = torch.tensor([[1, 1, 2, 2]])
+
+  tread_depth, riser_height, shape_valid = stair_shape_for_sequence(
+    boundaries,
+    valid,
+    boundary_sequence_ids,
+    torch.tensor([2]),
+  )
+
+  assert tread_depth.tolist() == pytest.approx([0.25])
+  assert riser_height.tolist() == pytest.approx([0.12])
+  assert shape_valid.tolist() == [True]
+
+
+def test_stair_shape_label_is_masked_outside_active_sequence() -> None:
+  env = SimpleNamespace(
+    num_envs=3,
+    device="cpu",
+    extras={
+      STAIR_PHASE_KEY: torch.tensor([0, 1, 2]),
+      STAIR_TREAD_DEPTH_LABEL_KEY: torch.tensor([0.30, 0.31, 0.32]),
+      STAIR_RISER_HEIGHT_LABEL_KEY: torch.tensor([0.10, 0.11, 0.12]),
+      STAIR_SHAPE_LABEL_VALID_KEY: torch.tensor([True, True, False]),
+    },
+  )
+
+  labels = velocity_observations.stair_shape_label(cast(Any, env))
+
+  torch.testing.assert_close(
+    labels,
+    torch.tensor(
+      [
+        [0.30, 0.10, 0.0],
+        [0.31, 0.11, 1.0],
+        [0.32, 0.12, 0.0],
+      ]
+    ),
+  )

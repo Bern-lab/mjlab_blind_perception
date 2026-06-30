@@ -38,6 +38,7 @@ from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg, stair_aware_feet
 from mjlab.tasks.velocity.mdp.teacher_target_heading_command import (
   TeacherTargetHeadingVelocityCommandCfg,
 )
+from mjlab.terrains.config import BLIND_HIGH_STAIRS_TREAD_DEPTHS
 from mjlab.terrains.primitive_terrains import (
   BoxInvertedPyramidStairsTerrainCfg,
   BoxPyramidStairsTerrainCfg,
@@ -271,20 +272,41 @@ def test_g1_high_stairs_tasks_enable_mixed_terrain_replay() -> None:
     assert params["mixed_replay_weights"] == (0.2, 0.3, 0.5)
 
 
-def test_g1_high_stairs_tasks_randomize_step_depth() -> None:
+def _assert_eight_stair_depth_variants(terrain_generator) -> None:
+  sub_terrains = terrain_generator.sub_terrains
+  upward = [
+    cfg for name, cfg in sub_terrains.items() if name.startswith("high_stairs_w")
+  ]
+  inverted = [
+    cfg for name, cfg in sub_terrains.items() if name.startswith("high_stairs_inv_w")
+  ]
+  stair_variants = {
+    int(name.rsplit("_w", 1)[1]): cfg
+    for name, cfg in sub_terrains.items()
+    if name.startswith(("high_stairs_w", "high_stairs_inv_w"))
+  }
+
+  assert len(upward) == 0
+  assert len(inverted) == 8
+  assert len(stair_variants) == 8
+  assert all(isinstance(cfg, BoxPyramidStairsTerrainCfg) for cfg in upward)
+  assert all(isinstance(cfg, BoxInvertedPyramidStairsTerrainCfg) for cfg in inverted)
+  assert [stair_variants[index].step_width for index in range(8)] == pytest.approx(
+    BLIND_HIGH_STAIRS_TREAD_DEPTHS
+  )
+  assert all(cfg.step_width_range is None for cfg in stair_variants.values())
+  assert sum(cfg.proportion for cfg in upward) == pytest.approx(0.0)
+  assert sum(cfg.proportion for cfg in inverted) == pytest.approx(0.85)
+
+
+def test_g1_high_stairs_tasks_cover_eight_step_depths_per_level() -> None:
   for task_id in MAIN_BRANCH_VELOCITY_TASK_IDS:
     cfg = load_env_cfg(task_id)
     assert cfg.scene.terrain is not None
     terrain_generator = cfg.scene.terrain.terrain_generator
     assert terrain_generator is not None
-    for terrain_name in ("high_stairs", "high_stairs_inv"):
-      sub_terrain = terrain_generator.sub_terrains[terrain_name]
-      assert isinstance(
-        sub_terrain,
-        BoxPyramidStairsTerrainCfg | BoxInvertedPyramidStairsTerrainCfg,
-      )
-      assert sub_terrain.step_width == 0.30
-      assert sub_terrain.step_width_range == (0.25, 0.35)
+    assert terrain_generator.num_cols == len(terrain_generator.sub_terrains) == 11
+    _assert_eight_stair_depth_variants(terrain_generator)
 
 
 def test_g1_high_stairs_play_uses_mixed_level_distribution() -> None:
@@ -306,14 +328,7 @@ def test_g1_high_stairs_play_uses_mixed_level_distribution() -> None:
     assert event_order.index("randomize_terrain") < event_order.index("reset_base")
     assert cfg.scene.terrain.max_init_terrain_level is None
 
-    for terrain_name in ("high_stairs", "high_stairs_inv"):
-      sub_terrain = terrain_generator.sub_terrains[terrain_name]
-      assert isinstance(
-        sub_terrain,
-        BoxPyramidStairsTerrainCfg | BoxInvertedPyramidStairsTerrainCfg,
-      )
-      assert sub_terrain.step_height_range == (0.04, 0.2)
-      assert sub_terrain.step_width_range == (0.25, 0.35)
+    _assert_eight_stair_depth_variants(terrain_generator)
 
 
 def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
@@ -323,6 +338,10 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   env_cfg = load_env_cfg(task_id)
   rl_cfg = cast(RslRlTeacherKLRunnerCfg, load_rl_cfg(task_id))
 
+  assert env_cfg.commands["twist"].ranges.lin_vel_x == (0.4, 1.0)
+  velocity_stages = env_cfg.curriculum["command_vel"].params["velocity_stages"]
+  assert velocity_stages[0]["lin_vel_x"] == (0.4, 0.8)
+  assert velocity_stages[1]["lin_vel_x"] == (0.4, 1.0)
   assert "latent" in env_cfg.observations
   assert "stair_latent" in env_cfg.observations["latent"].terms
   assert "latent_labels" in env_cfg.observations
@@ -346,17 +365,43 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   )
   assert toe_reward_params["contact_sensor_name"] == "toe_terrain_contact"
   assert toe_reward_params["contact_penalty_scale"] == 0.5
+  assert toe_reward_params["event_min_forward_intent_speed"] == 0.04
+  assert toe_reward_params["event_min_forward_speed_drop"] == 0.04
+  assert toe_reward_params["event_blocked_forward_speed"] == 0.03
+  assert toe_reward_params["event_persistent_steps"] == 3
   assert toe_reward_params["stair_heading_cos"] == 0.70
   assert toe_reward_params["stair_touchdown_height_tolerance"] == 0.08
   assert toe_reward_params["stair_touchdown_lateral_margin"] == 0.03
   assert toe_reward_params["stair_safe_support_fraction"] == 0.60
   assert toe_reward_params["stair_min_safe_stride"] == 0.10
+  assert toe_reward_params["stair_max_safe_stride"] == 0.55
+  assert toe_reward_params["stair_max_tracking_stride"] == 0.80
   assert toe_reward_params["stair_touchdown_lip_clearance"] == 0.02
   assert toe_reward_params["stair_touchdown_lip_height_band"] == 0.06
   assert toe_reward_params["stair_entry_evidence_time"] == 0.80
+  assert toe_reward_params["stair_attempt_period"] == 0.60
+  assert toe_reward_params["safe_stride_evidence_window_steps"] == 5
+  assert toe_reward_params["safe_stride_rear_partial_weight"] == 2.0
+  assert toe_reward_params["safe_stride_riser_weight"] == 3.0
   assert toe_reward_params["collision_risk_margin"] == 0.06
   assert not any("probe" in name for name in toe_reward_params)
   assert toe_reward_params["ground_contact_sensor_name"] == "feet_ground_contact"
+  shank_reward = env_cfg.rewards["shank_front_edge_clearance_penalty"]
+  shank_params = shank_reward.params
+  assert shank_reward.weight == -2.0
+  assert shank_params["clearance_margin"] == 0.05
+  assert shank_params["min_riser_height"] == 0.04
+  assert shank_params["direction_cos_threshold"] == 0.85
+  assert shank_params["lateral_margin"] == 0.05
+  assert shank_params["front_start_local"] == (0.055, 0.0, -0.06)
+  assert shank_params["front_end_local"] == (0.040, 0.0, -0.24)
+  assert shank_params["asset_cfg"].body_names == (
+    "left_knee_link",
+    "right_knee_link",
+  )
+  assert shank_params["asset_cfg"].preserve_order is True
+  skip_reward = env_cfg.rewards["stair_skip_layer_penalty"]
+  assert skip_reward.weight == -1.0
   algorithm_cfg = cast(RslRlPpoTeacherKLAlgorithmCfg, rl_cfg.algorithm)
   assert algorithm_cfg.teacher_kl_cfg.log_kl_when_lambda_zero is False
   foot_gait = env_cfg.rewards["foot_gait"]
@@ -408,12 +453,12 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert actor_cfg.aux_future_collision_risk_coef == 0.03
   assert actor_cfg.aux_future_safe_landing_quality_coef == 0.03
   assert actor_cfg.future_horizon == 20
-  assert actor_cfg.aux_stair_shape_coef == 0.03
+  assert actor_cfg.aux_stair_shape_coef == 0.0
   assert actor_cfg.aux_safe_stride_coef == 0.03
   assert actor_cfg.stair_shape_huber_delta == 0.05
   assert actor_cfg.safe_stride_huber_delta == 0.05
-  assert actor_cfg.safe_stride_min == 0.08
-  assert actor_cfg.safe_stride_max == 0.45
+  assert actor_cfg.safe_stride_min == 0.10
+  assert actor_cfg.safe_stride_max == 0.55
 
 
 def test_step_danger_target_navigation_uses_local_geometric_danger_rewards() -> None:
@@ -498,6 +543,7 @@ def test_slow_latent_play_shows_step_danger_zones() -> None:
   assert vis.slab_depth == 0.10
   assert vis.slab_u_margin == 0.02
   assert vis.slab_v_margin == 0.05
+  assert cfg.commands["twist"].ranges.lin_vel_x == (0.6, 0.9)
 
 
 def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
@@ -554,6 +600,7 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
   toe_params = env_cfg.rewards["toe_step_riser_slab_penalty"].params
   assert toe_params["contact_penalty_scale"] == 0.7
   assert toe_params["stair_min_safe_stride"] == 0.14
+  assert toe_params["stair_max_safe_stride"] == 0.55
   assert toe_params["stair_entry_evidence_time"] == 0.9
   replay_params = train_env_cfg.curriculum["terrain_levels"].params
   assert replay_params["mixed_replay_start_level"] == 7

@@ -82,7 +82,7 @@ def test_slow_latent_actor_forward_updates_state_and_aux_outputs() -> None:
   assert aux["stair_shape"].shape == (4, 2)
   assert aux["safe_stride"].shape == (4, 1)
   assert torch.all(
-    (0.25 <= aux["stair_shape"][..., 0]) & (aux["stair_shape"][..., 0] <= 0.35)
+    (0.18 <= aux["stair_shape"][..., 0]) & (aux["stair_shape"][..., 0] <= 0.35)
   )
   assert torch.all(
     (0.088 <= aux["stair_shape"][..., 1]) & (aux["stair_shape"][..., 1] <= 0.25)
@@ -394,6 +394,44 @@ def test_stair_shape_huber_ignores_invalid_labels() -> None:
   assert huber.tolist() == pytest.approx([0.075, 0.0])
 
 
+def test_stair_shape_normalized_huber_uses_each_physical_range() -> None:
+  predictions = torch.tensor([[0.197, 0.1042], [10.0, 10.0]])
+  labels = torch.tensor([[0.18, 0.088], [0.18, 0.088]])
+  valid = torch.tensor([[1.0], [0.0]])
+
+  loss = PPOTeacherKL._compute_normalized_stair_shape_loss(
+    predictions,
+    labels,
+    valid,
+    lower_bounds=torch.tensor([0.18, 0.088]),
+    upper_bounds=torch.tensor([0.35, 0.25]),
+    huber_delta=0.05,
+  )
+
+  assert loss.item() == pytest.approx(0.075)
+
+
+def test_stair_shape_regression_statistics_detect_size_prediction() -> None:
+  labels = torch.tensor(
+    [
+      [0.25, 0.10],
+      [0.30, 0.15],
+      [0.35, 0.20],
+      [0.40, 0.25],
+    ]
+  )
+  valid = torch.tensor([[1.0], [1.0], [1.0], [0.0]])
+
+  label_std, prediction_std, correlation, r_squared = (
+    PPOTeacherKL._compute_masked_regression_statistics(labels, labels, valid)
+  )
+
+  assert torch.all(label_std > 0.0)
+  torch.testing.assert_close(prediction_std, label_std)
+  torch.testing.assert_close(correlation, torch.ones(2))
+  torch.testing.assert_close(r_squared, torch.ones(2))
+
+
 def test_reset_done_env_clears_recurrent_latent_and_gate_state() -> None:
   model = _make_model()
   model(_make_obs())
@@ -501,7 +539,7 @@ def test_onnx_wrapper_exposes_gated_slow_latent_state() -> None:
   assert outputs[8].shape == (1, 1)
   assert outputs[9].shape == (1, 2)
   assert outputs[10].shape == (1, 1)
-  assert torch.all((0.25 <= outputs[9][..., 0]) & (outputs[9][..., 0] <= 0.35))
+  assert torch.all((0.18 <= outputs[9][..., 0]) & (outputs[9][..., 0] <= 0.35))
   assert torch.all((0.088 <= outputs[9][..., 1]) & (outputs[9][..., 1] <= 0.25))
   assert torch.all((0.08 <= outputs[10]) & (outputs[10] <= 0.45))
 
@@ -517,12 +555,12 @@ def test_slow_latent_export_metadata() -> None:
   assert metadata["policy_slow_latent_alpha_hold_state"] == "0.0"
   assert metadata["policy_slow_latent_alpha_hold_shape"] == "0.05"
   assert metadata["policy_latent_obs_dim"] == "11"
-  assert metadata["policy_stair_tread_depth_min"] == "0.25"
+  assert metadata["policy_stair_tread_depth_min"] == "0.18"
   assert metadata["policy_stair_tread_depth_max"] == "0.35"
   assert metadata["policy_stair_riser_height_min"] == "0.088"
   assert metadata["policy_stair_riser_height_max"] == "0.25"
-  assert metadata["policy_stair_safe_stride_min"] == "0.08"
-  assert metadata["policy_stair_safe_stride_max"] == "0.45"
+  assert metadata["policy_stair_safe_stride_min"] == "0.1"
+  assert metadata["policy_stair_safe_stride_max"] == "0.55"
   assert metadata["policy_onnx_input_names"] == [
     "actor_obs",
     "latent_obs",

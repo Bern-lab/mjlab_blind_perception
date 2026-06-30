@@ -124,18 +124,18 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """Weight for stair state BCE loss."""
   aux_stair_pos_weight: float = 3.0
   """Positive-class weight for stair-state BCE loss."""
-  aux_stair_shape_coef: float = 0.03
+  aux_stair_shape_coef: float = 0.0
   """Weight for masked tread-depth/riser-height Huber loss."""
   aux_safe_stride_coef: float = 0.03
-  """Weight for masked safe-tread lower-bound Huber loss."""
+  """Weight for the Event-to-layer2 minimum-safe-stride Huber loss."""
   stair_shape_huber_delta: float = 0.05
-  """Huber transition point for stair geometry labels, in meters."""
+  """Huber transition point for stair geometry labels normalized to [0, 1]."""
   safe_stride_huber_delta: float = 0.05
   """Huber transition point for safe-stride labels, in meters."""
-  safe_stride_min: float = 0.08
-  """Minimum decoded safe-stride lower bound, in meters."""
-  safe_stride_max: float = 0.45
-  """Maximum decoded safe-stride lower bound, in meters."""
+  safe_stride_min: float = 0.10
+  """Minimum decoded safe stride, in meters."""
+  safe_stride_max: float = 0.55
+  """Maximum decoded safe stride, in meters."""
   future_risk_weight_scale: float = 2.0
   """Extra Huber weight applied in proportion to the risk label."""
   future_quality_weight_scale: float = 2.0

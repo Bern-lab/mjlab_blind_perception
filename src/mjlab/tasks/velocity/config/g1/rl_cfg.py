@@ -94,17 +94,17 @@ class G1SlowLatentPolicyModelParams:
   """Huber loss weight for continuous future collision risk."""
   aux_future_safe_landing_quality_coef: float = 0.03
   """Huber loss weight for continuous next-touchdown quality."""
-  aux_stair_shape_coef: float = 0.03
+  aux_stair_shape_coef: float = 0.0
   """Huber loss weight for privileged stair geometry prediction."""
   aux_safe_stride_coef: float = 0.03
-  """Huber loss weight for the safe-tread lower-bound prediction."""
+  """Huber loss weight for the Event-to-layer2 minimum safe stride."""
   stair_shape_huber_delta: float = 0.05
-  """Huber transition point for shape prediction, in meters."""
+  """Huber transition point for shape prediction normalized to [0, 1]."""
   safe_stride_huber_delta: float = 0.05
   """Huber transition point for safe-stride prediction, in meters."""
-  safe_stride_min: float = 0.08
+  safe_stride_min: float = 0.10
   """Minimum decoded safe-stride estimate, in meters."""
-  safe_stride_max: float = 0.45
+  safe_stride_max: float = 0.55
   """Maximum decoded safe-stride estimate, in meters."""
   future_risk_weight_scale: float = 2.0
   """Extra Huber weight proportional to normalized future risk."""
@@ -196,12 +196,12 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
   aux_stair_pos_weight: float = 3.0,
   aux_future_collision_risk_coef: float = 0.03,
   aux_future_safe_landing_quality_coef: float = 0.03,
-  aux_stair_shape_coef: float = 0.03,
+  aux_stair_shape_coef: float = 0.0,
   aux_safe_stride_coef: float = 0.03,
   stair_shape_huber_delta: float = 0.05,
   safe_stride_huber_delta: float = 0.05,
-  safe_stride_min: float = 0.08,
-  safe_stride_max: float = 0.45,
+  safe_stride_min: float = 0.10,
+  safe_stride_max: float = 0.55,
   future_risk_weight_scale: float = 2.0,
   future_quality_weight_scale: float = 2.0,
   future_risk_huber_delta: float = 0.1,
@@ -419,12 +419,12 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
   aux_stair_pos_weight: float = 3.0,
   aux_future_collision_risk_coef: float = 0.03,
   aux_future_safe_landing_quality_coef: float = 0.03,
-  aux_stair_shape_coef: float = 0.03,
+  aux_stair_shape_coef: float = 0.0,
   aux_safe_stride_coef: float = 0.03,
   stair_shape_huber_delta: float = 0.05,
   safe_stride_huber_delta: float = 0.05,
-  safe_stride_min: float = 0.08,
-  safe_stride_max: float = 0.45,
+  safe_stride_min: float = 0.10,
+  safe_stride_max: float = 0.55,
   future_risk_weight_scale: float = 2.0,
   future_quality_weight_scale: float = 2.0,
   future_risk_huber_delta: float = 0.1,

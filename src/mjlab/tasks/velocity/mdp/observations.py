@@ -9,17 +9,20 @@ from mjlab.sensor import CameraSensor, ContactSensor
 from mjlab.sensor.terrain_height_sensor import TerrainHeightSensor
 from mjlab.utils.lab_api.math import quat_apply, quat_apply_inverse
 
-from .rewards import _current_step_boundaries
 from .stair_geometry import (
   COLLISION_RISK_KEY,
   LANDING_QUALITY_KEY,
   LANDING_TOUCHDOWN_KEY,
-  SAFE_STRIDE_VALID_KEY,
-  SAFE_TREAD_LOWER_BOUND_KEY,
+  MINIMUM_SAFE_STRIDE_EXACT_KEY,
+  MINIMUM_SAFE_STRIDE_KEY,
+  MINIMUM_SAFE_STRIDE_VALID_KEY,
+  MINIMUM_SAFE_STRIDE_WEIGHT_KEY,
   STAIR_ENTRY_EVENT_KEY,
   STAIR_ENTRY_RECENT_EVIDENCE_KEY,
   STAIR_PHASE_KEY,
-  cached_stair_shape,
+  STAIR_RISER_HEIGHT_LABEL_KEY,
+  STAIR_SHAPE_LABEL_VALID_KEY,
+  STAIR_TREAD_DEPTH_LABEL_KEY,
 )
 
 if TYPE_CHECKING:
@@ -374,7 +377,7 @@ def _clear_foot_velocity_cache(env: ManagerBasedRlEnv, env_ids: torch.Tensor) ->
 def toe_riser_event_label(
   env: ManagerBasedRlEnv,
 ) -> torch.Tensor:
-  """One-frame label for a strict stair-entry event that should trigger WRITE."""
+  """One-frame blocked-swing evidence label that should trigger WRITE."""
   zeros = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
   entry_event = env.extras.get(STAIR_ENTRY_EVENT_KEY, zeros)
   return entry_event.bool().float().unsqueeze(-1)
@@ -399,23 +402,23 @@ def stair_shape_label(
 ) -> torch.Tensor:
   """Privileged ``[tread_depth, riser_height, valid]`` supervision label.
 
-  The geometry comes from simulation-only step boundaries and is never exposed
-  to the actor or latent observation groups. Supervision becomes valid only
-  after the state machine records a safe layer-2 touchdown.
+  The geometry is latched from simulation-only step boundaries at stair entry
+  and is never exposed to the actor or latent observation groups. It remains
+  valid for the complete accepted stair sequence.
   """
-  safe_stride_valid = env.extras.get(SAFE_STRIDE_VALID_KEY)
-  if safe_stride_valid is None:
-    label_valid = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
-  else:
-    label_valid = safe_stride_valid.bool()
-  boundaries, valid_boundaries = _current_step_boundaries(env)
-  if boundaries is None or valid_boundaries is None:
-    zeros = torch.zeros(env.num_envs, device=env.device)
-    return torch.stack([zeros, zeros, label_valid.float()], dim=-1)
-
-  tread_depth, riser_height, _shape_valid = cached_stair_shape(
-    env, boundaries, valid_boundaries
+  zeros = torch.zeros(env.num_envs, device=env.device)
+  tread_depth = env.extras.get(STAIR_TREAD_DEPTH_LABEL_KEY, zeros)
+  riser_height = env.extras.get(STAIR_RISER_HEIGHT_LABEL_KEY, zeros)
+  shape_valid = env.extras.get(
+    STAIR_SHAPE_LABEL_VALID_KEY,
+    torch.zeros(env.num_envs, device=env.device, dtype=torch.bool),
   )
+  stair_phase = env.extras.get(STAIR_PHASE_KEY)
+  if stair_phase is None:
+    sequence_active = torch.zeros_like(shape_valid, dtype=torch.bool)
+  else:
+    sequence_active = stair_phase >= 1
+  label_valid = shape_valid.bool() & sequence_active
   return torch.stack(
     [tread_depth, riser_height, label_valid.float()],
     dim=-1,
@@ -423,12 +426,41 @@ def stair_shape_label(
 
 
 def safe_stride_label(env: ManagerBasedRlEnv) -> torch.Tensor:
-  """Privileged ``[safe_tread_lower_bound, valid]`` supervision label."""
-  safe_stride = env.extras.get(SAFE_TREAD_LOWER_BOUND_KEY)
-  safe_stride_valid = env.extras.get(SAFE_STRIDE_VALID_KEY)
-  if safe_stride is None or safe_stride_valid is None:
-    return torch.zeros(env.num_envs, 2, device=env.device)
-  return torch.stack([safe_stride, safe_stride_valid.float()], dim=-1)
+  """Privileged ``[minimum_safe_stride, valid, exact, importance]`` label.
+
+  The target is generated after each completed alternating swing attempt.
+  Every valid target is exact privileged geometry supervision. ``exact``
+  records whether the deployable interaction history also contains
+  expected-riser evidence and is retained for diagnostics only. ``importance``
+  briefly emphasizes entry-riser, expected-riser, and rear-partial evidence.
+  """
+  safe_stride = env.extras.get(MINIMUM_SAFE_STRIDE_KEY)
+  safe_stride_valid = env.extras.get(MINIMUM_SAFE_STRIDE_VALID_KEY)
+  safe_stride_exact = env.extras.get(MINIMUM_SAFE_STRIDE_EXACT_KEY)
+  safe_stride_weight = env.extras.get(MINIMUM_SAFE_STRIDE_WEIGHT_KEY)
+  if safe_stride is None or safe_stride_valid is None or safe_stride_exact is None:
+    return torch.zeros(env.num_envs, 4, device=env.device)
+  if safe_stride_weight is None:
+    safe_stride_weight = torch.ones_like(safe_stride)
+  stair_phase = env.extras.get(STAIR_PHASE_KEY)
+  if stair_phase is None:
+    sequence_active = torch.zeros_like(safe_stride_valid, dtype=torch.bool)
+  else:
+    sequence_active = stair_phase >= 1
+  label_valid = safe_stride_valid.bool() & sequence_active
+  return torch.stack(
+    [
+      safe_stride,
+      label_valid.float(),
+      (safe_stride_exact.bool() & label_valid).float(),
+      torch.where(
+        label_valid,
+        safe_stride_weight.clamp_min(1.0),
+        torch.zeros_like(safe_stride_weight),
+      ),
+    ],
+    dim=-1,
+  )
 
 
 def stair_future_event_labels(env: ManagerBasedRlEnv) -> torch.Tensor:

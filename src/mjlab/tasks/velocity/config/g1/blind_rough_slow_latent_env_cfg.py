@@ -41,14 +41,14 @@ class G1SlowLatentTargetCommandParams:
   target_tile_radius: int = 1
   include_current_tile: bool = False
   zero_lateral_velocity: bool = True
-  lin_vel_x: tuple[float, float] = (0.0, 1.0)
+  lin_vel_x: tuple[float, float] = (0.4, 1.0)
   lin_vel_y: tuple[float, float] = (0.0, 0.0)
   ang_vel_z: tuple[float, float] = (-0.8, 0.8)
   play_rel_target_envs: float = 1.0
   play_rel_random_heading_envs: float = 0.0
   play_rel_standing_envs: float = 0.0
   play_heading_control_stiffness: float = 0.8
-  play_lin_vel_x: tuple[float, float] = (0.3, 0.9)
+  play_lin_vel_x: tuple[float, float] = (0.6, 0.9)
   play_lin_vel_y: tuple[float, float] = (0.0, 0.0)
   play_ang_vel_z: tuple[float, float] = (-0.7, 0.7)
   play_target_min_distance: float = 1.0
@@ -173,6 +173,10 @@ class G1SlowLatentRewardParams:
   toe_contact_force_threshold: float = 15.0
   toe_contact_force_scale: float = 60.0
   toe_contact_vertical_normal_z_max: float = 0.4
+  toe_event_min_forward_intent_speed: float = 0.04
+  toe_event_min_forward_speed_drop: float = 0.04
+  toe_event_blocked_forward_speed: float = 0.03
+  toe_event_persistent_steps: int = 3
 
   # Penalty-only stair entry and safe layer-2 touchdown confirmation.
   toe_stair_entry_cooldown_time: float = 0.20
@@ -181,13 +185,28 @@ class G1SlowLatentRewardParams:
   toe_stair_touchdown_lateral_margin: float = 0.03
   toe_stair_safe_support_fraction: float = 0.60
   toe_stair_min_safe_stride: float = 0.10
+  toe_stair_max_safe_stride: float = 0.55
+  toe_stair_max_tracking_stride: float = 0.80
   toe_stair_touchdown_lip_clearance: float = 0.02
   toe_stair_touchdown_lip_height_band: float = 0.06
   stair_entry_evidence_time: float = 0.80
+  safe_stride_evidence_window_steps: int = 5
+  safe_stride_rear_partial_weight: float = 2.0
+  safe_stride_riser_weight: float = 3.0
   toe_collision_risk_margin: float = 0.06
   toe_stair_command_threshold: float = 0.05
+  stair_skip_layer_weight: float = -1.0
 
-  # Stage-2 privileged-geometry landing shaping.
+  # Per-leg shank-front clearance from the next semantic stair edge.
+  shank_edge_weight: float = -2.0
+  shank_edge_clearance_margin: float = 0.05
+  shank_edge_min_riser_height: float = 0.04
+  shank_edge_direction_cos_threshold: float = 0.85
+  shank_edge_lateral_margin: float = 0.05
+  shank_front_start_local: tuple[float, float, float] = (0.055, 0.0, -0.06)
+  shank_front_end_local: tuple[float, float, float] = (0.040, 0.0, -0.24)
+
+  # Following-step privileged-geometry landing shaping.
   stair_tread_landing_weight: float = 0.5
   stair_tread_landing_lead: float = 0.04
   stair_tread_landing_sigma_fraction: float = 0.15
@@ -280,6 +299,13 @@ def configure_g1_step_danger_rewards(
       body_names=("left_ankle_roll_link", "right_ankle_roll_link"),
     )
 
+  def shank_asset_cfg() -> SceneEntityCfg:
+    return SceneEntityCfg(
+      "robot",
+      body_names=("left_knee_link", "right_knee_link"),
+      preserve_order=True,
+    )
+
   cfg.rewards["foot_step_lip_volume_penalty"] = RewardTermCfg(
     func=mdp.foot_step_lip_volume_penalty,
     weight=params.foot_lip_weight,
@@ -312,20 +338,47 @@ def configure_g1_step_danger_rewards(
       "contact_force_threshold": params.toe_contact_force_threshold,
       "contact_force_scale": params.toe_contact_force_scale,
       "contact_vertical_normal_z_max": params.toe_contact_vertical_normal_z_max,
+      "event_min_forward_intent_speed": (params.toe_event_min_forward_intent_speed),
+      "event_min_forward_speed_drop": params.toe_event_min_forward_speed_drop,
+      "event_blocked_forward_speed": params.toe_event_blocked_forward_speed,
+      "event_persistent_steps": params.toe_event_persistent_steps,
       "stair_entry_cooldown_time": params.toe_stair_entry_cooldown_time,
       "stair_heading_cos": params.toe_stair_heading_cos,
       "stair_touchdown_height_tolerance": (params.toe_stair_touchdown_height_tolerance),
       "stair_touchdown_lateral_margin": (params.toe_stair_touchdown_lateral_margin),
       "stair_safe_support_fraction": (params.toe_stair_safe_support_fraction),
       "stair_min_safe_stride": params.toe_stair_min_safe_stride,
+      "stair_max_safe_stride": params.toe_stair_max_safe_stride,
+      "stair_max_tracking_stride": params.toe_stair_max_tracking_stride,
       "stair_touchdown_lip_clearance": (params.toe_stair_touchdown_lip_clearance),
       "stair_touchdown_lip_height_band": (params.toe_stair_touchdown_lip_height_band),
       "stair_entry_evidence_time": params.stair_entry_evidence_time,
+      "stair_attempt_period": params.foot_gait_period,
+      "safe_stride_evidence_window_steps": (params.safe_stride_evidence_window_steps),
+      "safe_stride_rear_partial_weight": (params.safe_stride_rear_partial_weight),
+      "safe_stride_riser_weight": params.safe_stride_riser_weight,
       "collision_risk_margin": params.toe_collision_risk_margin,
       "command_threshold": params.toe_stair_command_threshold,
       "ground_contact_sensor_name": "feet_ground_contact",
       "asset_cfg": foot_asset_cfg(),
     },
+  )
+  cfg.rewards["shank_front_edge_clearance_penalty"] = RewardTermCfg(
+    func=mdp.shank_front_edge_clearance_penalty,
+    weight=params.shank_edge_weight,
+    params={
+      "clearance_margin": params.shank_edge_clearance_margin,
+      "min_riser_height": params.shank_edge_min_riser_height,
+      "direction_cos_threshold": params.shank_edge_direction_cos_threshold,
+      "lateral_margin": params.shank_edge_lateral_margin,
+      "front_start_local": params.shank_front_start_local,
+      "front_end_local": params.shank_front_end_local,
+      "asset_cfg": shank_asset_cfg(),
+    },
+  )
+  cfg.rewards["stair_skip_layer_penalty"] = RewardTermCfg(
+    func=mdp.stair_skip_layer_penalty,
+    weight=params.stair_skip_layer_weight,
   )
   cfg.rewards["stair_tread_landing_reward"] = RewardTermCfg(
     func=mdp.stair_tread_landing_reward,
@@ -426,6 +479,22 @@ def _configure_target_command(
   twist_cmd.ranges.lin_vel_x = params.lin_vel_x
   twist_cmd.ranges.lin_vel_y = params.lin_vel_y
   twist_cmd.ranges.ang_vel_z = params.ang_vel_z
+
+  if not play and "command_vel" in cfg.curriculum:
+    cfg.curriculum["command_vel"].params["velocity_stages"] = [
+      {
+        "step": 0,
+        "lin_vel_x": (params.lin_vel_x[0], min(0.8, params.lin_vel_x[1])),
+        "lin_vel_y": params.lin_vel_y,
+        "ang_vel_z": (-0.5, 0.5),
+      },
+      {
+        "step": 3000 * 24,
+        "lin_vel_x": params.lin_vel_x,
+        "lin_vel_y": params.lin_vel_y,
+        "ang_vel_z": params.ang_vel_z,
+      },
+    ]
 
   if play:
     twist_cmd.rel_target_envs = params.play_rel_target_envs

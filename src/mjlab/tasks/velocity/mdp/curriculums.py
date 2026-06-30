@@ -17,6 +17,14 @@ _MIXED_REPLAY_ACTIVE_KEY = "terrain_mixed_replay_active"
 _MIXED_REPLAY_BUCKET_NAMES = ("low", "mid", "high")
 
 
+def _terrain_family_name(name: str) -> str:
+  """Collapse fixed-width terrain variants into their aggregate family name."""
+  family, separator, variant = name.rpartition("_w")
+  if separator and variant.isdigit():
+    return family
+  return name
+
+
 def _validate_mixed_replay_cfg(
   level_ranges: tuple[tuple[int, int], ...],
   weights: tuple[float, ...],
@@ -122,8 +130,10 @@ def _apply_mixed_terrain_replay(
     extras[_MIXED_REPLAY_ACTIVE_KEY] = active
 
   if activation_levels is None:
-    activation_levels = terrain.terrain_levels[env_ids]
-  active[env_ids] |= activation_levels >= start_level
+    effective_activation_levels = terrain.terrain_levels[env_ids]
+  else:
+    effective_activation_levels = activation_levels
+  active[env_ids] |= effective_activation_levels >= start_level
   replay_env_ids = env_ids[active[env_ids]]
 
   if replay_env_ids.numel() > 0:
@@ -246,10 +256,16 @@ def terrain_levels_vel(
   num_cols = terrain_origins.shape[1]
   if num_cols == len(sub_terrain_names):
     types = terrain.terrain_types
+    family_masks: dict[str, torch.Tensor] = {}
     for i, name in enumerate(sub_terrain_names):
       mask = types == i
       if mask.any():
         result[name] = torch.mean(levels[mask])
+        family = _terrain_family_name(name)
+        if family != name:
+          family_masks[family] = family_masks.get(family, torch.zeros_like(mask)) | mask
+    for family, mask in family_masks.items():
+      result[family] = torch.mean(levels[mask])
 
   return result
 

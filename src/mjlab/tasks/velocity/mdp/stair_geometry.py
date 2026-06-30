@@ -17,9 +17,26 @@ TOE_RISER_CONTACT_KEY = "slow_latent_toe_riser_contact"
 STAIR_ENTRY_RECENT_EVIDENCE_KEY = "slow_latent_stair_entry_recent_evidence"
 STAIR_ENTRY_EVIDENCE_ASCENT_DIR_KEY = "slow_latent_stair_entry_evidence_ascent_dir"
 STAIR_TARGET_FOOT_KEY = "slow_latent_stair_target_foot"
+STAIR_EXPECTED_LAYER_KEY = "slow_latent_stair_expected_layer"
+STAIR_LANDING_EXPECTED_LAYER_KEY = "slow_latent_stair_landing_expected_layer"
+STAIR_LANDING_SEQUENCE_ID_KEY = "slow_latent_stair_landing_sequence_id"
+STAIR_LANDING_TARGET_FOOT_KEY = "slow_latent_stair_landing_target_foot"
+STAIR_CLEARANCE_FOOT_LAYERS_KEY = "slow_latent_stair_clearance_foot_layers"
+STAIR_CLEARANCE_FOOT_LAYERS_VALID_KEY = "slow_latent_stair_clearance_foot_layers_valid"
+STAIR_CLEARANCE_SEQUENCE_ID_KEY = "slow_latent_stair_clearance_sequence_id"
+STAIR_CLEARANCE_ASCENT_DIR_KEY = "slow_latent_stair_clearance_ascent_dir"
 STAIR_ASCENT_DIR_KEY = "slow_latent_stair_ascent_dir"
+STAIR_TREAD_DEPTH_LABEL_KEY = "slow_latent_stair_tread_depth_label"
+STAIR_RISER_HEIGHT_LABEL_KEY = "slow_latent_stair_riser_height_label"
+STAIR_SHAPE_LABEL_VALID_KEY = "slow_latent_stair_shape_label_valid"
 SAFE_STRIDE_VALID_KEY = "slow_latent_safe_stride_valid"
 SAFE_TREAD_LOWER_BOUND_KEY = "slow_latent_safe_tread_lower_bound"
+MINIMUM_SAFE_STRIDE_KEY = "slow_latent_minimum_safe_stride"
+MINIMUM_SAFE_STRIDE_RAW_KEY = "slow_latent_minimum_safe_stride_raw"
+MINIMUM_SAFE_STRIDE_VALID_KEY = "slow_latent_minimum_safe_stride_valid"
+MINIMUM_SAFE_STRIDE_EXACT_KEY = "slow_latent_minimum_safe_stride_exact"
+MINIMUM_SAFE_STRIDE_WEIGHT_KEY = "slow_latent_minimum_safe_stride_weight"
+STAIR_SKIP_LAYER_PENALTY_KEY = "slow_latent_stair_skip_layer_penalty"
 SAFE_LANDING_CENTER_KEY = "slow_latent_safe_landing_center_s"
 OBSERVED_STEP_STRIDE_KEY = "slow_latent_observed_step_stride"
 COLLISION_RISK_KEY = "slow_latent_collision_risk_now"
@@ -80,6 +97,19 @@ def stair_shape_from_boundaries(
   tread_depth = torch.where(shape_valid, tread_depth, torch.zeros_like(tread_depth))
   riser_height = torch.where(shape_valid, riser_height, torch.zeros_like(riser_height))
   return tread_depth, riser_height, shape_valid
+
+
+def stair_shape_for_sequence(
+  boundaries: torch.Tensor,
+  valid_boundaries: torch.Tensor,
+  boundary_sequence_ids: torch.Tensor,
+  sequence_ids: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+  """Extract static stair geometry from each environment's active sequence."""
+  sequence_boundaries = valid_boundaries & (
+    boundary_sequence_ids == sequence_ids[:, None]
+  )
+  return stair_shape_from_boundaries(boundaries, sequence_boundaries)
 
 
 def cached_stair_shape(

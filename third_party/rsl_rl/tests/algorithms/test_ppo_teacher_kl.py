@@ -171,10 +171,10 @@ def test_continuous_future_aux_losses_use_future_labels() -> None:
     }
     actor.get_slow_latent_diagnostics = lambda: {}
 
-    labels = torch.zeros(4, 1, 10)
-    labels[:, 0, 7] = torch.tensor([0.0, 0.2, 0.8, 0.0])
-    labels[:, 0, 8] = torch.tensor([0.0, 0.0, 1.0, 0.0])
-    labels[:, 0, 9] = torch.tensor([0.0, 0.0, 0.6, 0.0])
+    labels = torch.zeros(4, 1, 11)
+    labels[:, 0, 8] = torch.tensor([0.0, 0.2, 0.8, 0.0])
+    labels[:, 0, 9] = torch.tensor([0.0, 0.0, 1.0, 0.0])
+    labels[:, 0, 10] = torch.tensor([0.0, 0.0, 0.6, 0.0])
     observations = TensorDict({"latent_labels": labels}, batch_size=[4, 1])
 
     loss, logs = alg._compute_slow_latent_aux_loss(
@@ -317,8 +317,10 @@ def test_stair_aux_logs_phase_mismatch_and_uses_positive_weight() -> None:
     assert logs["slow_latent_env_stair_while_latent_normal_ratio"] == pytest.approx(0.25)
     assert logs["slow_latent_memory_while_env_stair_ratio"] == pytest.approx(0.25)
     assert logs["slow_latent_event_with_stair_label_rate"] == pytest.approx(1.0)
+    assert logs["slow_latent_event_while_normal_ratio"] == pytest.approx(1.0)
     assert logs["slow_latent_stair_recall_while_write"] == pytest.approx(0.0)
     assert logs["slow_latent_true_event_to_write_rate"] == pytest.approx(1.0)
+    assert logs["slow_latent_normal_event_to_write_rate"] == pytest.approx(1.0)
     assert logs["slow_latent_write_trigger_event_precision"] == pytest.approx(1.0)
     assert logs["slow_latent_gate_confirm_while_env_stair_ratio"] == pytest.approx(0.25)
     assert logs["slow_latent_gate_confirm_stair_precision"] == pytest.approx(1.0)
@@ -362,11 +364,15 @@ def test_safe_stride_aux_loss_uses_seventh_label_as_valid_mask() -> None:
     assert logs["slow_latent_safe_stride_valid_ratio"] == pytest.approx(0.5)
     assert logs["slow_latent_safe_stride_mae"] == pytest.approx(0.05)
     assert logs["slow_latent_safe_stride_out_of_range_label_ratio"] == 0.0
+    assert logs["slow_latent_safe_stride_label_mean"] == pytest.approx(0.225)
+    assert logs["slow_latent_safe_stride_valid_pred_mean"] == pytest.approx(0.275)
+    assert logs["slow_latent_safe_stride_valid_while_stair_ratio"] == pytest.approx(0.5)
+    assert logs["slow_latent_safe_stride_valid_while_flat_ratio"] == 0.0
     assert loss.item() == pytest.approx(0.01875)
 
 
 def test_stair_label_range_metrics_do_not_clamp_labels() -> None:
-    """Range priors should be diagnostics only, including stride/tread violations."""
+    """Range priors should diagnose labels without changing their tensors."""
     alg = _build_teacher_kl({"enabled": False})
     actor = cast(Any, alg.actor)
     actor.aux_event_coef = 0.0
@@ -375,12 +381,12 @@ def test_stair_label_range_metrics_do_not_clamp_labels() -> None:
     actor.aux_future_safe_landing_quality_coef = 0.0
     actor.aux_stair_shape_coef = 0.1
     actor.aux_safe_stride_coef = 0.1
-    actor.tread_depth_min = 0.25
+    actor.tread_depth_min = 0.18
     actor.tread_depth_max = 0.35
     actor.riser_height_min = 0.088
     actor.riser_height_max = 0.25
-    actor.safe_stride_min = 0.08
-    actor.safe_stride_max = 0.45
+    actor.safe_stride_min = 0.10
+    actor.safe_stride_max = 0.55
     actor.get_aux_outputs = lambda: {
         "stair_shape": torch.tensor([
             [0.30, 0.18],
@@ -392,9 +398,9 @@ def test_stair_label_range_metrics_do_not_clamp_labels() -> None:
     }
     actor.get_slow_latent_diagnostics = lambda: {}
     labels = torch.tensor([
-        [0.0, 1.0, 0.10, 0.18, 1.0, 0.50, 1.0],
+        [0.0, 1.0, 0.10, 0.18, 1.0, 0.60, 1.0],
         [0.0, 1.0, 0.30, 0.30, 1.0, 0.20, 1.0],
-        [0.0, 1.0, 0.60, 0.18, 0.0, 0.50, 1.0],
+        [0.0, 1.0, 0.60, 0.18, 0.0, 0.05, 1.0],
         [0.0, 1.0, 0.30, 0.18, 1.0, 0.60, 0.0],
     ])
     labels_before = labels.clone()
@@ -408,7 +414,91 @@ def test_stair_label_range_metrics_do_not_clamp_labels() -> None:
     assert logs["slow_latent_tread_depth_out_of_range_label_ratio"] == pytest.approx(1 / 3)
     assert logs["slow_latent_riser_height_out_of_range_label_ratio"] == pytest.approx(1 / 3)
     assert logs["slow_latent_safe_stride_out_of_range_label_ratio"] == pytest.approx(2 / 3)
-    assert logs["slow_latent_safe_stride_gt_tread_hat_ratio"] == pytest.approx(0.5)
+    assert logs["slow_latent_shape_valid_stair_coverage"] == pytest.approx(0.75)
+    assert logs["slow_latent_shape_valid_while_flat_ratio"] == 0.0
+    assert logs["slow_latent_shape_normalized_huber"] == logs["slow_latent_shape_huber"]
+
+
+def test_safe_stride_all_valid_targets_use_symmetric_regression() -> None:
+    """Privileged stride targets should penalize equal over- and undershoot."""
+    alg = _build_teacher_kl({"enabled": False})
+    actor = cast(Any, alg.actor)
+    actor.aux_event_coef = 0.0
+    actor.aux_stair_coef = 0.0
+    actor.aux_future_collision_risk_coef = 0.0
+    actor.aux_future_safe_landing_quality_coef = 0.0
+    actor.aux_stair_shape_coef = 0.0
+    actor.aux_safe_stride_coef = 0.5
+    actor.safe_stride_huber_delta = 0.05
+    actor.get_aux_outputs = lambda: {"safe_stride": torch.tensor([[0.30], [0.50], [0.20], [0.20]])}
+    actor.get_slow_latent_diagnostics = lambda: {}
+    labels = torch.zeros(4, 11)
+    labels[:2, 1] = 1.0
+    labels[:2, 5] = 0.40
+    labels[:2, 6] = 1.0
+    observations = TensorDict({"latent_labels": labels}, batch_size=[NUM_ENVS])
+
+    loss, logs = alg._compute_slow_latent_aux_loss(
+        RolloutStorage.Batch(observations=observations, hidden_states=(None, None))
+    )
+
+    assert logs["slow_latent_safe_stride_huber"] == pytest.approx(0.075)
+    assert logs["slow_latent_safe_stride_exact_ratio"] == 0.0
+    assert logs["slow_latent_safe_stride_lower_bound_violation_mae"] == pytest.approx(0.05)
+    assert logs["slow_latent_safe_stride_signed_error"] == pytest.approx(0.0)
+    assert loss.item() == pytest.approx(0.0375)
+
+
+def test_safe_stride_recent_interaction_evidence_increases_loss_weight() -> None:
+    """Recent riser evidence should emphasize its valid stride target."""
+    alg = _build_teacher_kl({"enabled": False})
+    actor = cast(Any, alg.actor)
+    actor.aux_event_coef = 0.0
+    actor.aux_stair_coef = 0.0
+    actor.aux_future_collision_risk_coef = 0.0
+    actor.aux_future_safe_landing_quality_coef = 0.0
+    actor.aux_stair_shape_coef = 0.0
+    actor.aux_safe_stride_coef = 1.0
+    actor.safe_stride_huber_delta = 0.05
+    actor.get_aux_outputs = lambda: {"safe_stride": torch.tensor([[0.20], [0.39], [0.20], [0.20]])}
+    actor.get_slow_latent_diagnostics = lambda: {}
+    labels = torch.zeros(4, 12)
+    labels[:2, 1] = 1.0
+    labels[:2, 5] = 0.40
+    labels[:2, 6] = 1.0
+    labels[:2, 8] = torch.tensor([3.0, 1.0])
+    observations = TensorDict({"latent_labels": labels}, batch_size=[NUM_ENVS])
+
+    loss, logs = alg._compute_slow_latent_aux_loss(
+        RolloutStorage.Batch(observations=observations, hidden_states=(None, None))
+    )
+
+    assert loss.item() == pytest.approx(0.1315)
+    assert logs["slow_latent_safe_stride_importance_mean"] == pytest.approx(2.0)
+    assert logs["slow_latent_safe_stride_evidence_weighted_ratio"] == pytest.approx(0.5)
+
+
+def test_safe_stride_update_statistics_are_aggregated_from_moments() -> None:
+    """Update-global metrics should combine sufficient moments, not correlations."""
+    alg = _build_teacher_kl({"enabled": False})
+    alg.num_learning_epochs = 1
+    alg._safe_stride_update_statistics = {}
+    alg._accumulate_safe_stride_update_statistics(
+        torch.tensor([[0.20], [0.40], [0.90]]),
+        torch.tensor([[0.10], [0.50], [0.20]]),
+        torch.tensor([[1.0], [1.0], [0.0]]),
+    )
+
+    logs = alg._finalize_safe_stride_update_statistics()
+
+    assert logs["slow_latent_safe_stride_global_valid_count"] == 2.0
+    assert logs["slow_latent_safe_stride_global_label_mean"] == pytest.approx(0.30)
+    assert logs["slow_latent_safe_stride_global_pred_mean"] == pytest.approx(0.30)
+    assert logs["slow_latent_safe_stride_global_label_std"] == pytest.approx(0.20)
+    assert logs["slow_latent_safe_stride_global_pred_std"] == pytest.approx(0.10)
+    assert logs["slow_latent_safe_stride_global_correlation"] == pytest.approx(1.0)
+    assert logs["slow_latent_safe_stride_global_mae"] == pytest.approx(0.10)
+    assert logs["slow_latent_safe_stride_global_signed_error"] == pytest.approx(0.0, abs=1.0e-7)
 
 
 def test_mean_huber_guidance_applies_loss_cap() -> None:
