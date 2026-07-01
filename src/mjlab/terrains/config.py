@@ -28,7 +28,7 @@ ALL_TERRAIN_PRESETS: dict[str, Callable[..., SubTerrainCfg]] = {}
 _F = TypeVar("_F", bound=Callable[..., SubTerrainCfg])
 
 BLIND_HIGH_STAIRS_TREAD_DEPTHS = tuple(
-  round(0.20 + index * (0.32 - 0.20) / 7, 6) for index in range(8)
+  round(0.25 + index * (0.35 - 0.25) / 7, 6) for index in range(8)
 )
 _BLIND_HIGH_STAIRS_PROPORTION = 0.0
 _BLIND_HIGH_STAIRS_INV_PROPORTION = 0.85

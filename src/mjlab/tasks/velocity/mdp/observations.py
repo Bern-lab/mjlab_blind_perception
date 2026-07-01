@@ -15,6 +15,7 @@ from .stair_geometry import (
   LANDING_TOUCHDOWN_KEY,
   MINIMUM_SAFE_STRIDE_EXACT_KEY,
   MINIMUM_SAFE_STRIDE_KEY,
+  MINIMUM_SAFE_STRIDE_UPPER_KEY,
   MINIMUM_SAFE_STRIDE_VALID_KEY,
   MINIMUM_SAFE_STRIDE_WEIGHT_KEY,
   STAIR_ENTRY_EVENT_KEY,
@@ -377,7 +378,7 @@ def _clear_foot_velocity_cache(env: ManagerBasedRlEnv, env_ids: torch.Tensor) ->
 def toe_riser_event_label(
   env: ManagerBasedRlEnv,
 ) -> torch.Tensor:
-  """One-frame blocked-swing evidence label that should trigger WRITE."""
+  """One-frame blocked-swing label for entry WRITE or memory shape refresh."""
   zeros = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
   entry_event = env.extras.get(STAIR_ENTRY_EVENT_KEY, zeros)
   return entry_event.bool().float().unsqueeze(-1)
@@ -426,20 +427,22 @@ def stair_shape_label(
 
 
 def safe_stride_label(env: ManagerBasedRlEnv) -> torch.Tensor:
-  """Privileged ``[minimum_safe_stride, valid, exact, importance]`` label.
+  """Privileged SafeStride interval and interaction-evidence label.
 
-  The target is generated after each completed alternating swing attempt.
-  Every valid target is exact privileged geometry supervision. ``exact``
-  records whether the deployable interaction history also contains
-  expected-riser evidence and is retained for diagnostics only. ``importance``
-  briefly emphasizes entry-riser, expected-riser, and rear-partial evidence.
+  The layout is ``[lower, valid, exact, importance, upper]``. The two bounds
+  describe translations that keep the complete sole inside the requested
+  tread. They are privileged training targets only. ``exact`` records whether
+  deployable interaction history contains expected-riser evidence.
   """
   safe_stride = env.extras.get(MINIMUM_SAFE_STRIDE_KEY)
+  safe_stride_upper = env.extras.get(MINIMUM_SAFE_STRIDE_UPPER_KEY)
   safe_stride_valid = env.extras.get(MINIMUM_SAFE_STRIDE_VALID_KEY)
   safe_stride_exact = env.extras.get(MINIMUM_SAFE_STRIDE_EXACT_KEY)
   safe_stride_weight = env.extras.get(MINIMUM_SAFE_STRIDE_WEIGHT_KEY)
   if safe_stride is None or safe_stride_valid is None or safe_stride_exact is None:
-    return torch.zeros(env.num_envs, 4, device=env.device)
+    return torch.zeros(env.num_envs, 5, device=env.device)
+  if safe_stride_upper is None:
+    safe_stride_upper = safe_stride
   if safe_stride_weight is None:
     safe_stride_weight = torch.ones_like(safe_stride)
   stair_phase = env.extras.get(STAIR_PHASE_KEY)
@@ -458,6 +461,7 @@ def safe_stride_label(env: ManagerBasedRlEnv) -> torch.Tensor:
         safe_stride_weight.clamp_min(1.0),
         torch.zeros_like(safe_stride_weight),
       ),
+      torch.where(label_valid, safe_stride_upper, torch.zeros_like(safe_stride_upper)),
     ],
     dim=-1,
   )

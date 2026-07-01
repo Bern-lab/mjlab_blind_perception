@@ -82,7 +82,7 @@ def test_slow_latent_actor_forward_updates_state_and_aux_outputs() -> None:
   assert aux["stair_shape"].shape == (4, 2)
   assert aux["safe_stride"].shape == (4, 1)
   assert torch.all(
-    (0.18 <= aux["stair_shape"][..., 0]) & (aux["stair_shape"][..., 0] <= 0.35)
+    (0.23 <= aux["stair_shape"][..., 0]) & (aux["stair_shape"][..., 0] <= 0.37)
   )
   assert torch.all(
     (0.088 <= aux["stair_shape"][..., 1]) & (aux["stair_shape"][..., 1] <= 0.25)
@@ -105,6 +105,7 @@ def test_slow_latent_actor_forward_updates_state_and_aux_outputs() -> None:
   assert diagnostics["gate_write_confirm"].shape == (4, 1)
   assert diagnostics["gate_write_abort"].shape == (4, 1)
   assert diagnostics["gate_memory_exit"].shape == (4, 1)
+  assert diagnostics["gate_memory_event_shape_boost"].shape == (4, 1)
   assert diagnostics["gate_release"].shape == (4, 1)
   assert diagnostics["alpha"].shape == (4, 5)
   assert diagnostics["alpha_state"].shape == (4, 1)
@@ -127,6 +128,95 @@ def test_stair_memory_uses_distinct_state_and_shape_hold_rates() -> None:
 
   torch.testing.assert_close(alpha[:, :2], torch.zeros(2, 2))
   torch.testing.assert_close(alpha[:, 2:], torch.full((2, 3), 0.05))
+
+
+def test_shape_latent_play_ablation_only_zeros_actor_copy() -> None:
+  model = _make_model()
+  memory = torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0]])
+
+  assert model._actor_memory(memory) is memory
+
+  model.zero_shape_latent_for_actor = True
+  actor_memory = model._actor_memory(memory)
+
+  torch.testing.assert_close(actor_memory[:, :2], memory[:, :2])
+  torch.testing.assert_close(actor_memory[:, 2:], torch.zeros(1, 3))
+  torch.testing.assert_close(memory, torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0]]))
+
+
+def test_shape_latent_stair_ablation_freezes_pre_write_actor_snapshot() -> None:
+  model = _make_model()
+  model.freeze_shape_latent_at_stair_entry = True
+  model._gate_state = torch.zeros(1, 5)
+  normal_memory = torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0]])
+
+  torch.testing.assert_close(model._actor_memory(normal_memory), normal_memory)
+
+  model._gate_state[:, 0] = 1.0
+  write_memory = torch.tensor([[6.0, 7.0, 8.0, 9.0, 10.0]])
+  write_actor_memory = model._actor_memory(write_memory)
+  torch.testing.assert_close(write_actor_memory[:, :2], write_memory[:, :2])
+  torch.testing.assert_close(write_actor_memory[:, 2:], normal_memory[:, 2:])
+
+  model._gate_state[:, 0] = 2.0
+  stair_memory = torch.tensor([[11.0, 12.0, 13.0, 14.0, 15.0]])
+  stair_actor_memory = model._actor_memory(stair_memory)
+  torch.testing.assert_close(stair_actor_memory[:, :2], stair_memory[:, :2])
+  torch.testing.assert_close(stair_actor_memory[:, 2:], normal_memory[:, 2:])
+
+  model._gate_state[:, 0] = 0.0
+  torch.testing.assert_close(model._actor_memory(stair_memory), stair_memory)
+  torch.testing.assert_close(
+    stair_memory,
+    torch.tensor([[11.0, 12.0, 13.0, 14.0, 15.0]]),
+  )
+
+
+def test_stair_memory_event_temporarily_boosts_only_shape_channels() -> None:
+  model = _make_model()
+  model.memory_event_shape_boost_steps = 3.0
+  onnx_model = model.as_onnx()
+  onnx_model.memory_event_shape_boost_steps = 3.0
+  gate = torch.zeros(1, 5)
+  gate[:, 0] = 2.0
+  onnx_gate = gate.clone()
+
+  gate, event_alpha = model._advance_gate_state(
+    event_prob=torch.ones(1, 1),
+    stair_prob=torch.ones(1, 1),
+    gate_state=gate,
+  )
+  onnx_gate, onnx_event_alpha = onnx_model._advance_gate_state(
+    event_prob=torch.ones(1, 1),
+    stair_prob=torch.ones(1, 1),
+    gate_state=onnx_gate,
+  )
+
+  assert gate[0, 0].item() == 2.0
+  assert gate[0, 3].item() == 3.0
+  torch.testing.assert_close(event_alpha[:, :2], torch.zeros(1, 2))
+  torch.testing.assert_close(event_alpha[:, 2:], torch.full((1, 3), 0.3))
+  torch.testing.assert_close(onnx_gate, gate)
+  torch.testing.assert_close(onnx_event_alpha, event_alpha)
+
+  for expected_timer in (2.0, 1.0):
+    gate, held_boost_alpha = model._advance_gate_state(
+      event_prob=torch.zeros(1, 1),
+      stair_prob=torch.ones(1, 1),
+      gate_state=gate,
+    )
+    assert gate[0, 3].item() == expected_timer
+    torch.testing.assert_close(held_boost_alpha[:, :2], torch.zeros(1, 2))
+    torch.testing.assert_close(held_boost_alpha[:, 2:], torch.full((1, 3), 0.3))
+
+  gate, held_alpha = model._advance_gate_state(
+    event_prob=torch.zeros(1, 1),
+    stair_prob=torch.ones(1, 1),
+    gate_state=gate,
+  )
+  assert gate[0, 3].item() == 0.0
+  torch.testing.assert_close(held_alpha[:, :2], torch.zeros(1, 2))
+  torch.testing.assert_close(held_alpha[:, 2:], torch.full((1, 3), 0.05))
 
 
 def test_stair_write_requires_stair_probability_to_enter_memory() -> None:
@@ -539,7 +629,7 @@ def test_onnx_wrapper_exposes_gated_slow_latent_state() -> None:
   assert outputs[8].shape == (1, 1)
   assert outputs[9].shape == (1, 2)
   assert outputs[10].shape == (1, 1)
-  assert torch.all((0.18 <= outputs[9][..., 0]) & (outputs[9][..., 0] <= 0.35))
+  assert torch.all((0.23 <= outputs[9][..., 0]) & (outputs[9][..., 0] <= 0.37))
   assert torch.all((0.088 <= outputs[9][..., 1]) & (outputs[9][..., 1] <= 0.25))
   assert torch.all((0.08 <= outputs[10]) & (outputs[10] <= 0.45))
 
@@ -554,9 +644,10 @@ def test_slow_latent_export_metadata() -> None:
   assert metadata["policy_slow_latent_state_dim"] == "2"
   assert metadata["policy_slow_latent_alpha_hold_state"] == "0.0"
   assert metadata["policy_slow_latent_alpha_hold_shape"] == "0.05"
+  assert metadata["policy_slow_latent_memory_event_shape_boost_steps"] == "15.0"
   assert metadata["policy_latent_obs_dim"] == "11"
-  assert metadata["policy_stair_tread_depth_min"] == "0.18"
-  assert metadata["policy_stair_tread_depth_max"] == "0.35"
+  assert metadata["policy_stair_tread_depth_min"] == "0.23"
+  assert metadata["policy_stair_tread_depth_max"] == "0.37"
   assert metadata["policy_stair_riser_height_min"] == "0.088"
   assert metadata["policy_stair_riser_height_max"] == "0.25"
   assert metadata["policy_stair_safe_stride_min"] == "0.1"

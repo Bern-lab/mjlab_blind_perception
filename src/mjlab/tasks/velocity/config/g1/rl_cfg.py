@@ -62,6 +62,8 @@ class G1SlowLatentPolicyModelParams:
   """Freeze rate for stable stair-state and timing channels."""
   alpha_hold_shape: float = 0.05
   """Hold update rate for geometry and safe-stride channels."""
+  memory_event_shape_boost_steps: int = 15
+  """Frames of shape-only rapid updating after a blocked swing in memory."""
   write_steps: int = 6
   """Number of steps spent in write mode after an event trigger."""
   stair_confirm_steps: int = 3
@@ -180,6 +182,7 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
   alpha_write: float = 0.8,
   alpha_hold_state: float = 0.0,
   alpha_hold_shape: float = 0.05,
+  memory_event_shape_boost_steps: int = 15,
   write_steps: int = 6,
   stair_confirm_steps: int = 3,
   min_stair_steps: int = 30,
@@ -226,6 +229,7 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
     alpha_write=alpha_write,
     alpha_hold_state=alpha_hold_state,
     alpha_hold_shape=alpha_hold_shape,
+    memory_event_shape_boost_steps=memory_event_shape_boost_steps,
     write_steps=write_steps,
     stair_confirm_steps=stair_confirm_steps,
     min_stair_steps=min_stair_steps,
@@ -403,6 +407,7 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
   alpha_write: float = 0.8,
   alpha_hold_state: float = 0.0,
   alpha_hold_shape: float = 0.05,
+  memory_event_shape_boost_steps: int = 15,
   write_steps: int = 6,
   stair_confirm_steps: int = 3,
   min_stair_steps: int = 30,
@@ -462,6 +467,7 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
     alpha_write = model_params.alpha_write
     alpha_hold_state = model_params.alpha_hold_state
     alpha_hold_shape = model_params.alpha_hold_shape
+    memory_event_shape_boost_steps = model_params.memory_event_shape_boost_steps
     write_steps = model_params.write_steps
     stair_confirm_steps = model_params.stair_confirm_steps
     min_stair_steps = model_params.min_stair_steps
@@ -510,6 +516,7 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
     alpha_write=alpha_write,
     alpha_hold_state=alpha_hold_state,
     alpha_hold_shape=alpha_hold_shape,
+    memory_event_shape_boost_steps=memory_event_shape_boost_steps,
     write_steps=write_steps,
     stair_confirm_steps=stair_confirm_steps,
     min_stair_steps=min_stair_steps,

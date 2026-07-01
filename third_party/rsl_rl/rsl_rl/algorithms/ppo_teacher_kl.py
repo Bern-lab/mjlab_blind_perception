@@ -523,15 +523,20 @@ class PPOTeacherKL(PPO):
     @staticmethod
     def _compute_safe_stride_loss(
         predictions: torch.Tensor,
-        labels: torch.Tensor,
+        lower_bounds: torch.Tensor,
+        upper_bounds: torch.Tensor,
         valid: torch.Tensor,
         importance: torch.Tensor,
         huber_delta: float,
     ) -> torch.Tensor:
-        """Regress valid targets while emphasizing recent interaction evidence."""
+        """Penalize predictions only when they leave the safe-stride interval."""
+        interval_target = torch.minimum(
+            torch.maximum(predictions, lower_bounds),
+            upper_bounds,
+        )
         error = functional.smooth_l1_loss(
             predictions,
-            labels,
+            interval_target,
             reduction="none",
             beta=huber_delta,
         )
@@ -971,12 +976,21 @@ class PPOTeacherKL(PPO):
                 safe_stride_importance_padded = labels[..., 8:9].float()
             else:
                 safe_stride_importance_padded = torch.ones_like(safe_stride_valid_padded)
+            if labels.shape[-1] >= 13:
+                safe_stride_upper_padded = labels[..., 9:10].float()
+            else:
+                safe_stride_upper_padded = safe_stride_labels_padded
         else:
             safe_stride_labels_padded = torch.zeros_like(event_labels_padded)
             safe_stride_valid_padded = torch.zeros_like(event_labels_padded)
             safe_stride_exact_padded = torch.zeros_like(event_labels_padded)
             safe_stride_importance_padded = torch.zeros_like(event_labels_padded)
-        if labels.shape[-1] >= 12:
+            safe_stride_upper_padded = torch.zeros_like(event_labels_padded)
+        if labels.shape[-1] >= 13:
+            collision_risk_now = labels[..., 10:11].float()
+            landing_touchdown_now = labels[..., 11:12].float()
+            landing_quality_now = labels[..., 12:13].float()
+        elif labels.shape[-1] >= 12:
             collision_risk_now = labels[..., 9:10].float()
             landing_touchdown_now = labels[..., 10:11].float()
             landing_quality_now = labels[..., 11:12].float()
@@ -1042,6 +1056,10 @@ class PPOTeacherKL(PPO):
                 torch.Tensor,
                 unpad_trajectories(safe_stride_importance_padded, batch.masks),
             )
+            safe_stride_upper = cast(
+                torch.Tensor,
+                unpad_trajectories(safe_stride_upper_padded, batch.masks),
+            )
         else:
             event_labels_raw = event_labels_raw_padded
             event_labels = event_labels_padded
@@ -1055,6 +1073,7 @@ class PPOTeacherKL(PPO):
             safe_stride_valid = safe_stride_valid_padded
             safe_stride_exact = safe_stride_exact_padded
             safe_stride_importance = safe_stride_importance_padded
+            safe_stride_upper = safe_stride_upper_padded
 
         total_loss = torch.zeros((), device=self.device)
         logs: dict[str, float] = {}
@@ -1338,6 +1357,7 @@ class PPOTeacherKL(PPO):
             safe_stride_loss_raw = self._compute_safe_stride_loss(
                 safe_stride_predictions,
                 safe_stride_labels,
+                safe_stride_upper,
                 safe_stride_valid,
                 safe_stride_importance,
                 safe_stride_delta,
@@ -1359,6 +1379,27 @@ class PPOTeacherKL(PPO):
             logs["slow_latent_safe_stride_loss"] = self._distributed_mean_scalar(safe_stride_loss).item()
             logs["slow_latent_safe_stride_valid_ratio"] = self._distributed_mean_scalar(safe_stride_valid.mean()).item()
             valid_count = safe_stride_valid.sum().clamp_min(1.0)
+            below_interval = safe_stride_predictions < safe_stride_labels
+            above_interval = safe_stride_predictions > safe_stride_upper
+            interval_distance = torch.relu(safe_stride_labels - safe_stride_predictions) + torch.relu(
+                safe_stride_predictions - safe_stride_upper
+            )
+            logs["slow_latent_safe_stride_interval_hit_ratio"] = self._distributed_mean_scalar(
+                (safe_stride_valid * (~below_interval & ~above_interval).to(safe_stride_valid.dtype)).sum()
+                / valid_count
+            ).item()
+            logs["slow_latent_safe_stride_below_interval_ratio"] = self._distributed_mean_scalar(
+                (safe_stride_valid * below_interval.to(safe_stride_valid.dtype)).sum() / valid_count
+            ).item()
+            logs["slow_latent_safe_stride_above_interval_ratio"] = self._distributed_mean_scalar(
+                (safe_stride_valid * above_interval.to(safe_stride_valid.dtype)).sum() / valid_count
+            ).item()
+            logs["slow_latent_safe_stride_interval_violation_mae"] = self._distributed_mean_scalar(
+                (interval_distance * safe_stride_valid).sum() / valid_count
+            ).item()
+            logs["slow_latent_safe_stride_interval_width_mean"] = self._distributed_mean_scalar(
+                ((safe_stride_upper - safe_stride_labels) * safe_stride_valid).sum() / valid_count
+            ).item()
             logs["slow_latent_safe_stride_importance_mean"] = self._distributed_mean_scalar(
                 (safe_stride_importance * safe_stride_valid).sum() / valid_count
             ).item()
@@ -1511,6 +1552,10 @@ class PPOTeacherKL(PPO):
         add_mean(
             "slow_latent_gate_memory_exit_ratio",
             diagnostics.get("gate_memory_exit"),
+        )
+        add_mean(
+            "slow_latent_gate_memory_event_shape_boost_ratio",
+            diagnostics.get("gate_memory_event_shape_boost"),
         )
         add_mean(
             "slow_latent_gate_release_ratio",

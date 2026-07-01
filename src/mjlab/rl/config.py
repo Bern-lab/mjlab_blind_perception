@@ -88,6 +88,8 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """Freeze rate for stable stair-state and timing memory."""
   alpha_hold_shape: float = 0.05
   """Hold update rate for continuously refreshed geometry/stride memory."""
+  memory_event_shape_boost_steps: int = 15
+  """Frames of shape-only rapid updating after an event detected in memory."""
   write_steps: int = 6
   """Number of steps to stay in STAIR_WRITE mode."""
   stair_confirm_steps: int = 3

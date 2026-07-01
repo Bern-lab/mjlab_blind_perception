@@ -460,20 +460,24 @@ def test_safe_stride_recent_interaction_evidence_increases_loss_weight() -> None
     actor.aux_stair_shape_coef = 0.0
     actor.aux_safe_stride_coef = 1.0
     actor.safe_stride_huber_delta = 0.05
-    actor.get_aux_outputs = lambda: {"safe_stride": torch.tensor([[0.20], [0.39], [0.20], [0.20]])}
+    actor.get_aux_outputs = lambda: {"safe_stride": torch.tensor([[0.20], [0.43], [0.20], [0.20]])}
     actor.get_slow_latent_diagnostics = lambda: {}
-    labels = torch.zeros(4, 12)
+    labels = torch.zeros(4, 13)
     labels[:2, 1] = 1.0
     labels[:2, 5] = 0.40
     labels[:2, 6] = 1.0
     labels[:2, 8] = torch.tensor([3.0, 1.0])
+    labels[:2, 9] = 0.45
     observations = TensorDict({"latent_labels": labels}, batch_size=[NUM_ENVS])
 
     loss, logs = alg._compute_slow_latent_aux_loss(
         RolloutStorage.Batch(observations=observations, hidden_states=(None, None))
     )
 
-    assert loss.item() == pytest.approx(0.1315)
+    assert loss.item() == pytest.approx(0.13125)
+    assert logs["slow_latent_safe_stride_interval_hit_ratio"] == pytest.approx(0.5)
+    assert logs["slow_latent_safe_stride_below_interval_ratio"] == pytest.approx(0.5)
+    assert logs["slow_latent_safe_stride_above_interval_ratio"] == 0.0
     assert logs["slow_latent_safe_stride_importance_mean"] == pytest.approx(2.0)
     assert logs["slow_latent_safe_stride_evidence_weighted_ratio"] == pytest.approx(0.5)
 

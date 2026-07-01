@@ -126,6 +126,9 @@ def get_recurrent_policy_metadata(policy: Any) -> dict[str, list | str | float]:
         ),
         "policy_slow_latent_alpha_hold_state": str(alpha_hold_state),
         "policy_slow_latent_alpha_hold_shape": str(alpha_hold_shape),
+        "policy_slow_latent_memory_event_shape_boost_steps": str(
+          getattr(policy, "memory_event_shape_boost_steps", "")
+        ),
         "policy_recurrent_state_step_rule": (
           (
             "feed h_out/c_out/z_out/gate_state_out back as next "

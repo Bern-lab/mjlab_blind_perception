@@ -587,19 +587,22 @@ def _semantic_shank_edge_candidates(
 
 
 class shank_front_edge_clearance_penalty:
-  """Penalize each shank front segment near its next semantic stair edge."""
+  """Penalize each shank collision capsule near its next semantic stair edge."""
 
   def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv) -> None:
-    self._front_start_local = torch.tensor(
-      cfg.params.get("front_start_local", (0.055, 0.0, -0.06)),
+    self._capsule_start_local = torch.tensor(
+      cfg.params.get("capsule_start_local", (0.01, 0.0, 0.0)),
       device=env.device,
       dtype=torch.float32,
     )
-    self._front_end_local = torch.tensor(
-      cfg.params.get("front_end_local", (0.040, 0.0, -0.24)),
+    self._capsule_end_local = torch.tensor(
+      cfg.params.get("capsule_end_local", (0.01, 0.0, -0.15)),
       device=env.device,
       dtype=torch.float32,
     )
+    self._capsule_radius = float(cfg.params.get("capsule_radius", 0.045))
+    if self._capsule_radius <= 0.0:
+      raise ValueError("capsule_radius must be positive.")
 
   def __call__(
     self,
@@ -640,8 +643,8 @@ class shank_front_edge_clearance_penalty:
         "shank_front_edge_clearance_penalty requires exactly two shank bodies."
       )
 
-    local_start = self._front_start_local.view(1, 1, 3).expand(env.num_envs, 2, 3)
-    local_end = self._front_end_local.view(1, 1, 3).expand(env.num_envs, 2, 3)
+    local_start = self._capsule_start_local.view(1, 1, 3).expand(env.num_envs, 2, 3)
+    local_end = self._capsule_end_local.view(1, 1, 3).expand(env.num_envs, 2, 3)
     shank_start_w = shank_pos_w + quat_apply(shank_quat_w, local_start)
     shank_end_w = shank_pos_w + quat_apply(shank_quat_w, local_end)
 
@@ -672,13 +675,17 @@ class shank_front_edge_clearance_penalty:
     edge_start_w = selected_edge[..., 0:3]
     edge_end_w = selected_edge[..., 3:6]
 
-    distance, closest_shank_t, closest_edge_u = _segment_to_segment_distance(
+    centerline_distance, closest_shank_t, closest_edge_u = _segment_to_segment_distance(
       shank_start_w,
       shank_end_w,
       edge_start_w,
       edge_end_w,
     )
-    violation = torch.relu((clearance_margin - distance) / clearance_margin)
+    surface_distance = torch.clamp_min(
+      centerline_distance - self._capsule_radius,
+      0.0,
+    )
+    violation = torch.relu((clearance_margin - surface_distance) / clearance_margin)
     violation = violation * unique_edge.float()
     per_leg_penalty = violation.square()
     penalty = per_leg_penalty.mean(dim=-1)
@@ -690,8 +697,8 @@ class shank_front_edge_clearance_penalty:
     env_min_distance = torch.min(
       torch.where(
         unique_edge,
-        distance,
-        torch.full_like(distance, torch.inf),
+        surface_distance,
+        torch.full_like(surface_distance, torch.inf),
       ),
       dim=-1,
     ).values
@@ -703,13 +710,13 @@ class shank_front_edge_clearance_penalty:
       / active_env_count
     )
     log["Metrics/shank_front_edge_violation_ratio"] = (
-      (distance < clearance_margin) & unique_edge
+      (surface_distance < clearance_margin) & unique_edge
     ).float().sum() / valid_count
     for leg_index, leg_name in enumerate(("left", "right")):
       leg_valid = unique_edge[:, leg_index]
       leg_count = leg_valid.float().sum().clamp_min(1.0)
       log[f"Metrics/{leg_name}_shank_front_edge_violation_ratio"] = (
-        (distance[:, leg_index] < clearance_margin) & leg_valid
+        (surface_distance[:, leg_index] < clearance_margin) & leg_valid
       ).float().sum() / leg_count
     log["Metrics/shank_front_edge_missing_ratio"] = (
       foot_layers_valid.bool() & (candidate_count == 0)

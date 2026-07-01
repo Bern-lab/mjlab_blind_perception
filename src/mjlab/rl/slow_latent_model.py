@@ -17,8 +17,8 @@ _GATE_STATE_DIM = 5
 _MODE_NORMAL = 0.0
 _MODE_STAIR_WRITE = 1.0
 _MODE_STAIR_MEMORY = 2.0
-_TREAD_DEPTH_MIN_M = 0.18
-_TREAD_DEPTH_MAX_M = 0.35
+_TREAD_DEPTH_MIN_M = 0.23
+_TREAD_DEPTH_MAX_M = 0.37
 _RISER_HEIGHT_MIN_M = 0.088
 _RISER_HEIGHT_MAX_M = 0.25
 GatedHiddenState = torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor] | None
@@ -59,6 +59,7 @@ class LSTMSlowLatentMLPModel(MLPModel):
     alpha_write: float = 0.8,
     alpha_hold_state: float = 0.0,
     alpha_hold_shape: float = 0.05,
+    memory_event_shape_boost_steps: int = 15,
     alpha_hold: float | None = None,
     write_steps: int = 6,
     stair_confirm_steps: int = 3,
@@ -103,6 +104,8 @@ class LSTMSlowLatentMLPModel(MLPModel):
     self.shape_latent_dim = self.z_dim - self.state_latent_dim
     self.latent_dim = self.z_dim
     self.slow_latent_dim = self.z_dim
+    self.zero_shape_latent_for_actor = False
+    self.freeze_shape_latent_at_stair_entry = False
     self.latent_hidden_dim = int(latent_hidden_dim)
     self.hidden_size = self.latent_hidden_dim
     self.num_layers = 1
@@ -212,6 +215,9 @@ class LSTMSlowLatentMLPModel(MLPModel):
         "alpha_hold_shape must be at least alpha_hold_state so geometry can "
         "keep updating while stair state remains stable."
       )
+    self.memory_event_shape_boost_steps = float(memory_event_shape_boost_steps)
+    if self.memory_event_shape_boost_steps < 1.0:
+      raise ValueError("memory_event_shape_boost_steps must be at least 1.")
     self.write_steps = float(write_steps)
     self.stair_confirm_steps = float(stair_confirm_steps)
     self.min_stair_steps = float(min_stair_steps)
@@ -284,6 +290,8 @@ class LSTMSlowLatentMLPModel(MLPModel):
     self._hidden_state: tuple[torch.Tensor, torch.Tensor] | None = None
     self._z_memory: torch.Tensor | None = None
     self._gate_state: torch.Tensor | None = None
+    self._pre_stair_shape_actor_memory: torch.Tensor | None = None
+    self._pre_stair_shape_actor_memory_valid: torch.Tensor | None = None
     self._aux_event_logits: torch.Tensor | None = None
     self._aux_stair_logits: torch.Tensor | None = None
     self._aux_future_collision_risk_logits: torch.Tensor | None = None
@@ -306,6 +314,59 @@ class LSTMSlowLatentMLPModel(MLPModel):
 
   def _shape_memory(self, z: torch.Tensor) -> torch.Tensor:
     return z[..., self.state_latent_dim :]
+
+  def _actor_memory(self, z: torch.Tensor) -> torch.Tensor:
+    """Return actor conditioning with an optional play-only shape ablation."""
+    if self.zero_shape_latent_for_actor:
+      return torch.cat(
+        [
+          z[..., : self.state_latent_dim],
+          torch.zeros_like(z[..., self.state_latent_dim :]),
+        ],
+        dim=-1,
+      )
+    if not self.freeze_shape_latent_at_stair_entry:
+      return z
+    if z.dim() != 2 or self._gate_state is None:
+      raise RuntimeError(
+        "Stair-entry shape freezing is supported only for online inference."
+      )
+
+    shape_memory = self._shape_memory(z)
+    if (
+      self._pre_stair_shape_actor_memory is None
+      or self._pre_stair_shape_actor_memory.shape != shape_memory.shape
+    ):
+      self._pre_stair_shape_actor_memory = shape_memory.detach().clone()
+      self._pre_stair_shape_actor_memory_valid = torch.zeros(
+        shape_memory.shape[0],
+        device=shape_memory.device,
+        dtype=torch.bool,
+      )
+    assert self._pre_stair_shape_actor_memory_valid is not None
+
+    normal_mode = self._gate_state[:, 0] == _MODE_NORMAL
+    self._pre_stair_shape_actor_memory.copy_(
+      torch.where(
+        normal_mode[:, None],
+        shape_memory.detach(),
+        self._pre_stair_shape_actor_memory,
+      )
+    )
+    self._pre_stair_shape_actor_memory_valid.logical_or_(normal_mode)
+    use_snapshot = (~normal_mode) & self._pre_stair_shape_actor_memory_valid
+    actor_shape_memory = torch.where(
+      use_snapshot[:, None],
+      self._pre_stair_shape_actor_memory,
+      shape_memory,
+    )
+    return torch.cat(
+      [
+        z[..., : self.state_latent_dim],
+        actor_shape_memory,
+      ],
+      dim=-1,
+    )
 
   def _decode_stair_shape(self, shape_memory: torch.Tensor) -> torch.Tensor:
     shape01 = torch.sigmoid(self.stair_shape_head(shape_memory))
@@ -404,6 +465,7 @@ class LSTMSlowLatentMLPModel(MLPModel):
     stair_prob = stair_prob.squeeze(-1)
 
     mode = gate_state[:, 0]
+    was_in_memory = mode == _MODE_STAIR_MEMORY
     stair_timer = gate_state[:, 1]
     evidence_timer = gate_state[:, 2]
     write_timer = gate_state[:, 3]
@@ -460,9 +522,21 @@ class LSTMSlowLatentMLPModel(MLPModel):
       torch.zeros_like(evidence_timer),
       torch.where(abort_write, -torch.ones_like(evidence_timer), evidence_timer),
     )
-    write_timer = torch.where(abort_write, torch.zeros_like(write_timer), write_timer)
+    write_timer = torch.where(
+      confirm_memory | abort_write,
+      torch.zeros_like(write_timer),
+      write_timer,
+    )
 
     in_memory = mode == _MODE_STAIR_MEMORY
+    memory_event = was_in_memory & in_memory & (event_prob > self.event_on_threshold)
+    memory_boost_timer = torch.where(
+      memory_event,
+      torch.full_like(write_timer, self.memory_event_shape_boost_steps),
+      torch.clamp(write_timer - 1.0, min=0.0),
+    )
+    write_timer = torch.where(in_memory, memory_boost_timer, write_timer)
+    memory_shape_boost = in_memory & (write_timer > 0.0)
     stair_timer = torch.where(in_memory, stair_timer + 1.0, stair_timer)
     stair_off = stair_prob < self.stair_off_threshold
     evidence_timer = torch.where(
@@ -504,6 +578,24 @@ class LSTMSlowLatentMLPModel(MLPModel):
     )
     hold_memory = (mode == _MODE_STAIR_MEMORY) & ~write_active_for_update
     alpha = torch.where(hold_memory[:, None], hold_alpha, alpha)
+    boosted_hold_alpha = torch.cat(
+      [
+        torch.full_like(
+          alpha[:, : self.state_latent_dim],
+          self.alpha_hold_state,
+        ),
+        torch.full_like(
+          alpha[:, self.state_latent_dim :],
+          self.alpha_fast,
+        ),
+      ],
+      dim=-1,
+    )
+    alpha = torch.where(
+      (hold_memory & memory_shape_boost)[:, None],
+      boosted_hold_alpha,
+      alpha,
+    )
     release_active = (mode == _MODE_NORMAL) & (write_timer < 0.0) & (cooldown > 0.0)
     release_progress = torch.clamp(
       (self.cooldown_steps - cooldown) / max(self.cooldown_steps, 1.0),
@@ -781,6 +873,14 @@ class LSTMSlowLatentMLPModel(MLPModel):
       "gate_write_confirm": confirm_seq.detach(),
       "gate_write_abort": abort_seq.detach(),
       "gate_memory_exit": exit_seq.detach(),
+      "gate_memory_event_shape_boost": (
+        (mode_seq == _MODE_STAIR_MEMORY)
+        & (
+          alpha_seq[..., self.state_latent_dim :]
+          .mean(dim=-1, keepdim=True)
+          .isclose(alpha_seq.new_tensor(self.alpha_fast))
+        )
+      ).detach(),
       "alpha": alpha_seq.detach(),
       "alpha_state": alpha_seq[..., : self.state_latent_dim]
       .detach()
@@ -804,7 +904,10 @@ class LSTMSlowLatentMLPModel(MLPModel):
     actor_obs_norm, z_memory, _h_out, _c_out = self._run_latent_path(
       actor_obs_norm, latent_obs, masks, hidden_state
     )
-    actor_input = torch.cat([actor_obs_norm, z_memory], dim=-1)
+    actor_input = torch.cat(
+      [actor_obs_norm, self._actor_memory(z_memory)],
+      dim=-1,
+    )
     mlp_output = self.mlp(actor_input)
     if self.distribution is not None:
       if stochastic_output:
@@ -831,6 +934,8 @@ class LSTMSlowLatentMLPModel(MLPModel):
       self._hidden_state = None
       self._z_memory = None
       self._gate_state = None
+      self._pre_stair_shape_actor_memory = None
+      self._pre_stair_shape_actor_memory_valid = None
       self._slow_latent_diagnostics = {}
       return
     if self._hidden_state is None or self._z_memory is None or self._gate_state is None:
@@ -843,12 +948,20 @@ class LSTMSlowLatentMLPModel(MLPModel):
     c[:, done_mask, :] = 0.0
     self._z_memory[done_mask] = 0.0
     self._gate_state[done_mask] = 0.0
+    if self._pre_stair_shape_actor_memory is not None:
+      self._pre_stair_shape_actor_memory[done_mask] = 0.0
+    if self._pre_stair_shape_actor_memory_valid is not None:
+      self._pre_stair_shape_actor_memory_valid[done_mask] = False
 
   def reset_slow_latent(self) -> None:
     if self._z_memory is not None:
       self._z_memory.zero_()
     if self._gate_state is not None:
       self._gate_state.zero_()
+    if self._pre_stair_shape_actor_memory is not None:
+      self._pre_stair_shape_actor_memory.zero_()
+    if self._pre_stair_shape_actor_memory_valid is not None:
+      self._pre_stair_shape_actor_memory_valid.zero_()
 
   def detach_hidden_state(self, dones: torch.Tensor | None = None) -> None:
     if self._hidden_state is not None:
@@ -857,6 +970,8 @@ class LSTMSlowLatentMLPModel(MLPModel):
       self._z_memory = self._z_memory.detach()
     if self._gate_state is not None:
       self._gate_state = self._gate_state.detach()
+    if self._pre_stair_shape_actor_memory is not None:
+      self._pre_stair_shape_actor_memory = self._pre_stair_shape_actor_memory.detach()
     if dones is not None:
       self.reset(dones)
 
@@ -961,6 +1076,7 @@ class _OnnxStairLatentModel(nn.Module):
     self.alpha_write = model.alpha_write
     self.alpha_hold_state = model.alpha_hold_state
     self.alpha_hold_shape = model.alpha_hold_shape
+    self.memory_event_shape_boost_steps = model.memory_event_shape_boost_steps
     self.write_steps = model.write_steps
     self.stair_confirm_steps = model.stair_confirm_steps
     self.min_stair_steps = model.min_stair_steps
@@ -1018,6 +1134,7 @@ class _OnnxStairLatentModel(nn.Module):
     gate_state: torch.Tensor,
   ) -> tuple[torch.Tensor, torch.Tensor]:
     mode = gate_state[:, 0]
+    was_in_memory = mode == _MODE_STAIR_MEMORY
     stair_timer = gate_state[:, 1]
     evidence_timer = gate_state[:, 2]
     write_timer = gate_state[:, 3]
@@ -1076,9 +1193,21 @@ class _OnnxStairLatentModel(nn.Module):
       torch.zeros_like(evidence_timer),
       torch.where(abort_write, -torch.ones_like(evidence_timer), evidence_timer),
     )
-    write_timer = torch.where(abort_write, torch.zeros_like(write_timer), write_timer)
+    write_timer = torch.where(
+      confirm_memory | abort_write,
+      torch.zeros_like(write_timer),
+      write_timer,
+    )
 
     in_memory = mode == _MODE_STAIR_MEMORY
+    memory_event = was_in_memory & in_memory & (event_prob > self.event_on_threshold)
+    memory_boost_timer = torch.where(
+      memory_event,
+      torch.full_like(write_timer, self.memory_event_shape_boost_steps),
+      torch.clamp(write_timer - 1.0, min=0.0),
+    )
+    write_timer = torch.where(in_memory, memory_boost_timer, write_timer)
+    memory_shape_boost = in_memory & (write_timer > 0.0)
     stair_timer = torch.where(in_memory, stair_timer + 1.0, stair_timer)
     stair_off = stair_prob < self.stair_off_threshold
     evidence_timer = torch.where(
@@ -1120,6 +1249,24 @@ class _OnnxStairLatentModel(nn.Module):
     )
     hold_memory = (mode == _MODE_STAIR_MEMORY) & ~write_active_for_update
     alpha = torch.where(hold_memory[:, None], hold_alpha, alpha)
+    boosted_hold_alpha = torch.cat(
+      [
+        torch.full_like(
+          alpha[:, : self.state_latent_dim],
+          self.alpha_hold_state,
+        ),
+        torch.full_like(
+          alpha[:, self.state_latent_dim :],
+          self.alpha_fast,
+        ),
+      ],
+      dim=-1,
+    )
+    alpha = torch.where(
+      (hold_memory & memory_shape_boost)[:, None],
+      boosted_hold_alpha,
+      alpha,
+    )
     release_active = (mode == _MODE_NORMAL) & (write_timer < 0.0) & (cooldown > 0.0)
     release_progress = torch.clamp(
       (self.cooldown_steps - cooldown) / max(self.cooldown_steps, 1.0),

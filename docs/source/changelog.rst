@@ -63,34 +63,45 @@ Changed
   bound expanding from 0.8 to 1.0 m/s at the existing curriculum transition.
   Standing environments remain at zero speed. Play evaluation now samples
   0.6--0.9 m/s instead of 0.3--0.9 m/s.
-- Added a 5 cm per-leg shank-front clearance penalty with weight ``-2.0`` for
-  slow-latent stairs.
-  It compares a collision-surface-aligned shank segment with the next
-  sequence-local tread edge and requires matching layer, ascent direction,
-  and lateral coverage before applying the penalty.
+- Added a 5 cm per-leg shank clearance penalty with weight ``-2.0`` for
+  slow-latent stairs. It measures clearance from the actual G1 shank collision
+  capsule, including its knee-side cap, to the next sequence-local tread edge.
+  Matching layer, ascent direction, and lateral coverage remain required.
 - Slow-latent SafeStride supervision now alternates its training-only target
   foot after every completed swing attempt, regardless of landing quality.
   The reached layer advances only when that attempt contacts the expected
   tread, so partial tread contact advances while riser hits and misses keep
-  the same expected layer for the opposite foot. Every valid privileged
-  geometry target uses symmetric Huber regression; probe exactness remains
-  diagnostic evidence rather than changing the loss objective. Higher-layer
+  the same expected layer for the opposite foot. SafeStride supervision uses
+  the interval of translations that keeps every sole proxy point inside the
+  requested tread, with zero loss anywhere inside that interval. Higher-layer
   skips are penalized and no longer receive the safe-landing reward. Shape
   loss remains disabled, SafeStride decodes over 0.10--0.55 m, and attempt,
-  exactness, skip, and clamp diagnostics are reported. Targets beyond the
-  0.80 m single-step tracking limit are excluded from supervision and reset
+  interval, exactness, skip, and clamp diagnostics are reported. Targets beyond
+  the 0.80 m single-step tracking limit are excluded from supervision and reset
   stale stair sequences instead of being clamped into the training set.
-  Per-leg shank clearance layer tracking now accepts any positive tread
-  overlap, while the 60% support threshold remains limited to landing quality.
+  Any positive tread overlap still advances alternating foot bookkeeping, but
+  only complete sole containment counts as full support.
 - Slow-latent SafeStride now supervises the opposite-foot recovery stride to
   layer 1 immediately after a stair-entry collision. Deployable abrupt or
   persistent blocking at a soft expected-riser contact no longer requires the
   collision-penalty force threshold to count as training evidence. Entry-riser
   and expected-riser evidence receive 3x loss importance, while rear-partial
-  tread contacts receive 2x importance, each for five frames before returning
-  to ordinary sequence supervision.
-- Slow-latent stair depth predictions now cover 0.18--0.35 m. Every curriculum
-  level contains eight total fixed tread-depth variants spanning 0.20--0.32 m,
+  tread contacts receive 2x importance. Evidence now remains emphasized for
+  15 frames before returning to ordinary sequence supervision.
+- Expected-riser events during stair memory now temporarily update only the
+  shape/stride latent channels at the normal fast rate for 15 frames. Stair-state
+  channels remain frozen, and the gate does not re-enter full WRITE.
+- Added a default-off ``--zero-shape-latent`` play option that zeros only the
+  shape-memory copy passed to the actor. Internal recurrent memory and
+  auxiliary-head predictions continue running unchanged for controlled
+  inference ablations.
+- Added a less destructive, default-off
+  ``--freeze-shape-latent-at-stair-entry`` play ablation. It preserves normal
+  walking conditioning, snapshots shape memory immediately before WRITE, and
+  feeds that snapshot only to the actor throughout WRITE/MEMORY while internal
+  recurrent memory and auxiliary heads continue updating.
+- Slow-latent stair depth predictions now cover 0.23--0.37 m. Every curriculum
+  level contains eight total fixed tread-depth variants spanning 0.25--0.35 m,
   split between high-stair and inverted-high-stair terrain by their configured
   spawning proportions.
 - ShapeHead now computes its masked Huber loss after independently normalizing

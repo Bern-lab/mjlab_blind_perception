@@ -294,6 +294,8 @@ def _assert_eight_stair_depth_variants(terrain_generator) -> None:
   assert [stair_variants[index].step_width for index in range(8)] == pytest.approx(
     BLIND_HIGH_STAIRS_TREAD_DEPTHS
   )
+  assert BLIND_HIGH_STAIRS_TREAD_DEPTHS[0] == pytest.approx(0.25)
+  assert BLIND_HIGH_STAIRS_TREAD_DEPTHS[-1] == pytest.approx(0.35)
   assert all(cfg.step_width_range is None for cfg in stair_variants.values())
   assert sum(cfg.proportion for cfg in upward) == pytest.approx(0.0)
   assert sum(cfg.proportion for cfg in inverted) == pytest.approx(0.85)
@@ -372,15 +374,15 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert toe_reward_params["stair_heading_cos"] == 0.70
   assert toe_reward_params["stair_touchdown_height_tolerance"] == 0.08
   assert toe_reward_params["stair_touchdown_lateral_margin"] == 0.03
-  assert toe_reward_params["stair_safe_support_fraction"] == 0.60
   assert toe_reward_params["stair_min_safe_stride"] == 0.10
   assert toe_reward_params["stair_max_safe_stride"] == 0.55
   assert toe_reward_params["stair_max_tracking_stride"] == 0.80
   assert toe_reward_params["stair_touchdown_lip_clearance"] == 0.02
   assert toe_reward_params["stair_touchdown_lip_height_band"] == 0.06
+  assert toe_reward_params["safe_stride_containment_margin"] == 0.003
   assert toe_reward_params["stair_entry_evidence_time"] == 0.80
   assert toe_reward_params["stair_attempt_period"] == 0.60
-  assert toe_reward_params["safe_stride_evidence_window_steps"] == 5
+  assert toe_reward_params["safe_stride_evidence_window_steps"] == 15
   assert toe_reward_params["safe_stride_rear_partial_weight"] == 2.0
   assert toe_reward_params["safe_stride_riser_weight"] == 3.0
   assert toe_reward_params["collision_risk_margin"] == 0.06
@@ -393,8 +395,9 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert shank_params["min_riser_height"] == 0.04
   assert shank_params["direction_cos_threshold"] == 0.85
   assert shank_params["lateral_margin"] == 0.05
-  assert shank_params["front_start_local"] == (0.055, 0.0, -0.06)
-  assert shank_params["front_end_local"] == (0.040, 0.0, -0.24)
+  assert shank_params["capsule_start_local"] == (0.01, 0.0, 0.0)
+  assert shank_params["capsule_end_local"] == (0.01, 0.0, -0.15)
+  assert shank_params["capsule_radius"] == 0.045
   assert shank_params["asset_cfg"].body_names == (
     "left_knee_link",
     "right_knee_link",
@@ -437,6 +440,7 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert actor_cfg.mlp_encoder_dims == (128, 128)
   assert actor_cfg.alpha_hold_state == 0.0
   assert actor_cfg.alpha_hold_shape == 0.05
+  assert actor_cfg.memory_event_shape_boost_steps == 15
   assert actor_cfg.write_steps == 6
   assert actor_cfg.stair_confirm_steps == 3
   assert actor_cfg.event_on_threshold == 0.60

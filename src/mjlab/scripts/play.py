@@ -6,7 +6,7 @@ import time as _time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, cast
 
 import torch
 import tyro
@@ -51,6 +51,10 @@ class PlayConfig:
   """Disable all termination conditions (useful for viewing motions with dummy agents)."""
   show_step_danger_zones: bool = False
   """Show non-colliding stair lip/riser danger zones when the terrain supports them."""
+  zero_shape_latent: bool = False
+  """Zero only the shape-latent actor input during play for an ablation."""
+  freeze_shape_latent_at_stair_entry: bool = False
+  """Freeze actor shape conditioning at its pre-WRITE value during stairs."""
 
   # Internal flag used by demo script.
   _demo_mode: tyro.conf.Suppress[bool] = False
@@ -63,6 +67,11 @@ def run_play(task_id: str, cfg: PlayConfig):
 
   env_cfg = load_env_cfg(task_id, play=True)
   agent_cfg = load_rl_cfg(task_id)
+  if cfg.zero_shape_latent and cfg.freeze_shape_latent_at_stair_entry:
+    raise ValueError(
+      "--zero-shape-latent and --freeze-shape-latent-at-stair-entry "
+      "cannot be enabled together."
+    )
 
   if cfg.show_step_danger_zones:
     terrain_cfg = (
@@ -225,6 +234,21 @@ def run_play(task_id: str, cfg: PlayConfig):
       str(resume_path), load_cfg={"actor": True}, strict=True, map_location=device
     )
     policy = runner.get_inference_policy(device=device)
+    if cfg.zero_shape_latent:
+      if not hasattr(policy, "state_latent_dim"):
+        raise ValueError(
+          "--zero-shape-latent requires a gated slow-latent policy checkpoint."
+        )
+      cast(Any, policy).zero_shape_latent_for_actor = True
+      print("[INFO]: Shape-latent actor input ablation enabled")
+    if cfg.freeze_shape_latent_at_stair_entry:
+      if not hasattr(policy, "state_latent_dim"):
+        raise ValueError(
+          "--freeze-shape-latent-at-stair-entry requires a gated "
+          "slow-latent policy checkpoint."
+        )
+      cast(Any, policy).freeze_shape_latent_at_stair_entry = True
+      print("[INFO]: Pre-stair shape-latent snapshot ablation enabled")
     reset_policy_state(policy)
 
   # Build checkpoint manager for hot-swapping checkpoints in the viewer.
@@ -240,6 +264,10 @@ def run_play(task_id: str, cfg: PlayConfig):
         map_location=device,
       )
       policy = _ckpt_runner.get_inference_policy(device=device)
+      if cfg.zero_shape_latent:
+        cast(Any, policy).zero_shape_latent_for_actor = True
+      if cfg.freeze_shape_latent_at_stair_entry:
+        cast(Any, policy).freeze_shape_latent_at_stair_entry = True
       reset_policy_state(policy)
       return policy
 

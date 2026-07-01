@@ -183,28 +183,29 @@ class G1SlowLatentRewardParams:
   toe_stair_heading_cos: float = 0.70
   toe_stair_touchdown_height_tolerance: float = 0.08
   toe_stair_touchdown_lateral_margin: float = 0.03
-  toe_stair_safe_support_fraction: float = 0.60
   toe_stair_min_safe_stride: float = 0.10
   toe_stair_max_safe_stride: float = 0.55
   toe_stair_max_tracking_stride: float = 0.80
   toe_stair_touchdown_lip_clearance: float = 0.02
   toe_stair_touchdown_lip_height_band: float = 0.06
+  toe_safe_stride_containment_margin: float = 0.003
   stair_entry_evidence_time: float = 0.80
-  safe_stride_evidence_window_steps: int = 5
+  safe_stride_evidence_window_steps: int = 15
   safe_stride_rear_partial_weight: float = 2.0
   safe_stride_riser_weight: float = 3.0
   toe_collision_risk_margin: float = 0.06
   toe_stair_command_threshold: float = 0.05
   stair_skip_layer_weight: float = -1.0
 
-  # Per-leg shank-front clearance from the next semantic stair edge.
+  # Per-leg shank collision-capsule clearance from the next semantic stair edge.
   shank_edge_weight: float = -2.0
   shank_edge_clearance_margin: float = 0.05
   shank_edge_min_riser_height: float = 0.04
   shank_edge_direction_cos_threshold: float = 0.85
   shank_edge_lateral_margin: float = 0.05
-  shank_front_start_local: tuple[float, float, float] = (0.055, 0.0, -0.06)
-  shank_front_end_local: tuple[float, float, float] = (0.040, 0.0, -0.24)
+  shank_capsule_start_local: tuple[float, float, float] = (0.01, 0.0, 0.0)
+  shank_capsule_end_local: tuple[float, float, float] = (0.01, 0.0, -0.15)
+  shank_capsule_radius: float = 0.045
 
   # Following-step privileged-geometry landing shaping.
   stair_tread_landing_weight: float = 0.5
@@ -346,12 +347,12 @@ def configure_g1_step_danger_rewards(
       "stair_heading_cos": params.toe_stair_heading_cos,
       "stair_touchdown_height_tolerance": (params.toe_stair_touchdown_height_tolerance),
       "stair_touchdown_lateral_margin": (params.toe_stair_touchdown_lateral_margin),
-      "stair_safe_support_fraction": (params.toe_stair_safe_support_fraction),
       "stair_min_safe_stride": params.toe_stair_min_safe_stride,
       "stair_max_safe_stride": params.toe_stair_max_safe_stride,
       "stair_max_tracking_stride": params.toe_stair_max_tracking_stride,
       "stair_touchdown_lip_clearance": (params.toe_stair_touchdown_lip_clearance),
       "stair_touchdown_lip_height_band": (params.toe_stair_touchdown_lip_height_band),
+      "safe_stride_containment_margin": (params.toe_safe_stride_containment_margin),
       "stair_entry_evidence_time": params.stair_entry_evidence_time,
       "stair_attempt_period": params.foot_gait_period,
       "safe_stride_evidence_window_steps": (params.safe_stride_evidence_window_steps),
@@ -371,8 +372,9 @@ def configure_g1_step_danger_rewards(
       "min_riser_height": params.shank_edge_min_riser_height,
       "direction_cos_threshold": params.shank_edge_direction_cos_threshold,
       "lateral_margin": params.shank_edge_lateral_margin,
-      "front_start_local": params.shank_front_start_local,
-      "front_end_local": params.shank_front_end_local,
+      "capsule_start_local": params.shank_capsule_start_local,
+      "capsule_end_local": params.shank_capsule_end_local,
+      "capsule_radius": params.shank_capsule_radius,
       "asset_cfg": shank_asset_cfg(),
     },
   )
