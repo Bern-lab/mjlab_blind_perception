@@ -134,6 +134,8 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """Huber transition point for stair geometry labels normalized to [0, 1]."""
   safe_stride_huber_delta: float = 0.05
   """Huber transition point for safe-stride labels, in meters."""
+  safe_stride_width_loss_coef: float = 1.0
+  """Weight for independently normalized SafeStride width regression."""
   safe_stride_min: float = 0.10
   """Minimum decoded safe stride, in meters."""
   safe_stride_max: float = 0.55

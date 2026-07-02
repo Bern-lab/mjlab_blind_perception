@@ -25,7 +25,7 @@ _SEMANTIC_STATE_DIM = 8
 _SEMANTIC_SHAPE_DIM = 8
 _SEMANTIC_DIM = _SEMANTIC_STATE_DIM + _SEMANTIC_SHAPE_DIM
 _LEGACY_SAFE_STRIDE_WIDTH_LOGIT = -6.0
-_DYNAMIC_SAFE_STRIDE_WIDTH_LOGIT = -0.5
+_DYNAMIC_SAFE_STRIDE_WIDTH_LOGIT = -1.4
 GatedHiddenState = torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor] | None
 
 
@@ -86,6 +86,7 @@ class LSTMSlowLatentMLPModel(MLPModel):
     aux_safe_stride_coef: float = 0.0,
     stair_shape_huber_delta: float = 0.05,
     safe_stride_huber_delta: float = 0.05,
+    safe_stride_width_loss_coef: float = 1.0,
     safe_stride_min: float = 0.10,
     safe_stride_max: float = 0.55,
     structured_safe_stride_enabled: bool = False,
@@ -283,6 +284,9 @@ class LSTMSlowLatentMLPModel(MLPModel):
     self.aux_safe_stride_coef = float(aux_safe_stride_coef)
     self.stair_shape_huber_delta = float(stair_shape_huber_delta)
     self.safe_stride_huber_delta = float(safe_stride_huber_delta)
+    self.safe_stride_width_loss_coef = float(safe_stride_width_loss_coef)
+    if self.safe_stride_width_loss_coef < 0.0:
+      raise ValueError("safe_stride_width_loss_coef must be non-negative.")
     self.tread_depth_min = _TREAD_DEPTH_MIN_M
     self.tread_depth_max = _TREAD_DEPTH_MAX_M
     self.riser_height_min = _RISER_HEIGHT_MIN_M
@@ -432,10 +436,11 @@ class LSTMSlowLatentMLPModel(MLPModel):
       if self.safe_stride_width_head is None or shape_memory is None:
         raise RuntimeError("Dynamic SafeStride decoding requires slow shape memory.")
       width_logit = self.safe_stride_width_head(shape_memory)
+      width = torch.sigmoid(width_logit) * (self.safe_stride_max - self.safe_stride_min)
     else:
       width_logit = stride_raw[..., 1:2]
-    width_fraction = torch.sigmoid(width_logit)
-    upper = lower + width_fraction * (self.safe_stride_max - lower)
+      width = torch.sigmoid(width_logit) * (self.safe_stride_max - lower)
+    upper = lower + width
     return torch.cat([lower, upper], dim=-1)
 
   def _decode_safe_stride(self, shape_memory: torch.Tensor) -> torch.Tensor:
@@ -1479,10 +1484,11 @@ class _OnnxStairLatentModel(nn.Module):
     if self.dynamic_safe_stride_enabled:
       assert self.safe_stride_width_head is not None
       width_logit = self.safe_stride_width_head(shape_memory)
+      width = torch.sigmoid(width_logit) * (self.safe_stride_max - self.safe_stride_min)
     else:
       width_logit = stride_raw[..., 1:2]
-    width_fraction = torch.sigmoid(width_logit)
-    upper = lower + width_fraction * (self.safe_stride_max - lower)
+      width = torch.sigmoid(width_logit) * (self.safe_stride_max - lower)
+    upper = lower + width
     return 0.5 * (lower + upper)
 
   def _stair_logit(self, h_t: torch.Tensor) -> torch.Tensor:

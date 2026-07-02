@@ -371,8 +371,8 @@ def test_safe_stride_aux_loss_uses_seventh_label_as_valid_mask() -> None:
     assert loss.item() == pytest.approx(0.01875)
 
 
-def test_safe_stride_interval_head_regresses_both_ordered_boundaries() -> None:
-    """Structured SafeStride supervision should train lower and upper bounds."""
+def test_safe_stride_interval_head_regresses_lower_and_width_independently() -> None:
+    """Structured supervision should normalize lower and width separately."""
     alg = _build_teacher_kl({"enabled": False})
     actor = cast(Any, alg.actor)
     actor.aux_event_coef = 0.0
@@ -406,14 +406,16 @@ def test_safe_stride_interval_head_regresses_both_ordered_boundaries() -> None:
         RolloutStorage.Batch(observations=observations, hidden_states=(None, None))
     )
 
-    assert logs["slow_latent_safe_stride_huber"] == pytest.approx(0.0125)
+    assert logs["slow_latent_safe_stride_huber"] == pytest.approx(0.0375)
+    assert logs["slow_latent_safe_stride_lower_huber"] == pytest.approx(0.0125)
+    assert logs["slow_latent_safe_stride_width_huber"] == pytest.approx(0.025)
     assert logs["slow_latent_safe_stride_lower_boundary_mae"] == pytest.approx(0.025)
     assert logs["slow_latent_safe_stride_upper_boundary_mae"] == pytest.approx(0.025)
     assert logs["slow_latent_safe_stride_width_mae"] == pytest.approx(0.05)
     assert logs["slow_latent_safe_stride_center_in_target_interval_ratio"] == 1.0
     assert logs["slow_latent_safe_stride_interval_overlap_ratio"] == 1.0
     assert logs["slow_latent_safe_stride_interval_target_coverage_mean"] == pytest.approx(0.75)
-    assert loss.item() == pytest.approx(0.00625)
+    assert loss.item() == pytest.approx(0.01875)
 
 
 def test_safe_stride_interval_head_masks_unobservable_upper_bound() -> None:
@@ -425,7 +427,7 @@ def test_safe_stride_interval_head_masks_unobservable_upper_bound() -> None:
     interval_valid = torch.tensor([[0.0], [1.0]])
     importance = torch.ones(2, 1)
 
-    loss = PPOTeacherKL._compute_safe_stride_interval_loss(
+    loss, lower_loss, width_loss = PPOTeacherKL._compute_safe_stride_interval_loss(
         predictions,
         lower,
         upper,
@@ -435,7 +437,9 @@ def test_safe_stride_interval_head_masks_unobservable_upper_bound() -> None:
         0.05,
     )
 
-    assert loss.item() == pytest.approx(1.0 / 60.0)
+    assert lower_loss.item() == pytest.approx(0.0125)
+    assert width_loss.item() == pytest.approx(0.025)
+    assert loss.item() == pytest.approx(0.0375)
 
 
 def test_stair_label_range_metrics_do_not_clamp_labels() -> None:
@@ -606,6 +610,7 @@ def test_safe_stride_update_statistics_are_aggregated_from_moments() -> None:
         torch.tensor([[0.10], [0.50], [0.20]]),
         torch.tensor([[1.0], [1.0], [0.0]]),
     )
+    alg._accumulate_safe_stride_depth_confirmation_events(torch.tensor([[0.0], [1.0], [0.0]]))
 
     logs = alg._finalize_safe_stride_update_statistics()
 
@@ -617,6 +622,25 @@ def test_safe_stride_update_statistics_are_aggregated_from_moments() -> None:
     assert logs["slow_latent_safe_stride_global_correlation"] == pytest.approx(1.0)
     assert logs["slow_latent_safe_stride_global_mae"] == pytest.approx(0.10)
     assert logs["slow_latent_safe_stride_global_signed_error"] == pytest.approx(0.0, abs=1.0e-7)
+    assert logs["slow_latent_safe_stride_global_unique_depth_confirmation_count"] == 1.0
+
+
+def test_safe_stride_width_count_is_labeled_as_interval_frames() -> None:
+    """Width-valid rows should be identified explicitly as interval frames."""
+    alg = _build_teacher_kl({"enabled": False})
+    alg.num_learning_epochs = 1
+    alg._safe_stride_update_statistics = {}
+    alg._accumulate_safe_stride_update_statistics(
+        torch.tensor([[0.10], [0.20]]),
+        torch.tensor([[0.10], [0.20]]),
+        torch.ones(2, 1),
+        component="width",
+    )
+
+    logs = alg._finalize_safe_stride_update_statistics()
+
+    assert logs["slow_latent_safe_stride_global_width_valid_count"] == 2.0
+    assert logs["slow_latent_safe_stride_global_interval_valid_frame_count"] == 2.0
 
 
 def test_mean_huber_guidance_applies_loss_cap() -> None:

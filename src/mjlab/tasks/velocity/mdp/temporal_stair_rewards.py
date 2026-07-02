@@ -37,6 +37,7 @@ from .stair_geometry import (
   STAIR_CLEARANCE_FOOT_LAYERS_KEY,
   STAIR_CLEARANCE_FOOT_LAYERS_VALID_KEY,
   STAIR_CLEARANCE_SEQUENCE_ID_KEY,
+  STAIR_DEPTH_CONFIRMATION_EVENT_KEY,
   STAIR_DEPTH_LABEL_VALID_KEY,
   STAIR_ENTRY_EVENT_KEY,
   STAIR_ENTRY_EVIDENCE_ASCENT_DIR_KEY,
@@ -116,8 +117,8 @@ def _minimum_safe_stride_to_layer(
   tread_depth: torch.Tensor,
   rear_clearance: float,
   front_clearance: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-  """Return the forward-translation interval that fully contains the sole."""
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+  """Return the forward-translation interval and per-bound observability."""
   boundary_ascent = -toe_step_riser_slab_penalty._normalize_xy(boundaries[..., 6:8])
   target_boundary = (
     valid_boundaries
@@ -159,18 +160,18 @@ def _minimum_safe_stride_to_layer(
   )
   minimum_safe_stride = minimum_landing_s - target_start_s
   maximum_safe_stride = maximum_landing_s - target_start_s
-  valid = (
-    has_target
-    & lateral_valid
-    & torch.isfinite(minimum_safe_stride)
+  lower_valid = has_target & lateral_valid & torch.isfinite(minimum_safe_stride)
+  interval_valid = (
+    lower_valid
     & torch.isfinite(maximum_safe_stride)
     & (maximum_safe_stride >= minimum_safe_stride)
     & (maximum_safe_stride > 0.0)
   )
   return (
-    torch.where(valid, minimum_safe_stride, 0.0),
-    torch.where(valid, maximum_safe_stride, 0.0),
-    valid,
+    torch.where(lower_valid, minimum_safe_stride, 0.0),
+    torch.where(interval_valid, maximum_safe_stride, 0.0),
+    lower_valid,
+    interval_valid,
   )
 
 
@@ -230,22 +231,37 @@ def _safe_stride_tracking_masks(
 def _bounded_safe_stride_interval(
   raw_lower: torch.Tensor,
   raw_upper: torch.Tensor,
-  geometry_valid: torch.Tensor,
+  lower_geometry_valid: torch.Tensor,
+  interval_geometry_valid: torch.Tensor,
   minimum_stride: float,
   maximum_stride: float,
   maximum_tracking_stride: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-  """Clamp a feasible interval to the head range and reject unreachable labels."""
-  tracking_valid, stale = _safe_stride_tracking_masks(
-    geometry_valid,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+  """Clamp bounds while keeping lower and full-interval validity separate."""
+  lower_tracking_valid, stale = _safe_stride_tracking_masks(
+    lower_geometry_valid,
     raw_lower,
     maximum_tracking_stride,
   )
-  tracking_valid &= raw_upper >= minimum_stride
   lower = torch.clamp(raw_lower, min=minimum_stride, max=maximum_stride)
   upper = torch.clamp(raw_upper, min=minimum_stride, max=maximum_stride)
-  tracking_valid &= upper >= lower
-  return lower, upper, tracking_valid, stale
+  interval_tracking_valid = (
+    lower_tracking_valid
+    & interval_geometry_valid
+    & (raw_upper >= minimum_stride)
+    & (upper >= lower)
+  )
+  return lower, upper, lower_tracking_valid, interval_tracking_valid, stale
+
+
+def _confirmed_stair_depth_evidence(
+  active: torch.Tensor,
+  shape_valid: torch.Tensor,
+  expected_layer: torch.Tensor,
+  expected_riser_evidence: torch.Tensor,
+) -> torch.Tensor:
+  """Confirm tread depth only after observing the next expected riser."""
+  return active & shape_valid & (expected_layer >= 2) & expected_riser_evidence
 
 
 def _blocked_swing_event_evidence(
@@ -402,6 +418,9 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     self._stair_depth_label_valid = torch.zeros(
       env.num_envs, device=env.device, dtype=torch.bool
     )
+    self._stair_depth_confirmation_event = torch.zeros(
+      env.num_envs, device=env.device, dtype=torch.bool
+    )
     self._layer1_entry_candidate_total = torch.zeros((), device=env.device)
     self._entry_event_total = torch.zeros((), device=env.device)
     self._safe_stride_valid = torch.zeros(
@@ -422,6 +441,9 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     self._minimum_safe_stride_geometry_valid = torch.zeros(
       env.num_envs, device=env.device, dtype=torch.bool
     )
+    self._minimum_safe_stride_interval_geometry_valid = torch.zeros(
+      env.num_envs, device=env.device, dtype=torch.bool
+    )
     self._minimum_safe_stride_valid = torch.zeros(
       env.num_envs, device=env.device, dtype=torch.bool
     )
@@ -438,9 +460,6 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       env.num_envs, device=env.device, dtype=torch.long
     )
     self._probe_evidence_seen = torch.zeros(
-      env.num_envs, device=env.device, dtype=torch.bool
-    )
-    self._probe_exact_evidence = torch.zeros(
       env.num_envs, device=env.device, dtype=torch.bool
     )
     self._stair_skip_layer_penalty = torch.zeros(
@@ -483,6 +502,9 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     env.extras[STAIR_RISER_HEIGHT_LABEL_KEY] = self._stair_riser_height_label
     env.extras[STAIR_SHAPE_LABEL_VALID_KEY] = self._stair_shape_label_valid
     env.extras[STAIR_DEPTH_LABEL_VALID_KEY] = self._stair_depth_label_valid
+    env.extras[STAIR_DEPTH_CONFIRMATION_EVENT_KEY] = (
+      self._stair_depth_confirmation_event
+    )
     env.extras[SAFE_STRIDE_VALID_KEY] = self._safe_stride_valid
     env.extras[SAFE_TREAD_LOWER_BOUND_KEY] = self._safe_tread_lower_bound
     env.extras[MINIMUM_SAFE_STRIDE_KEY] = self._minimum_safe_stride
@@ -546,19 +568,20 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     self._stair_riser_height_label[env_ids] = 0.0
     self._stair_shape_label_valid[env_ids] = False
     self._stair_depth_label_valid[env_ids] = False
+    self._stair_depth_confirmation_event[env_ids] = False
     self._safe_stride_valid[env_ids] = False
     self._safe_tread_lower_bound[env_ids] = 0.0
     self._minimum_safe_stride[env_ids] = 0.0
     self._minimum_safe_stride_upper[env_ids] = 0.0
     self._minimum_safe_stride_raw[env_ids] = 0.0
     self._minimum_safe_stride_geometry_valid[env_ids] = False
+    self._minimum_safe_stride_interval_geometry_valid[env_ids] = False
     self._minimum_safe_stride_valid[env_ids] = False
     self._minimum_safe_stride_interval_valid[env_ids] = False
     self._minimum_safe_stride_exact[env_ids] = False
     self._minimum_safe_stride_weight[env_ids] = 0.0
     self._safe_stride_evidence_steps[env_ids] = 0
     self._probe_evidence_seen[env_ids] = False
-    self._probe_exact_evidence[env_ids] = False
     self._stair_skip_layer_penalty[env_ids] = 0.0
     self._safe_landing_center_s[env_ids] = 0.0
     self._observed_step_stride[env_ids] = 0.0
@@ -930,6 +953,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     self._exit_event.zero_()
     self._toe_riser_new_hit.zero_()
     self._toe_riser_contact.zero_()
+    self._stair_depth_confirmation_event.zero_()
     self._entry_evidence_timer = torch.clamp(
       self._entry_evidence_timer - env.step_dt,
       min=0.0,
@@ -1299,8 +1323,8 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         self._minimum_safe_stride_weight[entry_mask] = 0.0
         self._safe_stride_evidence_steps[entry_mask] = 0
         self._probe_evidence_seen[entry_mask] = False
-        self._probe_exact_evidence[entry_mask] = False
         self._minimum_safe_stride_geometry_valid[entry_mask] = False
+        self._minimum_safe_stride_interval_geometry_valid[entry_mask] = False
         self._minimum_safe_stride_raw[entry_mask] = 0.0
         self._minimum_safe_stride[entry_mask] = 0.0
         self._minimum_safe_stride_upper[entry_mask] = 0.0
@@ -1324,7 +1348,8 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         (
           entry_stride_raw,
           entry_stride_upper_raw,
-          entry_stride_geometry_valid,
+          entry_stride_lower_geometry_valid,
+          entry_stride_interval_geometry_valid,
         ) = _minimum_safe_stride_to_layer(
           boundaries[entry_ids],
           valid_boundaries[entry_ids],
@@ -1339,16 +1364,20 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
           safe_stride_containment_margin,
           safe_stride_containment_margin,
         )
-        entry_geometry_valid = entry_shape_valid & entry_stride_geometry_valid
+        entry_interval_geometry_valid = (
+          entry_shape_valid & entry_stride_interval_geometry_valid
+        )
         (
           entry_stride_lower,
           entry_stride_upper,
-          entry_tracking_valid,
+          entry_lower_tracking_valid,
+          entry_interval_tracking_valid,
           _entry_stale,
         ) = _bounded_safe_stride_interval(
           entry_stride_raw,
           entry_stride_upper_raw,
-          entry_geometry_valid,
+          entry_stride_lower_geometry_valid,
+          entry_interval_geometry_valid,
           stair_min_safe_stride,
           stair_max_safe_stride,
           stair_max_tracking_stride,
@@ -1356,18 +1385,23 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         self._minimum_safe_stride_raw[entry_ids] = entry_stride_raw
         self._minimum_safe_stride[entry_ids] = entry_stride_lower
         self._minimum_safe_stride_upper[entry_ids] = entry_stride_upper
-        self._minimum_safe_stride_geometry_valid[entry_ids] = entry_geometry_valid
-        self._minimum_safe_stride_valid[entry_ids] = entry_tracking_valid
+        self._minimum_safe_stride_geometry_valid[entry_ids] = (
+          entry_stride_lower_geometry_valid
+        )
+        self._minimum_safe_stride_interval_geometry_valid[entry_ids] = (
+          entry_interval_tracking_valid
+        )
+        self._minimum_safe_stride_valid[entry_ids] = entry_lower_tracking_valid
         self._minimum_safe_stride_interval_valid[entry_ids] = False
-        entry_stride_label_valid[entry_ids] = entry_tracking_valid
+        entry_stride_label_valid[entry_ids] = entry_lower_tracking_valid
         self._minimum_safe_stride_exact[entry_ids] = False
         self._minimum_safe_stride_weight[entry_ids] = torch.where(
-          entry_tracking_valid,
+          entry_lower_tracking_valid,
           torch.full_like(entry_stride_raw, safe_stride_riser_weight),
           torch.zeros_like(entry_stride_raw),
         )
         self._safe_stride_evidence_steps[entry_ids] = torch.where(
-          entry_tracking_valid,
+          entry_lower_tracking_valid,
           torch.full_like(
             first_sequence_id[entry_ids],
             safe_stride_evidence_window_steps,
@@ -1540,9 +1574,14 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
           | target_has_surface_evidence
         )
       )
-      probe_exact_now = probe_stage & shape_valid & target_has_expected_riser_evidence
+      depth_evidence_now = _confirmed_stair_depth_evidence(
+        active_before,
+        shape_valid,
+        self._expected_layer,
+        target_has_expected_riser_evidence,
+      )
+      probe_exact_now = probe_stage & depth_evidence_now
       self._probe_evidence_seen.logical_or_(probe_evidence_now)
-      self._probe_exact_evidence.logical_or_(probe_exact_now)
 
       target_airborne = active_before & ~ground_contact[env_ids, target_foot]
       self._attempt_air_seen.logical_or_(target_airborne)
@@ -1555,13 +1594,17 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         & (best_support_fraction[env_ids, target_foot] > 0.0)
         & (target_support_layer == self._expected_layer)
       )
-      depth_evidence_now = (
-        active_before
-        & shape_valid
-        & (self._expected_layer >= 2)
-        & (target_has_expected_riser_evidence | expected_tread_contact_now)
+      self._stair_depth_confirmation_event.copy_(
+        depth_evidence_now & ~self._stair_depth_label_valid
       )
       self._stair_depth_label_valid.logical_or_(depth_evidence_now)
+      confirmed_current_interval = (
+        self._stair_depth_label_valid
+        & self._minimum_safe_stride_valid
+        & self._minimum_safe_stride_interval_geometry_valid
+      )
+      self._minimum_safe_stride_interval_valid.logical_or_(confirmed_current_interval)
+      self._minimum_safe_stride_exact.logical_or_(confirmed_current_interval)
       self._attempt_expected_tread_contact.logical_or_(expected_tread_contact_now)
       self._attempt_expected_tread_full_support.logical_or_(
         expected_tread_contact_now & target_full_support_gate
@@ -1591,9 +1634,6 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
           torch.maximum(self._attempt_touchdown_layer, target_support_layer),
           self._attempt_touchdown_layer,
         )
-      )
-      self._probe_exact_evidence.logical_or_(
-        attempt_armed & shape_valid & target_has_expected_riser_evidence
       )
       half_cycle_elapsed = self._attempt_elapsed_time >= 0.5 * stair_attempt_period
       attempt_complete = (
@@ -1652,7 +1692,8 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         (
           minimum_stride_raw,
           maximum_stride_raw,
-          minimum_stride_geometry_valid,
+          minimum_stride_lower_geometry_valid,
+          minimum_stride_interval_geometry_valid,
         ) = _minimum_safe_stride_to_layer(
           boundaries[completed_ids],
           valid_boundaries[completed_ids],
@@ -1667,18 +1708,20 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
           safe_stride_containment_margin,
           safe_stride_containment_margin,
         )
-        geometry_label_valid = (
-          shape_valid[completed_ids] & minimum_stride_geometry_valid
+        interval_geometry_label_valid = (
+          shape_valid[completed_ids] & minimum_stride_interval_geometry_valid
         )
         (
           minimum_stride,
           maximum_stride,
-          tracking_label_valid,
+          lower_tracking_label_valid,
+          interval_tracking_label_valid,
           stale_stride,
         ) = _bounded_safe_stride_interval(
           minimum_stride_raw,
           maximum_stride_raw,
-          geometry_label_valid,
+          minimum_stride_lower_geometry_valid,
+          interval_geometry_label_valid,
           stair_min_safe_stride,
           stair_max_safe_stride,
           stair_max_tracking_stride,
@@ -1690,10 +1733,15 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         self._minimum_safe_stride_raw[completed_ids] = minimum_stride_raw
         self._minimum_safe_stride[completed_ids] = minimum_stride
         self._minimum_safe_stride_upper[completed_ids] = maximum_stride
-        self._minimum_safe_stride_geometry_valid[completed_ids] = geometry_label_valid
-        self._minimum_safe_stride_valid[completed_ids] = tracking_label_valid
+        self._minimum_safe_stride_geometry_valid[completed_ids] = (
+          minimum_stride_lower_geometry_valid
+        )
+        self._minimum_safe_stride_interval_geometry_valid[completed_ids] = (
+          interval_tracking_label_valid
+        )
+        self._minimum_safe_stride_valid[completed_ids] = lower_tracking_label_valid
         interval_label_valid = (
-          self._probe_exact_evidence[completed_ids] & tracking_label_valid
+          self._stair_depth_label_valid[completed_ids] & interval_tracking_label_valid
         )
         self._minimum_safe_stride_interval_valid[completed_ids] = interval_label_valid
         self._minimum_safe_stride_exact[completed_ids] = interval_label_valid
@@ -1708,9 +1756,9 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
           torch.full_like(completed_importance, safe_stride_riser_weight),
           completed_importance,
         )
-        evidence_valid = tracking_label_valid & (completed_importance > 1.0)
+        evidence_valid = lower_tracking_label_valid & (completed_importance > 1.0)
         self._minimum_safe_stride_weight[completed_ids] = torch.where(
-          tracking_label_valid,
+          lower_tracking_label_valid,
           completed_importance,
           torch.zeros_like(completed_importance),
         )
@@ -1914,6 +1962,12 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       ).float().sum() / phase1_count
       log["Metrics/minimum_safe_stride_probe_exact_evidence_ratio"] = (
         probe_exact_now.float().sum() / phase1_count
+      )
+      log["Metrics/minimum_safe_stride_depth_confirmation_event_ratio"] = (
+        self._stair_depth_confirmation_event.float().sum() / active_phase_count
+      )
+      log["Metrics/minimum_safe_stride_depth_confirmation_event_count"] = (
+        self._stair_depth_confirmation_event.float().sum()
       )
       log["Metrics/minimum_safe_stride_probe_attempt_completed_ratio"] = (
         probe_attempt_complete.float().sum() / phase1_count

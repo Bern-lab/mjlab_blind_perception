@@ -104,6 +104,8 @@ class G1SlowLatentPolicyModelParams:
   """Huber transition point for shape prediction normalized to [0, 1]."""
   safe_stride_huber_delta: float = 0.05
   """Huber transition point for safe-stride prediction, in meters."""
+  safe_stride_width_loss_coef: float = 1.0
+  """Weight for independently normalized SafeStride width regression."""
   safe_stride_min: float = 0.10
   """Minimum decoded safe-stride estimate, in meters."""
   safe_stride_max: float = 0.55
@@ -211,6 +213,7 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
   aux_safe_stride_coef: float = 0.03,
   stair_shape_huber_delta: float = 0.05,
   safe_stride_huber_delta: float = 0.05,
+  safe_stride_width_loss_coef: float = 1.0,
   safe_stride_min: float = 0.10,
   safe_stride_max: float = 0.55,
   structured_safe_stride_enabled: bool = False,
@@ -262,6 +265,7 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
     aux_safe_stride_coef=aux_safe_stride_coef,
     stair_shape_huber_delta=stair_shape_huber_delta,
     safe_stride_huber_delta=safe_stride_huber_delta,
+    safe_stride_width_loss_coef=safe_stride_width_loss_coef,
     safe_stride_min=safe_stride_min,
     safe_stride_max=safe_stride_max,
     structured_safe_stride_enabled=structured_safe_stride_enabled,
@@ -444,6 +448,7 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
   aux_safe_stride_coef: float = 0.03,
   stair_shape_huber_delta: float = 0.05,
   safe_stride_huber_delta: float = 0.05,
+  safe_stride_width_loss_coef: float = 1.0,
   safe_stride_min: float = 0.10,
   safe_stride_max: float = 0.55,
   structured_safe_stride_enabled: bool = False,
@@ -510,6 +515,7 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
     aux_safe_stride_coef = model_params.aux_safe_stride_coef
     stair_shape_huber_delta = model_params.stair_shape_huber_delta
     safe_stride_huber_delta = model_params.safe_stride_huber_delta
+    safe_stride_width_loss_coef = model_params.safe_stride_width_loss_coef
     safe_stride_min = model_params.safe_stride_min
     safe_stride_max = model_params.safe_stride_max
     structured_safe_stride_enabled = model_params.structured_safe_stride_enabled
@@ -561,6 +567,7 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
     aux_safe_stride_coef=aux_safe_stride_coef,
     stair_shape_huber_delta=stair_shape_huber_delta,
     safe_stride_huber_delta=safe_stride_huber_delta,
+    safe_stride_width_loss_coef=safe_stride_width_loss_coef,
     safe_stride_min=safe_stride_min,
     safe_stride_max=safe_stride_max,
     structured_safe_stride_enabled=structured_safe_stride_enabled,

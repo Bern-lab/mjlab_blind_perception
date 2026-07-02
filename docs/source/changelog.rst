@@ -94,6 +94,10 @@ Changed
 - SafeStride interval diagnostics now distinguish center containment from true
   predicted/target interval overlap, coverage, and IoU, and report update-global
   lower, upper, width, and center statistics.
+- Semantic-v2 SafeStride probe loss now normalizes observable lower-bound and
+  confirmed-width regression independently. Dynamic width is decoded in
+  absolute physical units instead of being scaled by the predicted lower bound;
+  upper remains a derived diagnostic.
 - Prepared Semantic-v2 Shape supervision with independent component masks. Riser
   height remains valid throughout an accepted stair sequence, while tread depth
   becomes valid only after reaching or colliding with layer 2 or a later
@@ -276,6 +280,10 @@ Changed
 Fixed
 ^^^^^
 
+- SafeStride full-interval supervision now requires a confirmed collision with
+  the expected layer-2-or-later riser. Layer-1 repeats and tread contact continue
+  to supervise only the lower bound. Training logs distinguish interval-valid
+  frames from one-shot unique depth-confirmation events.
 - Fixed ONNX export path resolution in the velocity, manipulation, and
   tracking runners when a parent directory name contains the word
   ``"model"`` (:issue:`867`). Contribution by @gokulp01.

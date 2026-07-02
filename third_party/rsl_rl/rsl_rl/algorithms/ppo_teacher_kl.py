@@ -612,19 +612,30 @@ class PPOTeacherKL(PPO):
         interval_valid: torch.Tensor,
         importance: torch.Tensor,
         huber_delta: float,
-    ) -> torch.Tensor:
-        """Regress lower bounds whenever observable and upper bounds after confirmation."""
-        targets = torch.cat([lower_bounds, upper_bounds], dim=-1)
-        error = functional.smooth_l1_loss(
-            predictions,
-            targets,
+        width_loss_coef: float = 1.0,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Regress lower and absolute width with independent normalization."""
+        predicted_lower = predictions[..., 0:1]
+        predicted_width = predictions[..., 1:2] - predicted_lower
+        target_width = upper_bounds - lower_bounds
+        lower_error = functional.smooth_l1_loss(
+            predicted_lower,
+            lower_bounds,
             reduction="none",
             beta=huber_delta,
         )
-        component_valid = torch.cat([lower_valid, interval_valid], dim=-1)
-        weighted_valid = component_valid * importance.clamp_min(1.0)
-        weighted_count = weighted_valid.sum().clamp_min(1.0)
-        return (error * weighted_valid).sum() / weighted_count
+        width_error = functional.smooth_l1_loss(
+            predicted_width,
+            target_width,
+            reduction="none",
+            beta=huber_delta,
+        )
+        lower_weight = lower_valid * importance.clamp_min(1.0)
+        width_weight = interval_valid * importance.clamp_min(1.0)
+        lower_loss = (lower_error * lower_weight).sum() / lower_weight.sum().clamp_min(1.0)
+        width_loss = (width_error * width_weight).sum() / width_weight.sum().clamp_min(1.0)
+        total_loss = lower_loss + width_loss_coef * width_loss
+        return total_loss, lower_loss, width_loss
 
     @staticmethod
     def _compute_normalized_stair_shape_loss(
@@ -754,7 +765,7 @@ class PPOTeacherKL(PPO):
                 distributed.all_reduce(value, op=distributed.ReduceOp.SUM)
 
         logs: dict[str, float] = {}
-        for component in ("center", "lower", "upper", "width"):
+        for component in ("center", "lower", "lower_interval", "upper", "width"):
             count_key = f"{component}_count"
             if count_key not in reduced or reduced[count_key].item() <= 0.0:
                 continue
@@ -790,7 +801,28 @@ class PPOTeacherKL(PPO):
             logs[f"{prefix}_r_squared"] = r_squared.item()
             logs[f"{prefix}_mae"] = (reduced[f"{component}_absolute_error_sum"] / count).item()
             logs[f"{prefix}_signed_error"] = (reduced[f"{component}_signed_error_sum"] / count).item()
+            if component == "width":
+                logs["slow_latent_safe_stride_global_interval_valid_frame_count"] = (
+                    count / max(self.num_learning_epochs, 1)
+                ).item()
+        depth_confirmation_key = "depth_confirmation_event_count"
+        if depth_confirmation_key in reduced:
+            logs["slow_latent_safe_stride_global_unique_depth_confirmation_count"] = (
+                reduced[depth_confirmation_key] / max(self.num_learning_epochs, 1)
+            ).item()
         return logs
+
+    def _accumulate_safe_stride_depth_confirmation_events(self, events: torch.Tensor) -> None:
+        """Count one-frame depth confirmations once per update epoch."""
+        if self._safe_stride_update_statistics is None:
+            return
+        key = "depth_confirmation_event_count"
+        value = events.detach().sum()
+        previous = self._safe_stride_update_statistics.get(key)
+        if previous is None:
+            self._safe_stride_update_statistics[key] = value
+        else:
+            self._safe_stride_update_statistics[key] = previous + value
 
     @staticmethod
     def _compute_label_out_of_range_ratios(
@@ -1090,6 +1122,10 @@ class PPOTeacherKL(PPO):
             safe_stride_interval_valid_padded = labels[..., 15:16].float()
         else:
             safe_stride_interval_valid_padded = safe_stride_exact_padded
+        if labels.shape[-1] >= 17:
+            depth_confirmation_event_padded = labels[..., 16:17].float()
+        else:
+            depth_confirmation_event_padded = torch.zeros_like(event_labels_padded)
         if labels.shape[-1] >= 13:
             collision_risk_now = labels[..., 10:11].float()
             landing_touchdown_now = labels[..., 11:12].float()
@@ -1171,6 +1207,13 @@ class PPOTeacherKL(PPO):
                     batch.masks,
                 ),
             )
+            depth_confirmation_event = cast(
+                torch.Tensor,
+                unpad_trajectories(
+                    depth_confirmation_event_padded,
+                    batch.masks,
+                ),
+            )
         else:
             event_labels_raw = event_labels_raw_padded
             event_labels = event_labels_padded
@@ -1186,6 +1229,7 @@ class PPOTeacherKL(PPO):
             safe_stride_importance = safe_stride_importance_padded
             safe_stride_upper = safe_stride_upper_padded
             safe_stride_interval_valid = safe_stride_interval_valid_padded
+            depth_confirmation_event = depth_confirmation_event_padded
 
         total_loss = torch.zeros((), device=self.device)
         logs: dict[str, float] = {}
@@ -1488,8 +1532,12 @@ class PPOTeacherKL(PPO):
             safe_stride_interval_predictions = aux_outputs.get("safe_stride_interval")
             safe_stride_target_center = 0.5 * (safe_stride_labels + safe_stride_upper)
             interval_valid = safe_stride_valid * safe_stride_interval_valid
+            lower_loss_raw = safe_stride_predictions.new_zeros(())
+            width_loss_raw = safe_stride_predictions.new_zeros(())
+            width_loss_coef = 1.0
             if safe_stride_interval_predictions is not None:
-                safe_stride_loss_raw = self._compute_safe_stride_interval_loss(
+                width_loss_coef = float(getattr(self.actor, "safe_stride_width_loss_coef", 1.0))
+                safe_stride_loss_raw, lower_loss_raw, width_loss_raw = self._compute_safe_stride_interval_loss(
                     safe_stride_interval_predictions,
                     safe_stride_labels,
                     safe_stride_upper,
@@ -1497,6 +1545,7 @@ class PPOTeacherKL(PPO):
                     interval_valid,
                     safe_stride_importance,
                     safe_stride_delta,
+                    width_loss_coef,
                 )
                 predicted_lower = safe_stride_interval_predictions[..., 0:1]
                 predicted_upper = safe_stride_interval_predictions[..., 1:2]
@@ -1535,6 +1584,12 @@ class PPOTeacherKL(PPO):
                     component="lower",
                 )
                 self._accumulate_safe_stride_update_statistics(
+                    predicted_lower,
+                    safe_stride_labels,
+                    interval_valid,
+                    component="lower_interval",
+                )
+                self._accumulate_safe_stride_update_statistics(
                     predicted_upper,
                     safe_stride_upper,
                     interval_valid,
@@ -1546,8 +1601,13 @@ class PPOTeacherKL(PPO):
                     interval_valid,
                     component="width",
                 )
+            self._accumulate_safe_stride_depth_confirmation_events(depth_confirmation_event)
             logs["slow_latent_safe_stride_huber"] = self._distributed_mean_scalar(safe_stride_loss_raw).item()
             logs["slow_latent_safe_stride_loss"] = self._distributed_mean_scalar(safe_stride_loss).item()
+            if safe_stride_interval_predictions is not None:
+                logs["slow_latent_safe_stride_lower_huber"] = self._distributed_mean_scalar(lower_loss_raw).item()
+                logs["slow_latent_safe_stride_width_huber"] = self._distributed_mean_scalar(width_loss_raw).item()
+                logs["slow_latent_safe_stride_width_loss_coef"] = width_loss_coef
             logs["slow_latent_safe_stride_valid_ratio"] = self._distributed_mean_scalar(safe_stride_valid.mean()).item()
             logs["slow_latent_safe_stride_interval_valid_ratio"] = self._distributed_mean_scalar(
                 interval_valid.sum() / safe_stride_valid.sum().clamp_min(1.0)
@@ -1600,6 +1660,13 @@ class PPOTeacherKL(PPO):
                 ).item()
                 logs["slow_latent_safe_stride_width_mae"] = mean_scalar(
                     (width_error * center_valid).sum() / valid_count
+                ).item()
+                logs["slow_latent_safe_stride_width_bias"] = mean_scalar(
+                    ((predicted_width - target_width) * center_valid).sum() / valid_count
+                ).item()
+                safe_stride_max = float(getattr(self.actor, "safe_stride_max", 0.55))
+                logs["slow_latent_safe_stride_upper_out_of_range_ratio"] = mean_scalar(
+                    ((predicted_upper > safe_stride_max).to(center_valid.dtype) * center_valid).sum() / valid_count
                 ).item()
                 logs["slow_latent_safe_stride_interval_overlap_ratio"] = mean_scalar(
                     ((overlap > 0.0).to(center_valid.dtype) * center_valid).sum() / valid_count

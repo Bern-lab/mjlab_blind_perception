@@ -359,6 +359,7 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
     "future_events",
     "shape_component_valid",
     "safe_stride_interval_valid",
+    "stair_depth_confirmation_event",
   )
   assert "reset_stair_latent_cache" in env_cfg.events
   assert rl_cfg.obs_groups["actor"] == ("actor",)
@@ -468,6 +469,7 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert actor_cfg.structured_safe_stride_enabled is False
   assert actor_cfg.stair_shape_huber_delta == 0.05
   assert actor_cfg.safe_stride_huber_delta == 0.05
+  assert actor_cfg.safe_stride_width_loss_coef == 1.0
   assert actor_cfg.safe_stride_min == 0.10
   assert actor_cfg.safe_stride_max == 0.55
 
@@ -507,6 +509,7 @@ def test_semantic_v2_probe_freezes_policy_and_uses_dynamic_stride_input() -> Non
   assert actor_cfg.dynamic_safe_stride_enabled is True
   assert actor_cfg.safe_stride_phase_dim == 2
   assert actor_cfg.aux_safe_stride_coef == 1.0
+  assert actor_cfg.safe_stride_width_loss_coef == 1.0
   assert actor_cfg.aux_event_coef == 0.0
   assert actor_cfg.aux_stair_coef == 0.0
   assert actor_cfg.aux_future_collision_risk_coef == 0.0

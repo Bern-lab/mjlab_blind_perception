@@ -285,10 +285,33 @@ def test_dynamic_safe_stride_head_strictly_loads_legacy_input_weights() -> None:
   assert restored.safe_stride_width_head is not None
   torch.testing.assert_close(
     restored.safe_stride_width_head[2].bias,
-    restored.safe_stride_width_head[2].bias.new_full((1,), -0.5),
+    restored.safe_stride_width_head[2].bias.new_full((1,), -1.4),
   )
   actions = restored(_make_obs(), stochastic_output=False)
   assert actions.shape == (4, 3)
+
+
+def test_dynamic_safe_stride_width_is_independent_of_predicted_lower() -> None:
+  model = _make_model(
+    structured_safe_stride_enabled=True,
+    dynamic_safe_stride_enabled=True,
+  )
+  model.safe_stride_head = torch.nn.Identity()
+  width_head = torch.nn.Linear(model.shape_latent_dim, 1)
+  torch.nn.init.zeros_(width_head.weight)
+  torch.nn.init.zeros_(width_head.bias)
+  model.safe_stride_width_head = width_head
+  lower_logits = torch.tensor([[-2.0], [2.0]])
+  shape_memory = torch.zeros(2, model.shape_latent_dim)
+
+  interval = model._decode_safe_stride_interval(lower_logits, shape_memory)
+  widths = interval[:, 1] - interval[:, 0]
+
+  torch.testing.assert_close(widths[0], widths[1])
+  torch.testing.assert_close(
+    widths,
+    torch.full_like(widths, 0.5 * (model.safe_stride_max - model.safe_stride_min)),
+  )
 
 
 def test_safe_stride_probe_only_freezes_policy_and_action_distribution() -> None:

@@ -711,6 +711,10 @@ def _configure_latent_observations(
           func=mdp.safe_stride_interval_valid_label,
           params={},
         ),
+        "stair_depth_confirmation_event": ObservationTermCfg(
+          func=mdp.stair_depth_confirmation_event_label,
+          params={},
+        ),
       },
       concatenate_terms=True,
       enable_corruption=False,
