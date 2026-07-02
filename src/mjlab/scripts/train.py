@@ -118,7 +118,11 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
   log_root_path = log_dir.parent  # Go up from specific run dir to experiment dir.
 
   resume_path: Path | None = None
-  if cfg.agent.resume:
+  if cfg.agent.bootstrap_checkpoint_path is not None:
+    resume_path = Path(cfg.agent.bootstrap_checkpoint_path).expanduser().resolve()
+    if not resume_path.is_file():
+      raise FileNotFoundError(f"Bootstrap checkpoint does not exist: {resume_path}")
+  elif cfg.agent.resume:
     if cfg.wandb_run_path is not None:
       # Load checkpoint from W&B.
       resume_path, was_cached = get_wandb_checkpoint_path(
@@ -176,7 +180,14 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
   runner.add_git_repo_to_log(__file__)
   if resume_path is not None:
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
-    runner.load(str(resume_path))
+    load_cfg = {
+      "actor": True,
+      "critic": True,
+      "optimizer": cfg.agent.load_optimizer_on_resume,
+      "iteration": cfg.agent.load_iteration_on_resume,
+      "rnd": True,
+    }
+    runner.load(str(resume_path), load_cfg=load_cfg, map_location=device)
 
   runner.learn(
     num_learning_iterations=cfg.agent.max_iterations, init_at_random_ep_len=True
@@ -242,10 +253,13 @@ def launch_training(task_id: str, args: TrainConfig | None = None):
     log_dir_name: str | None = None
     motion_name: str | None = None
     try:
-      if "motion" in args.env.commands and getattr(
-        args.env.commands["motion"], "motion_file", None
-      ):
-        motion_path = Path(args.env.commands["motion"].motion_file)
+      motion_file = (
+        getattr(args.env.commands["motion"], "motion_file", None)
+        if "motion" in args.env.commands
+        else None
+      )
+      if motion_file:
+        motion_path = Path(cast(str, motion_file))
         motion_name = motion_path.stem
     except Exception:
       motion_name = None

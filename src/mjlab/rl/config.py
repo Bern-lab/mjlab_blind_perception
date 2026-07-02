@@ -138,6 +138,14 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """Minimum decoded safe stride, in meters."""
   safe_stride_max: float = 0.55
   """Maximum decoded safe stride, in meters."""
+  structured_safe_stride_enabled: bool = False
+  """Predict ordered SafeStride bounds instead of the legacy scalar point."""
+  dynamic_safe_stride_enabled: bool = False
+  """Decode SafeStride from current recurrent state, geometry memory, and gait phase."""
+  safe_stride_phase_dim: int = 0
+  """Trailing deployable latent-observation channels containing gait phase."""
+  shadow_semantic_enabled: bool = False
+  """Record a fixed-position semantic16 shadow vector without actor feedback."""
   future_risk_weight_scale: float = 2.0
   """Extra Huber weight applied in proportion to the risk label."""
   future_quality_weight_scale: float = 2.0
@@ -260,6 +268,10 @@ class RslRlPpoTeacherKLAlgorithmCfg(RslRlPpoAlgorithmCfg):
   """Algorithm class name resolved by RSL-RL."""
   teacher_kl_cfg: RslRlTeacherKLCfg = field(default_factory=RslRlTeacherKLCfg)
   """Frozen-teacher KL configuration."""
+  safe_stride_probe_only: bool = False
+  """Freeze the policy and optimize only the SafeStride decoder."""
+  safe_stride_probe_learning_rate: float = 1.0e-3
+  """Learning rate for the isolated SafeStride decoder probe."""
 
 
 @dataclass
@@ -298,6 +310,12 @@ class RslRlBaseRunnerCfg:
   """The checkpoint file to load. Default is "model_.*.pt" (all). If regex expression,
   the latest (alphabetical order) matching file will be loaded.
   """
+  bootstrap_checkpoint_path: str | None = None
+  """Optional checkpoint loaded into a fresh run without searching log folders."""
+  load_optimizer_on_resume: bool = True
+  """Restore optimizer moments when resuming a compatible architecture."""
+  load_iteration_on_resume: bool = True
+  """Continue the saved iteration counter instead of starting a new schedule."""
   clip_actions: float | None = None
   """The clipping range for action values. If None (default), no clipping is applied."""
   upload_model: bool = True

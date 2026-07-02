@@ -108,6 +108,14 @@ class G1SlowLatentPolicyModelParams:
   """Minimum decoded safe-stride estimate, in meters."""
   safe_stride_max: float = 0.55
   """Maximum decoded safe-stride estimate, in meters."""
+  structured_safe_stride_enabled: bool = False
+  """Use the ordered lower-plus-width SafeStride head."""
+  dynamic_safe_stride_enabled: bool = False
+  """Use current recurrent state and gait phase for per-step SafeStride."""
+  safe_stride_phase_dim: int = 0
+  """Number of trailing latent-observation gait-phase channels."""
+  shadow_semantic_enabled: bool = False
+  """Record semantic16 diagnostics without changing actor conditioning."""
   future_risk_weight_scale: float = 2.0
   """Extra Huber weight proportional to normalized future risk."""
   future_quality_weight_scale: float = 2.0
@@ -205,6 +213,10 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
   safe_stride_huber_delta: float = 0.05,
   safe_stride_min: float = 0.10,
   safe_stride_max: float = 0.55,
+  structured_safe_stride_enabled: bool = False,
+  dynamic_safe_stride_enabled: bool = False,
+  safe_stride_phase_dim: int = 0,
+  shadow_semantic_enabled: bool = False,
   future_risk_weight_scale: float = 2.0,
   future_quality_weight_scale: float = 2.0,
   future_risk_huber_delta: float = 0.1,
@@ -252,6 +264,10 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
     safe_stride_huber_delta=safe_stride_huber_delta,
     safe_stride_min=safe_stride_min,
     safe_stride_max=safe_stride_max,
+    structured_safe_stride_enabled=structured_safe_stride_enabled,
+    dynamic_safe_stride_enabled=dynamic_safe_stride_enabled,
+    safe_stride_phase_dim=safe_stride_phase_dim,
+    shadow_semantic_enabled=shadow_semantic_enabled,
     future_risk_weight_scale=future_risk_weight_scale,
     future_quality_weight_scale=future_quality_weight_scale,
     future_risk_huber_delta=future_risk_huber_delta,
@@ -430,6 +446,10 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
   safe_stride_huber_delta: float = 0.05,
   safe_stride_min: float = 0.10,
   safe_stride_max: float = 0.55,
+  structured_safe_stride_enabled: bool = False,
+  dynamic_safe_stride_enabled: bool = False,
+  safe_stride_phase_dim: int = 0,
+  shadow_semantic_enabled: bool = False,
   future_risk_weight_scale: float = 2.0,
   future_quality_weight_scale: float = 2.0,
   future_risk_huber_delta: float = 0.1,
@@ -492,6 +512,10 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
     safe_stride_huber_delta = model_params.safe_stride_huber_delta
     safe_stride_min = model_params.safe_stride_min
     safe_stride_max = model_params.safe_stride_max
+    structured_safe_stride_enabled = model_params.structured_safe_stride_enabled
+    dynamic_safe_stride_enabled = model_params.dynamic_safe_stride_enabled
+    safe_stride_phase_dim = model_params.safe_stride_phase_dim
+    shadow_semantic_enabled = model_params.shadow_semantic_enabled
     future_risk_weight_scale = model_params.future_risk_weight_scale
     future_quality_weight_scale = model_params.future_quality_weight_scale
     future_risk_huber_delta = model_params.future_risk_huber_delta
@@ -539,6 +563,10 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
     safe_stride_huber_delta=safe_stride_huber_delta,
     safe_stride_min=safe_stride_min,
     safe_stride_max=safe_stride_max,
+    structured_safe_stride_enabled=structured_safe_stride_enabled,
+    dynamic_safe_stride_enabled=dynamic_safe_stride_enabled,
+    safe_stride_phase_dim=safe_stride_phase_dim,
+    shadow_semantic_enabled=shadow_semantic_enabled,
     future_risk_weight_scale=future_risk_weight_scale,
     future_quality_weight_scale=future_quality_weight_scale,
     future_risk_huber_delta=future_risk_huber_delta,
@@ -558,6 +586,49 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
   if max_iterations is not None:
     cfg.max_iterations = max_iterations
   cfg.experiment_name = experiment_name
+  return cfg
+
+
+def unitree_g1_blind_rough_target_navigation_semantic_v2_shadow_runner_cfg() -> (
+  RslRlTeacherKLRunnerCfg
+):
+  """Create the shadow-only Semantic-v2 physical-head training experiment."""
+  cfg = unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg()
+  actor_cfg = cast(RslRlGatedStairLatentModelCfg, cfg.actor)
+  actor_cfg.shadow_semantic_enabled = True
+  actor_cfg.structured_safe_stride_enabled = True
+  actor_cfg.aux_stair_shape_coef = 0.0
+  cfg.experiment_name = "g1_blind_rough_target_navigation_semantic_v2_shadow_teacherkl"
+  cfg.load_optimizer_on_resume = False
+  cfg.load_iteration_on_resume = False
+  return cfg
+
+
+def unitree_g1_blind_rough_target_navigation_semantic_v2_probe_runner_cfg() -> (
+  RslRlTeacherKLRunnerCfg
+):
+  """Create the isolated dynamic SafeStride decoder probe experiment."""
+  cfg = unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg()
+  cfg.max_iterations = 1000
+  cfg.save_interval = 500
+  cfg.experiment_name = "g1_blind_rough_target_navigation_semantic_v2_safe_stride_probe"
+  actor_cfg = cast(RslRlGatedStairLatentModelCfg, cfg.actor)
+  actor_cfg.shadow_semantic_enabled = True
+  actor_cfg.structured_safe_stride_enabled = True
+  actor_cfg.dynamic_safe_stride_enabled = True
+  actor_cfg.safe_stride_phase_dim = 2
+  actor_cfg.aux_event_coef = 0.0
+  actor_cfg.aux_stair_coef = 0.0
+  actor_cfg.aux_future_collision_risk_coef = 0.0
+  actor_cfg.aux_future_safe_landing_quality_coef = 0.0
+  actor_cfg.aux_stair_shape_coef = 0.0
+  actor_cfg.aux_safe_stride_coef = 1.0
+  algorithm_cfg = cast(RslRlPpoTeacherKLAlgorithmCfg, cfg.algorithm)
+  algorithm_cfg.safe_stride_probe_only = True
+  algorithm_cfg.safe_stride_probe_learning_rate = 1.0e-3
+  algorithm_cfg.teacher_kl_cfg.enabled = False
+  cfg.load_optimizer_on_resume = False
+  cfg.load_iteration_on_resume = False
   return cfg
 
 

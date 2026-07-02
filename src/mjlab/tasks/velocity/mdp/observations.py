@@ -14,10 +14,12 @@ from .stair_geometry import (
   LANDING_QUALITY_KEY,
   LANDING_TOUCHDOWN_KEY,
   MINIMUM_SAFE_STRIDE_EXACT_KEY,
+  MINIMUM_SAFE_STRIDE_INTERVAL_VALID_KEY,
   MINIMUM_SAFE_STRIDE_KEY,
   MINIMUM_SAFE_STRIDE_UPPER_KEY,
   MINIMUM_SAFE_STRIDE_VALID_KEY,
   MINIMUM_SAFE_STRIDE_WEIGHT_KEY,
+  STAIR_DEPTH_LABEL_VALID_KEY,
   STAIR_ENTRY_EVENT_KEY,
   STAIR_ENTRY_RECENT_EVIDENCE_KEY,
   STAIR_PHASE_KEY,
@@ -426,6 +428,23 @@ def stair_shape_label(
   )
 
 
+def stair_shape_component_valid_label(
+  env: ManagerBasedRlEnv,
+) -> torch.Tensor:
+  """Return privileged ``[depth_valid, height_valid]`` component masks."""
+  zeros = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+  shape_valid = env.extras.get(STAIR_SHAPE_LABEL_VALID_KEY, zeros).bool()
+  depth_evidence = env.extras.get(STAIR_DEPTH_LABEL_VALID_KEY, zeros).bool()
+  stair_phase = env.extras.get(STAIR_PHASE_KEY)
+  sequence_active = zeros if stair_phase is None else stair_phase >= 1
+  height_valid = shape_valid & sequence_active
+  depth_valid = height_valid & depth_evidence
+  return torch.stack(
+    [depth_valid.float(), height_valid.float()],
+    dim=-1,
+  )
+
+
 def safe_stride_label(env: ManagerBasedRlEnv) -> torch.Tensor:
   """Privileged SafeStride interval and interaction-evidence label.
 
@@ -467,6 +486,17 @@ def safe_stride_label(env: ManagerBasedRlEnv) -> torch.Tensor:
   )
 
 
+def safe_stride_interval_valid_label(env: ManagerBasedRlEnv) -> torch.Tensor:
+  """Return whether both privileged SafeStride interval bounds are observable."""
+  interval_valid = env.extras.get(MINIMUM_SAFE_STRIDE_INTERVAL_VALID_KEY)
+  lower_valid = env.extras.get(MINIMUM_SAFE_STRIDE_VALID_KEY)
+  stair_phase = env.extras.get(STAIR_PHASE_KEY)
+  if interval_valid is None or lower_valid is None or stair_phase is None:
+    return torch.zeros(env.num_envs, 1, device=env.device)
+  valid = interval_valid.bool() & lower_valid.bool() & (stair_phase >= 1)
+  return valid.float().unsqueeze(-1)
+
+
 def stair_future_event_labels(env: ManagerBasedRlEnv) -> torch.Tensor:
   """Privileged ``[collision_risk, touchdown, landing_quality]`` labels."""
   zeros = torch.zeros(env.num_envs, device=env.device)
@@ -487,6 +517,9 @@ def stair_latent_obs(
   env: ManagerBasedRlEnv,
   toe_contact_sensor_name: str = "toe_terrain_contact",
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  include_gait_phase: bool = False,
+  gait_period: float = 0.6,
+  command_name: str = "twist",
 ) -> torch.Tensor:
   """Construct the stair-focused deployable latent_obs vector.
 
@@ -518,7 +551,8 @@ def stair_latent_obs(
    19. leg_joint_vel               (12)
    20. leg_joint_vel_delta         (12)
    21. command_lin_x               (1)
-  Total: ~91
+   22. gait_phase                  (2, optional Semantic-v2 input)
+  Total: 91, or 93 when ``include_gait_phase=True``.
 
   Parameters
   ----------
@@ -666,14 +700,16 @@ def stair_latent_obs(
     leg_joint_vel_delta,  # 12
     command_lin_x,  # 1
   ]
+  if include_gait_phase:
+    parts.append(phase(env, gait_period, command_name))
 
   return torch.cat(parts, dim=-1)
 
 
-def stair_latent_obs_dim() -> int:
+def stair_latent_obs_dim(include_gait_phase: bool = False) -> int:
   """Return the expected dimension of stair_latent_obs."""
   n_leg = len(_G1_LEG_JOINT_NAMES)  # 12
-  return (
+  base_dim = (
     3
     + 3
     + 3  # gravity, ang_vel, ang_vel_delta (9)
@@ -696,6 +732,7 @@ def stair_latent_obs_dim() -> int:
     + n_leg  # joint_vel_delta (12)
     + 1  # command_lin_x
   )  # = 9 + 12 + 6 + 3 + 6 + 6 + 48 + 1 = 91
+  return base_dim + (2 if include_gait_phase else 0)
 
 
 def reset_stair_latent_cache(

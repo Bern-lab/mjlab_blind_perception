@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers.event_manager import EventTermCfg
@@ -271,6 +271,8 @@ class G1SlowLatentEnvParams:
   """Enable simulation-only labels for event/stair auxiliary losses."""
   enable_latent_obs_corruption: bool = False
   """Apply observation corruption to latent encoder inputs."""
+  include_gait_phase_in_latent: bool = False
+  """Append the deployable gait phase for dynamic Semantic-v2 decoding."""
   target_command: G1SlowLatentTargetCommandParams = field(
     default_factory=G1SlowLatentTargetCommandParams
   )
@@ -668,6 +670,9 @@ def _configure_latent_observations(
         params={
           "toe_contact_sensor_name": TOE_TERRAIN_CONTACT_SENSOR,
           "asset_cfg": g1_foot_body_cfg(),
+          "include_gait_phase": params.include_gait_phase_in_latent,
+          "gait_period": params.rewards.foot_gait_period,
+          "command_name": "twist",
         },
       ),
     },
@@ -696,6 +701,14 @@ def _configure_latent_observations(
         ),
         "future_events": ObservationTermCfg(
           func=mdp.stair_future_event_labels,
+          params={},
+        ),
+        "shape_component_valid": ObservationTermCfg(
+          func=mdp.stair_shape_component_valid_label,
+          params={},
+        ),
+        "safe_stride_interval_valid": ObservationTermCfg(
+          func=mdp.safe_stride_interval_valid_label,
           params={},
         ),
       },
@@ -727,18 +740,7 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_env_cfg(
   """Create the gated slow-latent blind target-navigation student task."""
   params = params or G1SlowLatentEnvParams()
   if actor_history_length is not None:
-    params = G1SlowLatentEnvParams(
-      actor_history_length=actor_history_length,
-      latent_group_name=params.latent_group_name,
-      latent_obs_term_name=params.latent_obs_term_name,
-      label_group_name=params.label_group_name,
-      enable_latent_labels=params.enable_latent_labels,
-      enable_latent_obs_corruption=params.enable_latent_obs_corruption,
-      target_command=params.target_command,
-      rewards=params.rewards,
-      terrain_replay=params.terrain_replay,
-      play_visualization=params.play_visualization,
-    )
+    params = replace(params, actor_history_length=actor_history_length)
 
   cfg = unitree_g1_blind_rough_teacherkl_env_cfg(
     play=play,
@@ -760,3 +762,14 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_env_cfg(
       cfg, params.play_visualization, params.rewards
     )
   return cfg
+
+
+def unitree_g1_blind_rough_target_navigation_semantic_v2_probe_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Create the Semantic-v2 probe task with deployable gait phase appended."""
+  params = G1SlowLatentEnvParams(include_gait_phase_in_latent=True)
+  return unitree_g1_blind_rough_target_navigation_slow_latent_env_cfg(
+    play=play,
+    params=params,
+  )

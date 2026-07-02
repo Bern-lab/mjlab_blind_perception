@@ -19,10 +19,12 @@ from mjlab.tasks.velocity.mdp.stair_geometry import (
   LANDING_QUALITY_KEY,
   LANDING_TOUCHDOWN_KEY,
   MINIMUM_SAFE_STRIDE_EXACT_KEY,
+  MINIMUM_SAFE_STRIDE_INTERVAL_VALID_KEY,
   MINIMUM_SAFE_STRIDE_KEY,
   MINIMUM_SAFE_STRIDE_UPPER_KEY,
   MINIMUM_SAFE_STRIDE_VALID_KEY,
   MINIMUM_SAFE_STRIDE_WEIGHT_KEY,
+  STAIR_DEPTH_LABEL_VALID_KEY,
   STAIR_ENTRY_EVENT_KEY,
   STAIR_ENTRY_EVIDENCE_ASCENT_DIR_KEY,
   STAIR_ENTRY_RECENT_EVIDENCE_KEY,
@@ -725,8 +727,10 @@ def test_slow_latent_labels_follow_env_stair_state_machine() -> None:
       STAIR_TREAD_DEPTH_LABEL_KEY: torch.tensor([0.30, 0.35]),
       STAIR_RISER_HEIGHT_LABEL_KEY: torch.tensor([0.18, 0.20]),
       STAIR_SHAPE_LABEL_VALID_KEY: torch.tensor([True, True]),
+      STAIR_DEPTH_LABEL_VALID_KEY: torch.tensor([False, True]),
       MINIMUM_SAFE_STRIDE_VALID_KEY: torch.tensor([False, True]),
       MINIMUM_SAFE_STRIDE_EXACT_KEY: torch.tensor([False, True]),
+      MINIMUM_SAFE_STRIDE_INTERVAL_VALID_KEY: torch.tensor([False, True]),
       MINIMUM_SAFE_STRIDE_WEIGHT_KEY: torch.tensor([0.0, 3.0]),
       MINIMUM_SAFE_STRIDE_KEY: torch.tensor([0.0, 0.41]),
       MINIMUM_SAFE_STRIDE_UPPER_KEY: torch.tensor([0.0, 0.46]),
@@ -742,11 +746,13 @@ def test_slow_latent_labels_follow_env_stair_state_machine() -> None:
       velocity_observations.stair_shape_label(cast(Any, env)),
       velocity_observations.safe_stride_label(cast(Any, env)),
       velocity_observations.stair_future_event_labels(cast(Any, env)),
+      velocity_observations.stair_shape_component_valid_label(cast(Any, env)),
+      velocity_observations.safe_stride_interval_valid_label(cast(Any, env)),
     ],
     dim=-1,
   )
 
-  assert labels.shape == (2, 13)
+  assert labels.shape == (2, 16)
   torch.testing.assert_close(
     labels,
     torch.tensor(
@@ -765,6 +771,9 @@ def test_slow_latent_labels_follow_env_stair_state_machine() -> None:
           0.75,
           1.0,
           0.45,
+          0.0,
+          1.0,
+          0.0,
         ],
         [
           0.0,
@@ -780,6 +789,9 @@ def test_slow_latent_labels_follow_env_stair_state_machine() -> None:
           0.10,
           0.0,
           0.0,
+          1.0,
+          1.0,
+          1.0,
         ],
       ]
     ),
@@ -795,6 +807,7 @@ def test_safe_stride_label_masks_latched_values_while_flat() -> None:
       MINIMUM_SAFE_STRIDE_KEY: torch.tensor([0.40, 0.41]),
       MINIMUM_SAFE_STRIDE_VALID_KEY: torch.tensor([True, True]),
       MINIMUM_SAFE_STRIDE_EXACT_KEY: torch.tensor([True, True]),
+      MINIMUM_SAFE_STRIDE_INTERVAL_VALID_KEY: torch.tensor([True, True]),
       MINIMUM_SAFE_STRIDE_WEIGHT_KEY: torch.tensor([3.0, 2.0]),
       MINIMUM_SAFE_STRIDE_UPPER_KEY: torch.tensor([0.45, 0.46]),
     },
@@ -806,6 +819,10 @@ def test_safe_stride_label_masks_latched_values_while_flat() -> None:
     labels,
     torch.tensor([[0.40, 0.0, 0.0, 0.0, 0.0], [0.41, 1.0, 1.0, 2.0, 0.46]]),
   )
+  interval_valid = velocity_observations.safe_stride_interval_valid_label(
+    cast(Any, env)
+  )
+  torch.testing.assert_close(interval_valid, torch.tensor([[0.0], [1.0]]))
 
 
 def test_stair_landing_target_uses_safe_center_plus_bounded_lead() -> None:
@@ -887,6 +904,34 @@ def test_stair_shape_label_is_masked_outside_active_sequence() -> None:
         [0.30, 0.10, 0.0],
         [0.31, 0.11, 1.0],
         [0.32, 0.12, 0.0],
+      ]
+    ),
+  )
+
+
+def test_stair_shape_component_masks_require_depth_evidence_and_active_sequence() -> (
+  None
+):
+  env = SimpleNamespace(
+    num_envs=4,
+    device="cpu",
+    extras={
+      STAIR_PHASE_KEY: torch.tensor([0, 1, 2, 2]),
+      STAIR_SHAPE_LABEL_VALID_KEY: torch.tensor([True, True, True, False]),
+      STAIR_DEPTH_LABEL_VALID_KEY: torch.tensor([True, False, True, True]),
+    },
+  )
+
+  masks = velocity_observations.stair_shape_component_valid_label(cast(Any, env))
+
+  torch.testing.assert_close(
+    masks,
+    torch.tensor(
+      [
+        [0.0, 0.0],
+        [0.0, 1.0],
+        [1.0, 1.0],
+        [0.0, 0.0],
       ]
     ),
   )

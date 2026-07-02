@@ -55,10 +55,58 @@ Added
 - Added reward-neutral SlowLatent stair diagnostics for approach heading,
   layer-2 touchdown gates, and sole support coverage using the existing foot
   volume samples.
+- Added an opt-in Semantic-v2 shadow vector for SlowLatent diagnostics. Its
+  first eight channels are constructed directly from Event/Stair decisions and
+  gate state, while its final eight channels expose normalized physical shape
+  and SafeStride values. The shadow vector is detached and is not passed to the
+  actor, so enabling it cannot change policy behavior.
+- Added the
+  ``Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2Shadow-TeacherKL-Unitree-G1``
+  task. Its first experiment trains only a structured SafeStride head and
+  records Semantic-v2 diagnostics while the actor still consumes the original
+  latent memory. Shape supervision remains disabled until SafeStride passes its
+  validation gate.
+- Added the
+  ``Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2SafeStrideProbe-Unitree-G1``
+  task. It loads a legacy policy while optimizing only the dynamic SafeStride
+  decoders, freezes policy and normalization state, and verifies after every
+  update that all non-SafeStride state remains bit-exact.
 
 Changed
 ^^^^^^^
 
+- Semantic-v2 SafeStride now predicts an ordered physical interval as a lower
+  bound plus a positive width constrained by the configured stride range.
+  Auxiliary supervision regresses both privileged interval boundaries, while
+  the existing scalar SafeStride and ONNX output remain the interval center.
+  Legacy one-output SafeStride model weights are upgraded during strict model
+  loading; legacy optimizer state must be omitted when starting Semantic-v2.
+  The original SlowLatent task keeps its one-output head, checkpoint,
+  optimizer, and diagnostics compatibility.
+- Split SafeStride supervision into lower-bound and full-interval validity.
+  Entry-riser and rear-partial evidence supervise only the observable lower
+  bound; upper-bound and width regression starts only after exact later-riser
+  evidence confirms the tread interval.
+- The Semantic-v2 dynamic SafeStride decoder now combines recurrent history,
+  slow geometry memory, and deployable gait phase when predicting the current
+  lower bound. A separate slow decoder predicts interval width from geometry
+  memory, keeping step-dependent stride correction separate from tread geometry.
+- SafeStride interval diagnostics now distinguish center containment from true
+  predicted/target interval overlap, coverage, and IoU, and report update-global
+  lower, upper, width, and center statistics.
+- Prepared Semantic-v2 Shape supervision with independent component masks. Riser
+  height remains valid throughout an accepted stair sequence, while tread depth
+  becomes valid only after reaching or colliding with layer 2 or a later
+  expected layer. Both masks are training-only privileged labels and are zero
+  outside active stair sequences. The Shadow task does not enable this loss in
+  its first SafeStride-only training phase.
+- Training resume configuration can now skip optimizer moments and the saved
+  iteration counter. Semantic-v2 Shadow uses both options so expanded physical
+  heads can bootstrap from a legacy actor checkpoint with a fresh optimizer.
+  ``bootstrap_checkpoint_path`` can load that checkpoint directly into a fresh
+  experiment without copying it into the new experiment directory. Training
+  checkpoint loads now map tensors to the selected training device, allowing
+  CUDA checkpoints to be validated or resumed on CPU.
 - Slow-latent moving training commands now span 0.4--1.0 m/s, with the upper
   bound expanding from 0.8 to 1.0 m/s at the existing curriculum transition.
   Standing environments remain at zero speed. Play evaluation now samples

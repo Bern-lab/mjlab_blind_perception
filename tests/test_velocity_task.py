@@ -32,6 +32,8 @@ from mjlab.tasks.velocity.config.g1.blind_rough_step_danger_env_cfg import (
 from mjlab.tasks.velocity.config.g1.rl_cfg import (
   G1SlowLatentPolicyModelParams,
   G1SlowLatentRunnerParams,
+  unitree_g1_blind_rough_target_navigation_semantic_v2_probe_runner_cfg,
+  unitree_g1_blind_rough_target_navigation_semantic_v2_shadow_runner_cfg,
   unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg,
 )
 from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg, stair_aware_feet_gait
@@ -45,6 +47,8 @@ from mjlab.terrains.primitive_terrains import (
 )
 
 MAIN_BRANCH_VELOCITY_TASK_IDS = (
+  "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2SafeStrideProbe-Unitree-G1",
+  "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2Shadow-TeacherKL-Unitree-G1",
   "Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1",
   "Mjlab-Velocity-Blind-Rough-TargetNavigation-StepDanger-TeacherKL-Unitree-G1",
   "Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1",
@@ -353,6 +357,8 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
     "stair_shape",
     "safe_stride",
     "future_events",
+    "shape_component_valid",
+    "safe_stride_interval_valid",
   )
   assert "reset_stair_latent_cache" in env_cfg.events
   assert rl_cfg.obs_groups["actor"] == ("actor",)
@@ -459,10 +465,57 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert actor_cfg.future_horizon == 20
   assert actor_cfg.aux_stair_shape_coef == 0.0
   assert actor_cfg.aux_safe_stride_coef == 0.03
+  assert actor_cfg.structured_safe_stride_enabled is False
   assert actor_cfg.stair_shape_huber_delta == 0.05
   assert actor_cfg.safe_stride_huber_delta == 0.05
   assert actor_cfg.safe_stride_min == 0.10
   assert actor_cfg.safe_stride_max == 0.55
+
+
+def test_semantic_v2_shadow_runner_trains_heads_without_resuming_optimizer() -> None:
+  cfg = unitree_g1_blind_rough_target_navigation_semantic_v2_shadow_runner_cfg()
+  actor_cfg = cast(RslRlGatedStairLatentModelCfg, cfg.actor)
+
+  assert cfg.experiment_name == (
+    "g1_blind_rough_target_navigation_semantic_v2_shadow_teacherkl"
+  )
+  assert cfg.load_optimizer_on_resume is False
+  assert cfg.load_iteration_on_resume is False
+  assert cfg.bootstrap_checkpoint_path is None
+  assert actor_cfg.shadow_semantic_enabled is True
+  assert actor_cfg.structured_safe_stride_enabled is True
+  assert actor_cfg.aux_stair_shape_coef == 0.0
+  assert actor_cfg.aux_safe_stride_coef == 0.03
+  assert actor_cfg.latent_dim == 16
+  assert actor_cfg.state_latent_dim == 8
+
+
+def test_semantic_v2_probe_freezes_policy_and_uses_dynamic_stride_input() -> None:
+  task_id = (
+    "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2SafeStrideProbe-Unitree-G1"
+  )
+  env_cfg = load_env_cfg(task_id)
+  cfg = unitree_g1_blind_rough_target_navigation_semantic_v2_probe_runner_cfg()
+  actor_cfg = cast(RslRlGatedStairLatentModelCfg, cfg.actor)
+  algorithm_cfg = cast(RslRlPpoTeacherKLAlgorithmCfg, cfg.algorithm)
+
+  assert (
+    env_cfg.observations["latent"].terms["stair_latent"].params["include_gait_phase"]
+    is True
+  )
+  assert actor_cfg.structured_safe_stride_enabled is True
+  assert actor_cfg.dynamic_safe_stride_enabled is True
+  assert actor_cfg.safe_stride_phase_dim == 2
+  assert actor_cfg.aux_safe_stride_coef == 1.0
+  assert actor_cfg.aux_event_coef == 0.0
+  assert actor_cfg.aux_stair_coef == 0.0
+  assert actor_cfg.aux_future_collision_risk_coef == 0.0
+  assert actor_cfg.aux_future_safe_landing_quality_coef == 0.0
+  assert actor_cfg.aux_stair_shape_coef == 0.0
+  assert algorithm_cfg.safe_stride_probe_only is True
+  assert algorithm_cfg.teacher_kl_cfg.enabled is False
+  assert cfg.load_optimizer_on_resume is False
+  assert cfg.load_iteration_on_resume is False
 
 
 def test_step_danger_target_navigation_uses_local_geometric_danger_rewards() -> None:
@@ -643,6 +696,8 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
       future_horizon=18,
       safe_stride_min=0.10,
       safe_stride_max=0.42,
+      shadow_semantic_enabled=True,
+      structured_safe_stride_enabled=True,
     ),
   )
   rl_cfg = unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
@@ -673,6 +728,8 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
   assert actor_cfg.future_horizon == 18
   assert actor_cfg.safe_stride_min == 0.10
   assert actor_cfg.safe_stride_max == 0.42
+  assert actor_cfg.shadow_semantic_enabled is True
+  assert actor_cfg.structured_safe_stride_enabled is True
 
 
 def test_step_danger_explicit_param_interfaces_drive_configs() -> None:

@@ -130,10 +130,11 @@ class PPO:
     ) -> None:
         """Record one environment step and update the normalizers."""
         # Update the normalizers
-        self.actor.update_normalization(obs)
-        self.critic.update_normalization(obs)
-        if self.rnd:
-            self.rnd.update_normalization(obs)
+        if not getattr(self, "freeze_normalization_updates", False):
+            self.actor.update_normalization(obs)
+            self.critic.update_normalization(obs)
+            if self.rnd:
+                self.rnd.update_normalization(obs)
 
         # Record the rewards and dones
         # Note: We clone here because later on we bootstrap the rewards based on timeouts

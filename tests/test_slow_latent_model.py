@@ -10,6 +10,8 @@ import onnx
 import pytest
 import torch
 from rsl_rl.algorithms.ppo_teacher_kl import PPOTeacherKL
+from rsl_rl.models import MLPModel
+from rsl_rl.storage import RolloutStorage
 from tensordict import TensorDict
 
 from mjlab.rl.slow_latent_model import LSTMSlowLatentMLPModel
@@ -30,7 +32,12 @@ def _make_obs(
   )
 
 
-def _make_model() -> LSTMSlowLatentMLPModel:
+def _make_model(
+  *,
+  structured_safe_stride_enabled: bool = False,
+  dynamic_safe_stride_enabled: bool = False,
+  shadow_semantic_enabled: bool = False,
+) -> LSTMSlowLatentMLPModel:
   obs = _make_obs()
   return LSTMSlowLatentMLPModel(
     obs=obs,
@@ -54,6 +61,10 @@ def _make_model() -> LSTMSlowLatentMLPModel:
     alpha_hold_state=0.0,
     alpha_hold_shape=0.05,
     aux_safe_stride_coef=0.03,
+    structured_safe_stride_enabled=structured_safe_stride_enabled,
+    dynamic_safe_stride_enabled=dynamic_safe_stride_enabled,
+    safe_stride_phase_dim=2 if dynamic_safe_stride_enabled else 0,
+    shadow_semantic_enabled=shadow_semantic_enabled,
   )
 
 
@@ -81,6 +92,7 @@ def test_slow_latent_actor_forward_updates_state_and_aux_outputs() -> None:
   assert aux["future_safe_landing_quality_logit"].shape == (4, 1)
   assert aux["stair_shape"].shape == (4, 2)
   assert aux["safe_stride"].shape == (4, 1)
+  assert "safe_stride_interval" not in aux
   assert torch.all(
     (0.23 <= aux["stair_shape"][..., 0]) & (aux["stair_shape"][..., 0] <= 0.37)
   )
@@ -96,6 +108,7 @@ def test_slow_latent_actor_forward_updates_state_and_aux_outputs() -> None:
   assert diagnostics["future_quality"].shape == (4, 1)
   assert diagnostics["stair_shape"].shape == (4, 2)
   assert diagnostics["safe_stride"].shape == (4, 1)
+  assert "safe_stride_interval" not in diagnostics
   assert diagnostics["z_norm"].shape == (4, 1)
   assert diagnostics["gate_mode"].shape == (4, 1)
   assert diagnostics["gate_memory_age"].shape == (4, 1)
@@ -113,6 +126,221 @@ def test_slow_latent_actor_forward_updates_state_and_aux_outputs() -> None:
   torch.testing.assert_close(
     torch.sigmoid(aux["stair_logit"]), diagnostics["stair_prob"]
   )
+
+
+def test_shadow_semantic_uses_fixed_state_positions_and_physical_derivations() -> None:
+  model = _make_model(
+    structured_safe_stride_enabled=True,
+    shadow_semantic_enabled=True,
+  )
+  gate = torch.tensor(
+    [
+      [0.0, 0.0, 0.0, 0.0, 0.0],
+      [1.0, 0.0, 0.0, 3.0, 0.0],
+      [2.0, 15.0, 0.0, 0.0, 0.0],
+      [0.0, 0.0, -1.0, -1.0, 7.5],
+    ]
+  )
+  event_prob = torch.tensor([[0.61], [0.59], [0.90], [0.10]])
+  stair_prob = torch.tensor([[0.40], [0.20], [0.50], [0.10]])
+  stair_shape = torch.tensor(
+    [
+      [model.tread_depth_min, model.riser_height_min],
+      [model.tread_depth_max, model.riser_height_max],
+      [
+        0.5 * (model.tread_depth_min + model.tread_depth_max),
+        0.5 * (model.riser_height_min + model.riser_height_max),
+      ],
+      [model.tread_depth_min, model.riser_height_max],
+    ]
+  )
+  safe_stride_interval = torch.tensor(
+    [
+      [model.safe_stride_min, model.safe_stride_min],
+      [model.safe_stride_min, model.safe_stride_max],
+      [
+        0.5 * (model.safe_stride_min + model.safe_stride_max),
+        model.safe_stride_max,
+      ],
+      [
+        model.safe_stride_min,
+        0.5 * (model.safe_stride_min + model.safe_stride_max),
+      ],
+    ]
+  )
+
+  semantic = model._build_shadow_semantic(
+    event_prob,
+    stair_prob,
+    gate,
+    stair_shape,
+    safe_stride_interval,
+  )
+
+  assert semantic.shape == (4, 16)
+  expected_state = torch.tensor(
+    [
+      [1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+      [0.0, 0.0, 0.0, 1.0, 0.0, 0.5, 0.0, 0.0],
+      [1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.5, 0.0],
+      [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.5],
+    ]
+  )
+  torch.testing.assert_close(semantic[:, :8], expected_state)
+  torch.testing.assert_close(
+    semantic[:, 8],
+    torch.tensor([0.0, 1.0, 0.5, 0.0]),
+  )
+  torch.testing.assert_close(
+    semantic[:, 9],
+    torch.tensor([0.0, 1.0, 0.5, 1.0]),
+  )
+  torch.testing.assert_close(
+    semantic[:, 10],
+    torch.tensor([0.0, 0.0, 0.5, 0.0]),
+  )
+  torch.testing.assert_close(
+    semantic[:, 11],
+    torch.tensor([0.0, 1.0, 1.0, 0.5]),
+  )
+  torch.testing.assert_close(
+    semantic[:, 12],
+    torch.tensor([0.0, 0.5, 0.75, 0.25]),
+  )
+  torch.testing.assert_close(
+    semantic[:, 13],
+    torch.tensor([0.0, 1.0, 0.5, 0.5]),
+  )
+  torch.testing.assert_close(semantic[:, 14], semantic[:, 9])
+  torch.testing.assert_close(semantic[:, 15], torch.zeros(4))
+
+
+def test_shadow_semantic_diagnostics_do_not_change_actor_output() -> None:
+  baseline = _make_model()
+  shadow = _make_model(
+    structured_safe_stride_enabled=True,
+    shadow_semantic_enabled=True,
+  )
+  shadow.load_state_dict(baseline.state_dict(), strict=True)
+  obs = _make_obs()
+
+  baseline_actions = baseline(obs, stochastic_output=False)
+  shadow_actions = shadow(obs, stochastic_output=False)
+
+  torch.testing.assert_close(shadow_actions, baseline_actions)
+  assert "shadow_semantic" not in baseline.get_slow_latent_diagnostics()
+  interval = shadow.get_aux_outputs()["safe_stride_interval"]
+  assert interval.shape == (4, 2)
+  assert torch.all(interval[..., 1] >= interval[..., 0])
+  semantic = shadow.get_slow_latent_diagnostics()["shadow_semantic"]
+  assert semantic.shape == (4, 16)
+  assert not semantic.requires_grad
+
+
+def test_safe_stride_head_strictly_loads_legacy_one_output_weights() -> None:
+  source = _make_model()
+  legacy_state = source.state_dict()
+  weight_key = "safe_stride_head.2.weight"
+  bias_key = "safe_stride_head.2.bias"
+  legacy_weight = legacy_state[weight_key][0:1].clone()
+  legacy_bias = legacy_state[bias_key][0:1].clone()
+  legacy_state[weight_key] = legacy_weight
+  legacy_state[bias_key] = legacy_bias
+  restored = _make_model(structured_safe_stride_enabled=True)
+
+  restored.load_state_dict(legacy_state, strict=True)
+
+  torch.testing.assert_close(restored.safe_stride_head[2].weight[0], legacy_weight[0])
+  torch.testing.assert_close(restored.safe_stride_head[2].bias[0], legacy_bias[0])
+  torch.testing.assert_close(
+    restored.safe_stride_head[2].weight[1],
+    torch.zeros_like(restored.safe_stride_head[2].weight[1]),
+  )
+  torch.testing.assert_close(
+    restored.safe_stride_head[2].bias[1],
+    restored.safe_stride_head[2].bias.new_tensor(-6.0),
+  )
+
+
+def test_dynamic_safe_stride_head_strictly_loads_legacy_input_weights() -> None:
+  source = _make_model()
+  legacy_state = source.state_dict()
+  legacy_input_weight = legacy_state["safe_stride_head.0.weight"].clone()
+  restored = _make_model(
+    structured_safe_stride_enabled=True,
+    dynamic_safe_stride_enabled=True,
+  )
+
+  restored.load_state_dict(legacy_state, strict=True)
+
+  restored_weight = restored.safe_stride_head[0].weight
+  torch.testing.assert_close(
+    restored_weight[:, : source.shape_latent_dim],
+    legacy_input_weight,
+  )
+  torch.testing.assert_close(
+    restored_weight[:, source.shape_latent_dim :],
+    torch.zeros_like(restored_weight[:, source.shape_latent_dim :]),
+  )
+  assert restored.safe_stride_width_head is not None
+  torch.testing.assert_close(
+    restored.safe_stride_width_head[2].bias,
+    restored.safe_stride_width_head[2].bias.new_full((1,), -0.5),
+  )
+  actions = restored(_make_obs(), stochastic_output=False)
+  assert actions.shape == (4, 3)
+
+
+def test_safe_stride_probe_only_freezes_policy_and_action_distribution() -> None:
+  actor = _make_model(
+    structured_safe_stride_enabled=True,
+    dynamic_safe_stride_enabled=True,
+  )
+  obs = _make_obs()
+  critic = MLPModel(
+    obs,
+    {"critic": ["actor"]},
+    "critic",
+    1,
+    hidden_dims=[8],
+  )
+  storage = RolloutStorage("rl", 4, 2, obs, [3])
+  algorithm = PPOTeacherKL(
+    actor,
+    critic,
+    storage,
+    teacher_kl_cfg={"enabled": False},
+    safe_stride_probe_only=True,
+  )
+  frozen = algorithm._capture_safe_stride_probe_frozen_state()
+  actor.reset(torch.ones(4))
+  actions_before = actor(obs, stochastic_output=False).detach().clone()
+
+  loss = sum(
+    parameter.square().sum() for parameter in actor.safe_stride_head.parameters()
+  )
+  algorithm.optimizer.zero_grad()
+  loss.backward()
+  algorithm.optimizer.step()
+
+  actor.reset(torch.ones(4))
+  actions_after = actor(obs, stochastic_output=False).detach()
+  assert torch.equal(actions_after, actions_before)
+  assert algorithm.freeze_normalization_updates is True
+  assert all(
+    not parameter.requires_grad
+    for name, parameter in actor.named_parameters()
+    if not name.startswith(("safe_stride_head.", "safe_stride_width_head."))
+  )
+  assert all(
+    parameter.requires_grad for parameter in actor.safe_stride_head.parameters()
+  )
+  assert actor.safe_stride_width_head is not None
+  assert all(
+    parameter.requires_grad for parameter in actor.safe_stride_width_head.parameters()
+  )
+  algorithm._safe_stride_probe_frozen_state = frozen
+  algorithm._verify_safe_stride_probe_frozen_state()
 
 
 def test_stair_memory_uses_distinct_state_and_shape_hold_rates() -> None:
@@ -482,6 +710,29 @@ def test_stair_shape_huber_ignores_invalid_labels() -> None:
 
   assert mae.tolist() == pytest.approx([0.1, 0.0])
   assert huber.tolist() == pytest.approx([0.075, 0.0])
+
+
+def test_stair_shape_huber_uses_independent_component_masks() -> None:
+  predictions = torch.tensor([[10.0, 0.20]])
+  labels = torch.tensor([[0.30, 0.10]])
+  component_valid = torch.tensor([[0.0, 1.0]])
+
+  loss = PPOTeacherKL._compute_stair_shape_loss(
+    predictions,
+    labels,
+    component_valid,
+    huber_delta=0.05,
+  )
+  mae, huber = PPOTeacherKL._compute_stair_shape_component_errors(
+    predictions,
+    labels,
+    component_valid,
+    huber_delta=0.05,
+  )
+
+  assert loss.item() == pytest.approx(0.075)
+  assert mae.tolist() == pytest.approx([0.0, 0.1])
+  assert huber.tolist() == pytest.approx([0.0, 0.075])
 
 
 def test_stair_shape_normalized_huber_uses_each_physical_range() -> None:
