@@ -87,6 +87,10 @@ Added
   evidence on one rollout seed, selects conflict handling on another, and
   reports support, contact-proxy, fusion, and shuffled-baseline metrics only on
   a final test seed.
+- Added version-2 stair evidence logging with sparse adjacent-support trajectory
+  events, per-foot/per-layer riser contact edges, contact/riser-relative
+  projections, explicit validity fields, and a single-seed descriptive analysis
+  mode for comparing first, stable, full, and peak support evidence.
 
 Changed
 ^^^^^^^

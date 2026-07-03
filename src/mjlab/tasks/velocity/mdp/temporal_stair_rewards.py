@@ -44,6 +44,7 @@ from .stair_geometry import (
   STAIR_CONFIRMATION_CONDITION_KEY,
   STAIR_CONFIRMATION_CONTACT_SEQUENCE_KEY,
   STAIR_CONFIRMATION_LAYER_KEY,
+  STAIR_CURRENT_CONTACT_DURATION_KEY,
   STAIR_CURRENT_GROUND_CONTACT_KEY,
   STAIR_CURRENT_STAIR_SUPPORT_KEY,
   STAIR_CURRENT_SUPPORT_FRACTION_KEY,
@@ -60,8 +61,20 @@ from .stair_geometry import (
   STAIR_LANDING_EXPECTED_LAYER_KEY,
   STAIR_LANDING_SEQUENCE_ID_KEY,
   STAIR_LANDING_TARGET_FOOT_KEY,
+  STAIR_ORACLE_CONTACT_FORCE_BY_FOOT_KEY,
+  STAIR_ORACLE_CONTACT_LAYER_BY_FOOT_KEY,
+  STAIR_ORACLE_CONTACT_NORMAL_BY_FOOT_KEY,
+  STAIR_ORACLE_CONTACT_POINT_BY_FOOT_KEY,
+  STAIR_ORACLE_CONTACT_S_BY_FOOT_KEY,
+  STAIR_ORACLE_CONTACT_SEQUENCE_BY_FOOT_KEY,
+  STAIR_ORACLE_CONTACT_VALID_BY_FOOT_KEY,
   STAIR_ORACLE_EXPECTED_RISER_CONTACT_KEY,
   STAIR_ORACLE_EXPECTED_RISER_LAYER_KEY,
+  STAIR_ORACLE_FOOT_CENTER_S_BY_FOOT_KEY,
+  STAIR_ORACLE_HEEL_S_BY_FOOT_KEY,
+  STAIR_ORACLE_RISER_S_BY_FOOT_KEY,
+  STAIR_ORACLE_ROOT_S_BY_FOOT_KEY,
+  STAIR_ORACLE_TOE_S_BY_FOOT_KEY,
   STAIR_PHASE_KEY,
   STAIR_RISER_HEIGHT_LABEL_KEY,
   STAIR_SEQUENCE_ID_KEY,
@@ -499,6 +512,51 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     self._current_support_layer = torch.zeros(
       env.num_envs, num_feet, device=env.device, dtype=torch.long
     )
+    self._current_contact_duration = torch.zeros(
+      env.num_envs, num_feet, device=env.device, dtype=torch.float32
+    )
+    self._oracle_contact_valid_by_foot = torch.zeros(
+      env.num_envs, num_feet, device=env.device, dtype=torch.bool
+    )
+    self._oracle_contact_layer_by_foot = torch.full(
+      (env.num_envs, num_feet), -1, device=env.device, dtype=torch.long
+    )
+    self._oracle_contact_sequence_by_foot = torch.full_like(
+      self._oracle_contact_layer_by_foot, -1
+    )
+    self._oracle_contact_point_by_foot = torch.full(
+      (env.num_envs, num_feet, 3),
+      torch.nan,
+      device=env.device,
+      dtype=torch.float32,
+    )
+    self._oracle_contact_normal_by_foot = torch.full_like(
+      self._oracle_contact_point_by_foot, torch.nan
+    )
+    self._oracle_contact_force_by_foot = torch.full(
+      (env.num_envs, num_feet),
+      torch.nan,
+      device=env.device,
+      dtype=torch.float32,
+    )
+    self._oracle_contact_s_by_foot = torch.full_like(
+      self._oracle_contact_force_by_foot, torch.nan
+    )
+    self._oracle_toe_s_by_foot = torch.full_like(
+      self._oracle_contact_force_by_foot, torch.nan
+    )
+    self._oracle_heel_s_by_foot = torch.full_like(
+      self._oracle_contact_force_by_foot, torch.nan
+    )
+    self._oracle_foot_center_s_by_foot = torch.full_like(
+      self._oracle_contact_force_by_foot, torch.nan
+    )
+    self._oracle_riser_s_by_foot = torch.full_like(
+      self._oracle_contact_force_by_foot, torch.nan
+    )
+    self._oracle_root_s_by_foot = torch.full_like(
+      self._oracle_contact_force_by_foot, torch.nan
+    )
     self._oracle_expected_riser_contact = torch.zeros(
       env.num_envs, device=env.device, dtype=torch.bool
     )
@@ -613,9 +671,36 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       self._oracle_expected_riser_layer
     )
     env.extras[STAIR_CURRENT_GROUND_CONTACT_KEY] = self._current_ground_contact
+    env.extras[STAIR_CURRENT_CONTACT_DURATION_KEY] = self._current_contact_duration
     env.extras[STAIR_CURRENT_STAIR_SUPPORT_KEY] = self._current_stair_support
     env.extras[STAIR_CURRENT_SUPPORT_FRACTION_KEY] = self._current_support_fraction
     env.extras[STAIR_CURRENT_SUPPORT_LAYER_KEY] = self._current_support_layer
+    env.extras[STAIR_ORACLE_CONTACT_VALID_BY_FOOT_KEY] = (
+      self._oracle_contact_valid_by_foot
+    )
+    env.extras[STAIR_ORACLE_CONTACT_LAYER_BY_FOOT_KEY] = (
+      self._oracle_contact_layer_by_foot
+    )
+    env.extras[STAIR_ORACLE_CONTACT_SEQUENCE_BY_FOOT_KEY] = (
+      self._oracle_contact_sequence_by_foot
+    )
+    env.extras[STAIR_ORACLE_CONTACT_POINT_BY_FOOT_KEY] = (
+      self._oracle_contact_point_by_foot
+    )
+    env.extras[STAIR_ORACLE_CONTACT_NORMAL_BY_FOOT_KEY] = (
+      self._oracle_contact_normal_by_foot
+    )
+    env.extras[STAIR_ORACLE_CONTACT_FORCE_BY_FOOT_KEY] = (
+      self._oracle_contact_force_by_foot
+    )
+    env.extras[STAIR_ORACLE_CONTACT_S_BY_FOOT_KEY] = self._oracle_contact_s_by_foot
+    env.extras[STAIR_ORACLE_TOE_S_BY_FOOT_KEY] = self._oracle_toe_s_by_foot
+    env.extras[STAIR_ORACLE_HEEL_S_BY_FOOT_KEY] = self._oracle_heel_s_by_foot
+    env.extras[STAIR_ORACLE_FOOT_CENTER_S_BY_FOOT_KEY] = (
+      self._oracle_foot_center_s_by_foot
+    )
+    env.extras[STAIR_ORACLE_RISER_S_BY_FOOT_KEY] = self._oracle_riser_s_by_foot
+    env.extras[STAIR_ORACLE_ROOT_S_BY_FOOT_KEY] = self._oracle_root_s_by_foot
     env.extras[STAIR_GEOMETRY_OCCUPANCY_KEY] = self._geometry_stair_occupancy
     env.extras[STAIR_ADJACENT_PAIR_DEPTH_KEY] = self._adjacent_support_pair_depth
     env.extras[STAIR_ADJACENT_PAIR_HEIGHT_KEY] = self._adjacent_support_pair_height
@@ -695,6 +780,19 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     self._current_stair_support[env_ids] = False
     self._current_support_fraction[env_ids] = 0.0
     self._current_support_layer[env_ids] = 0
+    self._current_contact_duration[env_ids] = 0.0
+    self._oracle_contact_valid_by_foot[env_ids] = False
+    self._oracle_contact_layer_by_foot[env_ids] = -1
+    self._oracle_contact_sequence_by_foot[env_ids] = -1
+    self._oracle_contact_point_by_foot[env_ids] = torch.nan
+    self._oracle_contact_normal_by_foot[env_ids] = torch.nan
+    self._oracle_contact_force_by_foot[env_ids] = torch.nan
+    self._oracle_contact_s_by_foot[env_ids] = torch.nan
+    self._oracle_toe_s_by_foot[env_ids] = torch.nan
+    self._oracle_heel_s_by_foot[env_ids] = torch.nan
+    self._oracle_foot_center_s_by_foot[env_ids] = torch.nan
+    self._oracle_riser_s_by_foot[env_ids] = torch.nan
+    self._oracle_root_s_by_foot[env_ids] = torch.nan
     self._oracle_expected_riser_contact[env_ids] = False
     self._oracle_expected_riser_layer[env_ids] = -1
     self._confirmation_condition[env_ids] = False
@@ -1017,9 +1115,87 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       "event_boundary_contact": layer1_event_boundary_contact,
       "contact_layers": contact_layers,
       "contact_boundary_idx": contact_boundary_idx,
+      "contact_pos_w": contact_pos_w,
+      "contact_normal_w": normal_w,
+      "contact_force_w": force_w,
       "hit_strength": hit_strength,
       "foot_pos_w": foot_pos_w,
     }
+
+  def _update_oracle_contact_diagnostics(
+    self,
+    *,
+    event_boundary_contact: torch.Tensor,
+    contact_layers: torch.Tensor,
+    contact_boundary_idx: torch.Tensor,
+    contact_sequence_ids: torch.Tensor,
+    contact_pos_w: torch.Tensor,
+    contact_normal_w: torch.Tensor,
+    contact_force_w: torch.Tensor,
+    boundaries: torch.Tensor,
+    toe_points_w: torch.Tensor,
+    sole_points_w: torch.Tensor,
+    foot_pos_w: torch.Tensor,
+    root_pos_w: torch.Tensor,
+  ) -> None:
+    """Publish one strongest layer-2+ contact per foot for diagnostics only."""
+    valid_slots = (
+      event_boundary_contact
+      & (contact_layers >= 2)
+      & (contact_sequence_ids == self._sequence_id[:, None, None])
+      & (self._stair_phase[:, None, None] >= 1)
+    )
+    force_norm = torch.norm(contact_force_w, dim=-1)
+    selected_slot = torch.argmax(
+      torch.where(valid_slots, force_norm, torch.full_like(force_norm, -torch.inf)),
+      dim=-1,
+    )
+    valid = torch.any(valid_slots, dim=-1)
+    env_ids = torch.arange(valid.shape[0], device=valid.device)[:, None]
+    foot_ids = torch.arange(valid.shape[1], device=valid.device)[None, :]
+    layer = contact_layers[env_ids, foot_ids, selected_slot]
+    sequence = contact_sequence_ids[env_ids, foot_ids, selected_slot]
+    boundary_idx = contact_boundary_idx[env_ids, foot_ids, selected_slot]
+    point = contact_pos_w[env_ids, foot_ids, selected_slot]
+    normal = contact_normal_w[env_ids, foot_ids, selected_slot]
+    force = force_norm[env_ids, foot_ids, selected_slot]
+    boundary = boundaries[env_ids, boundary_idx]
+
+    ascent = self._ascent_dir
+    contact_s = torch.sum(point[..., :2] * ascent[:, None, :], dim=-1)
+    riser_s = torch.sum(boundary[..., :2] * ascent[:, None, :], dim=-1)
+    foot_center_s = torch.sum(foot_pos_w[..., :2] * ascent[:, None, :], dim=-1)
+    toe_s = torch.sum(toe_points_w[..., :2] * ascent[:, None, None, :], dim=-1).amax(
+      dim=-1
+    )
+    heel_s = torch.sum(sole_points_w[..., :2] * ascent[:, None, None, :], dim=-1).amin(
+      dim=-1
+    )
+    root_s = torch.sum(root_pos_w[:, :2] * ascent, dim=-1)[:, None].expand_as(
+      foot_center_s
+    )
+    nan = torch.full_like(force, torch.nan)
+
+    self._oracle_contact_valid_by_foot.copy_(valid)
+    self._oracle_contact_layer_by_foot.copy_(
+      torch.where(valid, layer, torch.full_like(layer, -1))
+    )
+    self._oracle_contact_sequence_by_foot.copy_(
+      torch.where(valid, sequence, torch.full_like(sequence, -1))
+    )
+    self._oracle_contact_point_by_foot.copy_(
+      torch.where(valid[..., None], point, torch.full_like(point, torch.nan))
+    )
+    self._oracle_contact_normal_by_foot.copy_(
+      torch.where(valid[..., None], normal, torch.full_like(normal, torch.nan))
+    )
+    self._oracle_contact_force_by_foot.copy_(torch.where(valid, force, nan))
+    self._oracle_contact_s_by_foot.copy_(torch.where(valid, contact_s, nan))
+    self._oracle_toe_s_by_foot.copy_(torch.where(valid, toe_s, nan))
+    self._oracle_heel_s_by_foot.copy_(torch.where(valid, heel_s, nan))
+    self._oracle_foot_center_s_by_foot.copy_(torch.where(valid, foot_center_s, nan))
+    self._oracle_riser_s_by_foot.copy_(torch.where(valid, riser_s, nan))
+    self._oracle_root_s_by_foot.copy_(torch.where(valid, root_s, nan))
 
   def __call__(
     self,
@@ -1092,6 +1268,19 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     self._current_stair_support.zero_()
     self._current_support_fraction.zero_()
     self._current_support_layer.zero_()
+    self._current_contact_duration.zero_()
+    self._oracle_contact_valid_by_foot.zero_()
+    self._oracle_contact_layer_by_foot.fill_(-1)
+    self._oracle_contact_sequence_by_foot.fill_(-1)
+    self._oracle_contact_point_by_foot.fill_(torch.nan)
+    self._oracle_contact_normal_by_foot.fill_(torch.nan)
+    self._oracle_contact_force_by_foot.fill_(torch.nan)
+    self._oracle_contact_s_by_foot.fill_(torch.nan)
+    self._oracle_toe_s_by_foot.fill_(torch.nan)
+    self._oracle_heel_s_by_foot.fill_(torch.nan)
+    self._oracle_foot_center_s_by_foot.fill_(torch.nan)
+    self._oracle_riser_s_by_foot.fill_(torch.nan)
+    self._oracle_root_s_by_foot.fill_(torch.nan)
     self._oracle_expected_riser_contact.zero_()
     self._oracle_expected_riser_layer.fill_(-1)
     self._confirmation_condition.zero_()
@@ -1346,6 +1535,9 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       event_boundary_contact = contact["event_boundary_contact"].bool()
       contact_layers = contact["contact_layers"].long()
       contact_boundary_idx = contact["contact_boundary_idx"].long()
+      contact_pos_w = contact["contact_pos_w"]
+      contact_normal_w = contact["contact_normal_w"]
+      contact_force_w = contact["contact_force_w"]
       new_hit_layers = torch.where(
         new_hit_by_foot[:, :, None],
         contact_layers,
@@ -1571,6 +1763,21 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
           torch.zeros_like(first_sequence_id[entry_ids]),
         )
 
+      self._update_oracle_contact_diagnostics(
+        event_boundary_contact=soft_boundary_contact,
+        contact_layers=contact_layers,
+        contact_boundary_idx=contact_boundary_idx,
+        contact_sequence_ids=contact_sequence_ids,
+        contact_pos_w=contact_pos_w,
+        contact_normal_w=contact_normal_w,
+        contact_force_w=contact_force_w,
+        boundaries=boundaries,
+        toe_points_w=toe_points,
+        sole_points_w=sole_points_w,
+        foot_pos_w=foot_pos_w,
+        root_pos_w=asset.data.root_link_pos_w,
+      )
+
       phase1 = self._stair_phase == 1
       self._context_steps = torch.where(
         self._stair_phase >= 1,
@@ -1597,6 +1804,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       ground_contact_time = ground_sensor.data.current_contact_time
       if ground_contact_time is None:
         ground_contact = ground_first_contact
+        ground_contact_time = ground_first_contact.float() * env.step_dt
       else:
         if ground_contact_time.shape[-1] != num_feet:
           if ground_contact_time.shape[-1] % num_feet != 0:
@@ -1606,6 +1814,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
           )
         ground_contact = ground_contact_time > 0.0
       self._current_ground_contact.copy_(ground_contact)
+      self._current_contact_duration.copy_(ground_contact_time)
       following_before = self._stair_phase == 2
       active_before = phase1 | following_before
       target_touchdown = active_before & ground_first_contact[env_ids, target_foot]

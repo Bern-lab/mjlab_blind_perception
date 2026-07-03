@@ -32,13 +32,22 @@ EXPECTED_STAGE0_COUNTS = {
 SUPPORT_TYPES = {
   "adjacent_double_support_partial": "adjacent_support_partial",
   "adjacent_double_support_full": "adjacent_support_full",
+  "pair_enter": "adjacent_support_first_v2",
+  "pair_stable_for_N_frames": "adjacent_support_stable_v2",
+  "pair_full": "adjacent_support_full_v2",
+  "pair_peak_quality": "adjacent_support_peak_v2",
 }
 SUPPORT_EVIDENCE_TYPES = set(SUPPORT_TYPES.values())
 DETECTOR_TYPES = {
   "detector_confirmation_proxy",
   "additional_layer_confirmation",
 }
-ORACLE_TYPES = {"oracle_contact_proxy"}
+ORACLE_TYPES = {
+  "oracle_contact_proxy",
+  "oracle_contact_point_proxy_v2",
+  "oracle_toe_proxy_v2",
+  "oracle_root_proxy_v2",
+}
 ALL_EVIDENCE_TYPES = SUPPORT_EVIDENCE_TYPES | DETECTOR_TYPES | ORACLE_TYPES
 MIN_SELECTION_COVERAGE = 0.85
 
@@ -489,6 +498,14 @@ def _projected_root(event: EventRecord) -> float:
 
 
 def _support_quality(row: Mapping[str, str]) -> tuple[float, float, float, float]:
+  quality = (
+    _as_float(row, "pair_quality_min"),
+    _as_float(row, "pair_quality_mean"),
+    _as_float(row, "pair_quality_max"),
+    _as_float(row, "pair_quality_asymmetry"),
+  )
+  if all(math.isfinite(value) for value in quality):
+    return quality
   left = _as_float(row, "left_support_ratio")
   right = _as_float(row, "right_support_ratio")
   if not math.isfinite(left) or not math.isfinite(right):
@@ -522,8 +539,12 @@ def _extract_evidence(
     for event in ordered:
       support_type = SUPPORT_TYPES.get(event.event_type)
       if support_type is not None:
-        pair_depth = _as_float(event.raw, "pair_depth")
-        pair_height = _as_float(event.raw, "pair_height")
+        if event.event_type == "pair_peak_quality":
+          pair_depth = _as_float(event.raw, "peak_pair_depth")
+          pair_height = _as_float(event.raw, "peak_pair_height")
+        else:
+          pair_depth = _as_float(event.raw, "pair_depth")
+          pair_height = _as_float(event.raw, "pair_height")
         quality_min, quality_mean, quality_max, quality_asymmetry = _support_quality(
           event.raw
         )
@@ -608,6 +629,66 @@ def _extract_evidence(
               confidence="medium",
             )
           )
+
+    oracle_v2_by_foot: dict[int, list[EventRecord]] = defaultdict(list)
+    for event in ordered:
+      if (
+        event.event_type == "oracle_riser_contact"
+        and _as_int(event.raw, "contact_valid", 0) == 1
+        and event.event_layer >= 2
+      ):
+        oracle_v2_by_foot[_as_int(event.raw, "foot_id", -1)].append(event)
+    proxy_fields = (
+      (
+        "contact_point_s",
+        "oracle_contact_point_proxy_v2",
+        "consecutive_oracle_contact_point_per_layer",
+        "high",
+      ),
+      (
+        "toe_s",
+        "oracle_toe_proxy_v2",
+        "consecutive_oracle_toe_projection_per_layer",
+        "medium",
+      ),
+      (
+        "root_s",
+        "oracle_root_proxy_v2",
+        "consecutive_oracle_root_projection_per_layer",
+        "low",
+      ),
+    )
+    for foot_events in oracle_v2_by_foot.values():
+      previous: EventRecord | None = None
+      for event in foot_events:
+        if previous is not None and event.event_layer != previous.event_layer:
+          layer_gap = abs(event.event_layer - previous.event_layer)
+          for field, evidence_type, proxy_type, confidence in proxy_fields:
+            current_s = _as_float(event.raw, field)
+            previous_s = _as_float(previous.raw, field)
+            center = (
+              abs(current_s - previous_s) / layer_gap
+              if math.isfinite(current_s) and math.isfinite(previous_s)
+              else math.nan
+            )
+            if math.isfinite(center):
+              evidence.append(
+                Evidence(
+                  key=key,
+                  seed=sequence.seed,
+                  evidence_type=evidence_type,
+                  frame_idx=event.frame_idx,
+                  event_id=event.event_id,
+                  center=center,
+                  height_center=math.nan,
+                  true_depth=sequence.true_depth,
+                  true_height=sequence.true_height,
+                  depth_bin=sequence.depth_bin,
+                  proxy_type=proxy_type,
+                  confidence=confidence,
+                )
+              )
+        previous = event
 
     confirmation_events = [
       event
@@ -1429,6 +1510,10 @@ def _pair_support_rows(
     "adjacent_partial": {"adjacent_support_partial"},
     "adjacent_full": {"adjacent_support_full"},
     "all_adjacent": {"adjacent_support_partial", "adjacent_support_full"},
+    "trajectory_first": {"adjacent_support_first_v2"},
+    "trajectory_stable": {"adjacent_support_stable_v2"},
+    "trajectory_full": {"adjacent_support_full_v2"},
+    "trajectory_peak": {"adjacent_support_peak_v2"},
   }
   for split in ("calibration", "selection", "test"):
     for support_type, allowed in group_types.items():
@@ -1884,8 +1969,15 @@ def analyze(
   )
   method_types = {
     "support_only": set(SUPPORT_TYPES.values()),
+    "support_first_v2": {"adjacent_support_first_v2"},
+    "support_stable_v2": {"adjacent_support_stable_v2"},
+    "support_full_v2": {"adjacent_support_full_v2"},
+    "support_peak_v2": {"adjacent_support_peak_v2"},
     "detector_only": DETECTOR_TYPES,
     "oracle_contact_proxy": ORACLE_TYPES,
+    "oracle_contact_point_v2": {"oracle_contact_point_proxy_v2"},
+    "oracle_toe_v2": {"oracle_toe_proxy_v2"},
+    "oracle_root_v2": {"oracle_root_proxy_v2"},
     "fused_all": ALL_EVIDENCE_TYPES,
   }
   for method, allowed_types in method_types.items():
@@ -2070,13 +2162,10 @@ def analyze(
       test_seeds,
     )
     if row["evidence_type"]
-    in {
-      "oracle_contact_proxy",
-      "detector_confirmation_proxy",
-      "additional_layer_confirmation",
-    }
+    in ORACLE_TYPES | {"detector_confirmation_proxy", "additional_layer_confirmation"}
   ]
   _write_csv(output / "confirmation_displacement_stats.csv", confirmation_rows)
+  _write_csv(output / "riser_displacement_stats.csv", confirmation_rows)
   _write_csv(
     output / "interval_shrink_curve.csv",
     _aggregate_shrink_rows(all_traces),
@@ -2140,6 +2229,82 @@ def analyze(
   )
 
 
+def analyze_descriptive(
+  input_dirs: Sequence[Path],
+  output_dir: Path,
+  *,
+  include_process_end: bool = False,
+) -> None:
+  """Write uncalibrated single-seed Stage 1.2 evidence comparisons."""
+  output = output_dir.expanduser().resolve()
+  output.mkdir(parents=True, exist_ok=True)
+  sequences, events, excluded = _load_inputs(input_dirs, include_process_end)
+  additional, duplicates = _reclassify_confirmation_events(events)
+  evidence = _extract_evidence(sequences, events, additional)
+  seeds = {sequence.seed for sequence in sequences.values()}
+  single_event_rows = _single_event_rows(evidence, [], seeds, set(), set())
+  descriptive_rows = [
+    {**row, "split": "descriptive"}
+    for row in single_event_rows
+    if row["split"] == "calibration"
+  ]
+  pair_rows = _pair_support_rows(evidence, seeds, set(), set())
+  pair_rows = [
+    {**row, "split": "descriptive"}
+    for row in pair_rows
+    if row["split"] == "calibration"
+  ]
+  riser_rows = [
+    row
+    for row in descriptive_rows
+    if row["evidence_type"]
+    in ORACLE_TYPES | {"detector_confirmation_proxy", "additional_layer_confirmation"}
+  ]
+  event_counts = Counter(
+    (event.raw.get("event_family", ""), event.event_type) for event in events
+  )
+  event_count_rows = [
+    {
+      "event_family": family,
+      "event_type": event_type,
+      "num_events": count,
+      "num_sequences": len(
+        {
+          event.key
+          for event in events
+          if event.raw.get("event_family", "") == family
+          and event.event_type == event_type
+        }
+      ),
+    }
+    for (family, event_type), count in sorted(event_counts.items())
+  ]
+  _write_csv(output / "single_event_stats.csv", descriptive_rows)
+  _write_csv(output / "pair_support_stats.csv", pair_rows)
+  _write_csv(output / "riser_displacement_stats.csv", riser_rows)
+  _write_csv(output / "logger_v2_event_counts.csv", event_count_rows)
+  _write_csv(
+    output / "data_audit_summary.csv",
+    [
+      {"metric": "sequences", "actual": len(sequences)},
+      {"metric": "events", "actual": len(events)},
+      {"metric": "evidence", "actual": len(evidence)},
+      {"metric": "excluded_process_end", "actual": excluded},
+      {"metric": "duplicate_confirmations", "actual": len(duplicates)},
+      {
+        "metric": "logger_v2_available",
+        "actual": any(event.raw.get("logger_version") == "2" for event in events),
+      },
+    ],
+  )
+  print(
+    "[Stage 1.2] Descriptive analysis complete:",
+    f"sequences={len(sequences)}",
+    f"evidence={len(evidence)}",
+    f"output={output}",
+  )
+
+
 def main() -> None:
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument("--input-dirs", nargs="+", required=True, type=Path)
@@ -2148,10 +2313,18 @@ def main() -> None:
   parser.add_argument("--selection-seeds", nargs="+", type=int, default=[43])
   parser.add_argument("--test-seeds", nargs="+", type=int, default=[44])
   parser.add_argument("--include-process-end", action="store_true")
+  parser.add_argument("--descriptive-only", action="store_true")
   parser.add_argument("--skip-expected-count-check", action="store_true")
   parser.add_argument("--outside-penalty", type=float, default=2.0)
   parser.add_argument("--shuffle-seed", type=int, default=17)
   args = parser.parse_args()
+  if args.descriptive_only:
+    analyze_descriptive(
+      input_dirs=args.input_dirs,
+      output_dir=args.output_dir,
+      include_process_end=args.include_process_end,
+    )
+    return
   analyze(
     input_dirs=args.input_dirs,
     output_dir=args.output_dir,

@@ -20,6 +20,7 @@ from .stair_geometry import (
   STAIR_CONFIRMATION_CONDITION_KEY,
   STAIR_CONFIRMATION_CONTACT_SEQUENCE_KEY,
   STAIR_CONFIRMATION_LAYER_KEY,
+  STAIR_CURRENT_CONTACT_DURATION_KEY,
   STAIR_CURRENT_GROUND_CONTACT_KEY,
   STAIR_CURRENT_STAIR_SUPPORT_KEY,
   STAIR_CURRENT_SUPPORT_FRACTION_KEY,
@@ -28,11 +29,24 @@ from .stair_geometry import (
   STAIR_EXIT_EVENT_KEY,
   STAIR_EXPECTED_LAYER_KEY,
   STAIR_GEOMETRY_OCCUPANCY_KEY,
+  STAIR_ORACLE_CONTACT_FORCE_BY_FOOT_KEY,
+  STAIR_ORACLE_CONTACT_LAYER_BY_FOOT_KEY,
+  STAIR_ORACLE_CONTACT_NORMAL_BY_FOOT_KEY,
+  STAIR_ORACLE_CONTACT_POINT_BY_FOOT_KEY,
+  STAIR_ORACLE_CONTACT_S_BY_FOOT_KEY,
+  STAIR_ORACLE_CONTACT_SEQUENCE_BY_FOOT_KEY,
+  STAIR_ORACLE_CONTACT_VALID_BY_FOOT_KEY,
   STAIR_ORACLE_EXPECTED_RISER_CONTACT_KEY,
   STAIR_ORACLE_EXPECTED_RISER_LAYER_KEY,
+  STAIR_ORACLE_FOOT_CENTER_S_BY_FOOT_KEY,
+  STAIR_ORACLE_HEEL_S_BY_FOOT_KEY,
+  STAIR_ORACLE_RISER_S_BY_FOOT_KEY,
+  STAIR_ORACLE_ROOT_S_BY_FOOT_KEY,
+  STAIR_ORACLE_TOE_S_BY_FOOT_KEY,
   STAIR_PHASE_KEY,
   STAIR_RISER_HEIGHT_LABEL_KEY,
   STAIR_SEQUENCE_ID_KEY,
+  STAIR_TARGET_FOOT_KEY,
   STAIR_TOE_RISER_HIT_LAYER_KEY,
   STAIR_TREAD_DEPTH_LABEL_KEY,
   TOE_RISER_NEW_HIT_KEY,
@@ -43,6 +57,7 @@ if TYPE_CHECKING:
 
 
 STAIR_SEQUENCE_FIELDS = (
+  "logger_version",
   "sequence_id",
   "terrain_sequence_id",
   "env_id",
@@ -86,9 +101,16 @@ STAIR_SEQUENCE_FIELDS = (
   "toe_riser_hits_layer1",
   "toe_riser_hits_layer2plus",
   "toe_riser_duplicate_hits",
+  "pair_episode_count",
+  "pair_stable_event_count",
+  "pair_peak_quality_max",
+  "oracle_contact_event_count",
+  "oracle_contact_rehit_count",
 )
 
 STAIR_EVENT_FIELDS = (
+  "logger_version",
+  "event_family",
   "sequence_id",
   "terrain_sequence_id",
   "env_id",
@@ -106,6 +128,10 @@ STAIR_EVENT_FIELDS = (
   "is_confirmation",
   "confirmation_correct",
   "confirmation_error_type",
+  "pair_episode_id",
+  "target_foot",
+  "swing_foot",
+  "support_foot",
   "left_foot_x",
   "left_foot_y",
   "left_foot_z",
@@ -116,8 +142,59 @@ STAIR_EVENT_FIELDS = (
   "right_contact",
   "left_support_ratio",
   "right_support_ratio",
+  "left_geometric_overlap",
+  "right_geometric_overlap",
+  "pair_quality_min",
+  "pair_quality_mean",
+  "pair_quality_max",
+  "pair_quality_asymmetry",
+  "left_support_layer",
+  "right_support_layer",
+  "support_layer_valid",
+  "left_stair_contact",
+  "right_stair_contact",
   "pair_depth",
   "pair_height",
+  "left_foot_s",
+  "right_foot_s",
+  "left_foot_speed",
+  "right_foot_speed",
+  "left_tangential_slip_speed",
+  "right_tangential_slip_speed",
+  "slip_valid",
+  "slip_source",
+  "left_contact_duration",
+  "right_contact_duration",
+  "stable_frame_count",
+  "stable_quality_threshold",
+  "stable_foot_speed_threshold",
+  "stable_slip_speed_threshold",
+  "peak_frame_idx",
+  "peak_pair_depth",
+  "peak_pair_height",
+  "peak_pair_quality",
+  "foot_id",
+  "foot_name",
+  "body_name",
+  "geom_name",
+  "contact_valid",
+  "contact_point_x",
+  "contact_point_y",
+  "contact_point_z",
+  "contact_point_s",
+  "contact_normal_x",
+  "contact_normal_y",
+  "contact_normal_z",
+  "contact_force_norm",
+  "toe_s",
+  "heel_s",
+  "foot_center_s",
+  "riser_s",
+  "contact_s_minus_riser_s",
+  "toe_s_minus_riser_s",
+  "heel_s_minus_riser_s",
+  "root_s",
+  "root_s_minus_riser_s",
   "root_x",
   "root_y",
   "root_z",
@@ -194,6 +271,7 @@ class StairCsvExporter:
     row.update(sequence_values)
     row.update(
       {
+        "logger_version": 2,
         "sequence_id": sequence_id,
         "has_first_layer1_collision": 1,
         "first_layer1_collision_time": sequence_values["sequence_start_time"],
@@ -213,6 +291,16 @@ class StairCsvExporter:
   def update_sequence(self, env_id: int, **values: Any) -> None:
     if self.enabled and env_id in self._active:
       self._active[env_id].update(values)
+
+  def increment_sequence(self, env_id: int, field: str) -> None:
+    if self.enabled and env_id in self._active:
+      row = self._active[env_id]
+      row[field] = int(row.get(field, 0)) + 1
+
+  def maximize_sequence(self, env_id: int, field: str, value: float) -> None:
+    if self.enabled and env_id in self._active:
+      row = self._active[env_id]
+      row[field] = max(float(row.get(field) or 0.0), value)
 
   def update_first_event(
     self,
@@ -250,6 +338,7 @@ class StairCsvExporter:
     row: dict[str, Any] = {field: "" for field in STAIR_EVENT_FIELDS}
     row.update(
       {
+        "logger_version": 2,
         "sequence_id": sequence["sequence_id"],
         "terrain_sequence_id": sequence["terrain_sequence_id"],
         "env_id": env_id,
@@ -381,6 +470,39 @@ class stair_sequence_event_logger:
     self._seen_hit_layers = torch.zeros(
       env.num_envs, 64, device=env.device, dtype=torch.bool
     )
+    self._pair_v2_active = torch.zeros_like(self._active)
+    self._pair_episode_id = torch.full(
+      (env.num_envs,), -1, device=env.device, dtype=torch.long
+    )
+    self._pair_threshold_seen = torch.zeros(
+      env.num_envs, 3, device=env.device, dtype=torch.bool
+    )
+    self._pair_full_seen = torch.zeros_like(self._active)
+    self._pair_stable_seen = torch.zeros_like(self._active)
+    self._pair_stable_steps = torch.zeros_like(self._oracle_frame)
+    self._pair_peak_quality = torch.full(
+      (env.num_envs,), -torch.inf, device=env.device, dtype=torch.float32
+    )
+    self._pair_peak_frame = torch.full_like(self._oracle_frame, -1)
+    self._pair_peak_depth = torch.full(
+      (env.num_envs,), torch.nan, device=env.device, dtype=torch.float32
+    )
+    self._pair_peak_height = torch.full_like(self._pair_peak_depth, torch.nan)
+    self._pair_peak_support_fraction = torch.zeros(
+      env.num_envs, 2, device=env.device, dtype=torch.float32
+    )
+    self._oracle_contact_previous_valid = torch.zeros(
+      env.num_envs, 2, device=env.device, dtype=torch.bool
+    )
+    self._oracle_contact_previous_layer = torch.full(
+      (env.num_envs, 2), -1, device=env.device, dtype=torch.long
+    )
+    self._oracle_contact_seen = torch.zeros(
+      env.num_envs, 2, 64, device=env.device, dtype=torch.bool
+    )
+    self._oracle_contact_last_frame = torch.full(
+      (env.num_envs, 2, 64), -1, device=env.device, dtype=torch.long
+    )
 
     zero = torch.zeros((), device=env.device, dtype=torch.float64)
     self._confirmation_total = zero.clone()
@@ -421,7 +543,16 @@ class stair_sequence_event_logger:
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg,
     command_name: str = "twist",
+    stable_frames: int = 2,
+    stable_quality_threshold: float = 0.85,
+    stable_foot_speed_threshold: float = 1.5,
+    stable_slip_speed_threshold: float = 0.8,
+    oracle_rehit_cooldown_frames: int = 3,
   ) -> torch.Tensor:
+    if stable_frames < 1:
+      raise ValueError("stable_frames must be at least one.")
+    if oracle_rehit_cooldown_frames < 1:
+      raise ValueError("oracle_rehit_cooldown_frames must be at least one.")
     phase = self._extra(env, STAIR_PHASE_KEY, (), torch.long)
     active_now = phase >= 1
     begin = active_now & ~self._active
@@ -456,6 +587,19 @@ class stair_sequence_event_logger:
     pair_full_edge = pair_edge & torch.all(support_fraction >= 1.0 - 1.0e-6, dim=-1)
     pair_partial_edge = pair_edge & ~pair_full_edge
 
+    self._update_support_trajectory(
+      env,
+      asset_cfg,
+      command_name,
+      active_now,
+      pair_condition,
+      support_fraction,
+      stable_frames,
+      stable_quality_threshold,
+      stable_foot_speed_threshold,
+      stable_slip_speed_threshold,
+    )
+
     oracle_condition = self._extra(
       env, STAIR_ORACLE_EXPECTED_RISER_CONTACT_KEY, (), torch.bool
     ).bool()
@@ -468,6 +612,13 @@ class stair_sequence_event_logger:
     self._oracle_seen |= first_oracle
     self._oracle_frame[first_oracle] = frame_idx
     self._oracle_layer[first_oracle] = oracle_layer[first_oracle]
+    self._update_oracle_contacts(
+      env,
+      asset_cfg,
+      command_name,
+      active_now,
+      oracle_rehit_cooldown_frames,
+    )
 
     raw_confirmation_event = self._extra(
       env, STAIR_DEPTH_CONFIRMATION_EVENT_KEY, (), torch.bool
@@ -582,6 +733,10 @@ class stair_sequence_event_logger:
     self._finalized_oracle_total += finalized_oracle.double().sum()
     self._detected_oracle_total += detected_oracle.double().sum()
     self._missed_total += missed.double().sum()
+    pair_finish = finish & self._pair_v2_active
+    self._record_pair_episode_end(
+      env, pair_finish, asset_cfg, command_name, emit_exit=True
+    )
     self._export_finishes(
       env,
       finish,
@@ -603,6 +758,380 @@ class stair_sequence_event_logger:
     self._previous_toe_hit.copy_(toe_hit & self._active)
     self._log_metrics(env)
     return torch.zeros(self._num_envs, device=self._device)
+
+  def _update_support_trajectory(
+    self,
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg,
+    command_name: str,
+    active_now: torch.Tensor,
+    pair_condition: torch.Tensor,
+    support_fraction: torch.Tensor,
+    stable_frames: int,
+    stable_quality_threshold: float,
+    stable_foot_speed_threshold: float,
+    stable_slip_speed_threshold: float,
+  ) -> None:
+    """Record sparse transitions from one adjacent-support episode."""
+    pair_now = active_now & pair_condition
+    enter = pair_now & ~self._pair_v2_active
+    exit_mask = self._pair_v2_active & ~pair_now
+    if torch.any(enter):
+      self._pair_episode_id[enter] += 1
+      self._pair_threshold_seen[enter] = False
+      self._pair_full_seen[enter] = False
+      self._pair_stable_seen[enter] = False
+      self._pair_stable_steps[enter] = 0
+      self._pair_peak_quality[enter] = -torch.inf
+      self._pair_peak_frame[enter] = -1
+      self._pair_peak_depth[enter] = torch.nan
+      self._pair_peak_height[enter] = torch.nan
+      self._pair_peak_support_fraction[enter] = 0.0
+
+    pair_quality = torch.amin(support_fraction, dim=-1)
+    pair_depth = self._extra(env, STAIR_ADJACENT_PAIR_DEPTH_KEY, (), torch.float32)
+    pair_height = self._extra(env, STAIR_ADJACENT_PAIR_HEIGHT_KEY, (), torch.float32)
+    better_peak = pair_now & (pair_quality > self._pair_peak_quality)
+    self._pair_peak_quality = torch.where(
+      better_peak, pair_quality, self._pair_peak_quality
+    )
+    frame_idx = int(env.common_step_counter)
+    self._pair_peak_frame = torch.where(
+      better_peak,
+      torch.full_like(self._pair_peak_frame, frame_idx),
+      self._pair_peak_frame,
+    )
+    self._pair_peak_depth = torch.where(better_peak, pair_depth, self._pair_peak_depth)
+    self._pair_peak_height = torch.where(
+      better_peak, pair_height, self._pair_peak_height
+    )
+    self._pair_peak_support_fraction = torch.where(
+      better_peak[:, None],
+      support_fraction,
+      self._pair_peak_support_fraction,
+    )
+
+    self._record_support_events(env, enter, "pair_enter", asset_cfg, command_name)
+    thresholds = (0.50, 0.75, 0.90)
+    for index, threshold in enumerate(thresholds):
+      crossing = (
+        pair_now & (pair_quality >= threshold) & ~self._pair_threshold_seen[:, index]
+      )
+      self._pair_threshold_seen[:, index] |= crossing
+      self._record_support_events(
+        env,
+        crossing,
+        f"pair_quality_cross_{threshold:.2f}",
+        asset_cfg,
+        command_name,
+      )
+
+    full = pair_now & (pair_quality >= 1.0 - 1.0e-6) & ~self._pair_full_seen
+    self._pair_full_seen |= full
+    self._record_support_events(env, full, "pair_full", asset_cfg, command_name)
+
+    asset = env.scene[asset_cfg.name]
+    body_velocity = getattr(asset.data, "body_link_lin_vel_w", None)
+    if isinstance(body_velocity, torch.Tensor):
+      foot_velocity = body_velocity[:, asset_cfg.body_ids, :]
+      low_speed = torch.all(
+        torch.norm(foot_velocity, dim=-1) <= stable_foot_speed_threshold, dim=-1
+      )
+      low_slip = torch.all(
+        torch.norm(foot_velocity[..., :2], dim=-1) <= stable_slip_speed_threshold,
+        dim=-1,
+      )
+      stable_now = (
+        pair_now & (pair_quality >= stable_quality_threshold) & low_speed & low_slip
+      )
+    else:
+      stable_now = torch.zeros_like(pair_now)
+    self._pair_stable_steps = torch.where(
+      stable_now,
+      self._pair_stable_steps + 1,
+      torch.zeros_like(self._pair_stable_steps),
+    )
+    stable = (
+      stable_now & (self._pair_stable_steps >= stable_frames) & ~self._pair_stable_seen
+    )
+    self._pair_stable_seen |= stable
+    self._record_support_events(
+      env,
+      stable,
+      "pair_stable_for_N_frames",
+      asset_cfg,
+      command_name,
+      stable_frame_count=stable_frames,
+      stable_quality_threshold=stable_quality_threshold,
+      stable_foot_speed_threshold=stable_foot_speed_threshold,
+      stable_slip_speed_threshold=stable_slip_speed_threshold,
+    )
+
+    self._record_pair_episode_end(
+      env, exit_mask, asset_cfg, command_name, emit_exit=True
+    )
+    self._pair_v2_active.copy_(pair_now)
+
+  def _record_support_events(
+    self,
+    env: ManagerBasedRlEnv,
+    mask: torch.Tensor,
+    event_type: str,
+    asset_cfg: SceneEntityCfg,
+    command_name: str,
+    *,
+    stable_frame_count: int | None = None,
+    stable_quality_threshold: float | None = None,
+    stable_foot_speed_threshold: float | None = None,
+    stable_slip_speed_threshold: float | None = None,
+  ) -> None:
+    pair_layers = torch.amax(
+      self._extra(env, STAIR_CURRENT_SUPPORT_LAYER_KEY, (2,), torch.long), dim=-1
+    )
+    payloads = self._event_payloads(env, mask, pair_layers, asset_cfg, command_name)
+    for env_id, payload in payloads.items():
+      payload.update(
+        {
+          "event_family": "support_trajectory",
+          "pair_episode_id": int(self._pair_episode_id[env_id].item()),
+          "stable_frame_count": (
+            stable_frame_count if stable_frame_count is not None else ""
+          ),
+          "stable_quality_threshold": (
+            stable_quality_threshold if stable_quality_threshold is not None else ""
+          ),
+          "stable_foot_speed_threshold": (
+            stable_foot_speed_threshold
+            if stable_foot_speed_threshold is not None
+            else ""
+          ),
+          "stable_slip_speed_threshold": (
+            stable_slip_speed_threshold
+            if stable_slip_speed_threshold is not None
+            else ""
+          ),
+        }
+      )
+      if (
+        self._exporter.record_event(env_id, event_type, payload, once_key=None)
+        and event_type == "pair_enter"
+      ):
+        self._exporter.increment_sequence(env_id, "pair_episode_count")
+      if event_type == "pair_stable_for_N_frames":
+        self._exporter.increment_sequence(env_id, "pair_stable_event_count")
+
+  def _record_pair_episode_end(
+    self,
+    env: ManagerBasedRlEnv,
+    mask: torch.Tensor,
+    asset_cfg: SceneEntityCfg,
+    command_name: str,
+    *,
+    emit_exit: bool,
+  ) -> None:
+    pair_layers = torch.amax(
+      self._extra(env, STAIR_CURRENT_SUPPORT_LAYER_KEY, (2,), torch.long), dim=-1
+    )
+    payloads = self._event_payloads(env, mask, pair_layers, asset_cfg, command_name)
+    for env_id, payload in payloads.items():
+      peak = float(self._pair_peak_quality[env_id].item())
+      peak_left = float(self._pair_peak_support_fraction[env_id, 0].item())
+      peak_right = float(self._pair_peak_support_fraction[env_id, 1].item())
+      peak_payload = dict(payload)
+      peak_payload.update(
+        {
+          "event_family": "support_trajectory",
+          "pair_episode_id": int(self._pair_episode_id[env_id].item()),
+          "peak_frame_idx": int(self._pair_peak_frame[env_id].item()),
+          "peak_pair_depth": float(self._pair_peak_depth[env_id].item()),
+          "peak_pair_height": float(self._pair_peak_height[env_id].item()),
+          "peak_pair_quality": peak,
+          "pair_quality_min": peak,
+          "pair_quality_mean": 0.5 * (peak_left + peak_right),
+          "pair_quality_max": max(peak_left, peak_right),
+          "pair_quality_asymmetry": abs(peak_left - peak_right),
+          "left_geometric_overlap": peak_left,
+          "right_geometric_overlap": peak_right,
+          "left_support_ratio": peak_left,
+          "right_support_ratio": peak_right,
+        }
+      )
+      self._exporter.record_event(
+        env_id, "pair_peak_quality", peak_payload, once_key=None
+      )
+      self._exporter.maximize_sequence(env_id, "pair_peak_quality_max", peak)
+      if emit_exit:
+        payload.update(
+          {
+            "event_family": "support_trajectory",
+            "pair_episode_id": int(self._pair_episode_id[env_id].item()),
+          }
+        )
+        self._exporter.record_event(env_id, "pair_exit", payload, once_key=None)
+
+  def _update_oracle_contacts(
+    self,
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg,
+    command_name: str,
+    active_now: torch.Tensor,
+    rehit_cooldown_frames: int,
+  ) -> None:
+    valid = self._extra(
+      env, STAIR_ORACLE_CONTACT_VALID_BY_FOOT_KEY, (2,), torch.bool
+    ).bool()
+    layer = self._extra(
+      env, STAIR_ORACLE_CONTACT_LAYER_BY_FOOT_KEY, (2,), torch.long
+    ).long()
+    valid &= active_now[:, None] & (layer >= 2)
+    edge = valid & (
+      ~self._oracle_contact_previous_valid
+      | (layer != self._oracle_contact_previous_layer)
+    )
+    frame_idx = int(env.common_step_counter)
+    for foot_id in range(2):
+      foot_edge = edge[:, foot_id]
+      if not torch.any(foot_edge):
+        continue
+      clamped_layer = layer[:, foot_id].clamp(
+        0, self._oracle_contact_seen.shape[-1] - 1
+      )
+      env_ids = torch.arange(self._num_envs, device=self._device)
+      seen = self._oracle_contact_seen[env_ids, foot_id, clamped_layer]
+      last_frame = self._oracle_contact_last_frame[env_ids, foot_id, clamped_layer]
+      first = foot_edge & ~seen
+      rehit = foot_edge & seen & ((frame_idx - last_frame) >= rehit_cooldown_frames)
+      self._record_oracle_contact_events(
+        env,
+        first,
+        foot_id,
+        layer[:, foot_id],
+        "oracle_riser_contact",
+        asset_cfg,
+        command_name,
+      )
+      self._record_oracle_contact_events(
+        env,
+        rehit,
+        foot_id,
+        layer[:, foot_id],
+        "oracle_riser_contact_rehit",
+        asset_cfg,
+        command_name,
+      )
+      recorded = first | rehit
+      self._oracle_contact_seen[env_ids[first], foot_id, clamped_layer[first]] = True
+      self._oracle_contact_last_frame[
+        env_ids[recorded], foot_id, clamped_layer[recorded]
+      ] = frame_idx
+    self._oracle_contact_previous_valid.copy_(valid)
+    self._oracle_contact_previous_layer.copy_(
+      torch.where(valid, layer, torch.full_like(layer, -1))
+    )
+
+  def _record_oracle_contact_events(
+    self,
+    env: ManagerBasedRlEnv,
+    mask: torch.Tensor,
+    foot_id: int,
+    layer: torch.Tensor,
+    event_type: str,
+    asset_cfg: SceneEntityCfg,
+    command_name: str,
+    *,
+    event_family: str = "oracle_contact",
+    update_sequence_counts: bool = True,
+  ) -> None:
+    payloads = self._event_payloads(env, mask, layer, asset_cfg, command_name)
+    if not payloads:
+      return
+    point = self._extra(
+      env, STAIR_ORACLE_CONTACT_POINT_BY_FOOT_KEY, (2, 3), torch.float32
+    )
+    normal = self._extra(
+      env, STAIR_ORACLE_CONTACT_NORMAL_BY_FOOT_KEY, (2, 3), torch.float32
+    )
+    force = self._extra(
+      env, STAIR_ORACLE_CONTACT_FORCE_BY_FOOT_KEY, (2,), torch.float32
+    )
+    contact_s = self._extra(
+      env, STAIR_ORACLE_CONTACT_S_BY_FOOT_KEY, (2,), torch.float32
+    )
+    toe_s = self._extra(env, STAIR_ORACLE_TOE_S_BY_FOOT_KEY, (2,), torch.float32)
+    heel_s = self._extra(env, STAIR_ORACLE_HEEL_S_BY_FOOT_KEY, (2,), torch.float32)
+    center_s = self._extra(
+      env, STAIR_ORACLE_FOOT_CENTER_S_BY_FOOT_KEY, (2,), torch.float32
+    )
+    riser_s = self._extra(env, STAIR_ORACLE_RISER_S_BY_FOOT_KEY, (2,), torch.float32)
+    root_s = self._extra(env, STAIR_ORACLE_ROOT_S_BY_FOOT_KEY, (2,), torch.float32)
+    sequence = self._extra(
+      env, STAIR_ORACLE_CONTACT_SEQUENCE_BY_FOOT_KEY, (2,), torch.long
+    )
+    body_names = asset_cfg.body_names
+    body_name = (
+      body_names[foot_id]
+      if isinstance(body_names, list) and foot_id < len(body_names)
+      else ""
+    )
+    for env_id, payload in payloads.items():
+      valid_point = bool(torch.all(torch.isfinite(point[env_id, foot_id])).item())
+
+      def finite_or_blank(value: torch.Tensor) -> float | str:
+        return float(value.item()) if bool(torch.isfinite(value).item()) else ""
+
+      riser = riser_s[env_id, foot_id]
+      payload.update(
+        {
+          "event_family": event_family,
+          "foot_id": foot_id,
+          "foot_name": "left" if foot_id == 0 else "right",
+          "body_name": body_name,
+          "geom_name": "",
+          "contact_valid": int(valid_point),
+          "contact_point_x": (
+            float(point[env_id, foot_id, 0].item()) if valid_point else ""
+          ),
+          "contact_point_y": (
+            float(point[env_id, foot_id, 1].item()) if valid_point else ""
+          ),
+          "contact_point_z": (
+            float(point[env_id, foot_id, 2].item()) if valid_point else ""
+          ),
+          "contact_point_s": finite_or_blank(contact_s[env_id, foot_id]),
+          "contact_normal_x": (
+            float(normal[env_id, foot_id, 0].item()) if valid_point else ""
+          ),
+          "contact_normal_y": (
+            float(normal[env_id, foot_id, 1].item()) if valid_point else ""
+          ),
+          "contact_normal_z": (
+            float(normal[env_id, foot_id, 2].item()) if valid_point else ""
+          ),
+          "contact_force_norm": finite_or_blank(force[env_id, foot_id]),
+          "toe_s": finite_or_blank(toe_s[env_id, foot_id]),
+          "heel_s": finite_or_blank(heel_s[env_id, foot_id]),
+          "foot_center_s": finite_or_blank(center_s[env_id, foot_id]),
+          "riser_s": finite_or_blank(riser),
+          "contact_s_minus_riser_s": finite_or_blank(
+            contact_s[env_id, foot_id] - riser
+          ),
+          "toe_s_minus_riser_s": finite_or_blank(toe_s[env_id, foot_id] - riser),
+          "heel_s_minus_riser_s": finite_or_blank(heel_s[env_id, foot_id] - riser),
+          "root_s": finite_or_blank(root_s[env_id, foot_id]),
+          "root_s_minus_riser_s": finite_or_blank(root_s[env_id, foot_id] - riser),
+          "terrain_sequence_id": int(sequence[env_id, foot_id].item()),
+        }
+      )
+      if (
+        self._exporter.record_event(env_id, event_type, payload, once_key=None)
+        and update_sequence_counts
+      ):
+        field = (
+          "oracle_contact_rehit_count"
+          if event_type.endswith("rehit")
+          else "oracle_contact_event_count"
+        )
+        self._exporter.increment_sequence(env_id, field)
 
   def _clear_sequence_state(self, env_ids: torch.Tensor | slice) -> None:
     self._previous_partial_support[env_ids] = False
@@ -631,6 +1160,21 @@ class stair_sequence_event_logger:
     self._toe_hits_duplicate[env_ids] = 0
     self._seen_confirmation_layers[env_ids] = False
     self._seen_hit_layers[env_ids] = False
+    self._pair_v2_active[env_ids] = False
+    self._pair_episode_id[env_ids] = -1
+    self._pair_threshold_seen[env_ids] = False
+    self._pair_full_seen[env_ids] = False
+    self._pair_stable_seen[env_ids] = False
+    self._pair_stable_steps[env_ids] = 0
+    self._pair_peak_quality[env_ids] = -torch.inf
+    self._pair_peak_frame[env_ids] = -1
+    self._pair_peak_depth[env_ids] = torch.nan
+    self._pair_peak_height[env_ids] = torch.nan
+    self._pair_peak_support_fraction[env_ids] = 0.0
+    self._oracle_contact_previous_valid[env_ids] = False
+    self._oracle_contact_previous_layer[env_ids] = -1
+    self._oracle_contact_seen[env_ids] = False
+    self._oracle_contact_last_frame[env_ids] = -1
 
   def _extra(
     self,
@@ -659,6 +1203,13 @@ class stair_sequence_event_logger:
     ids = mask.nonzero(as_tuple=False).squeeze(-1)
     asset = env.scene[asset_cfg.name]
     feet = asset.data.body_link_pos_w[ids][:, asset_cfg.body_ids, :]
+    body_velocity = getattr(asset.data, "body_link_lin_vel_w", None)
+    if isinstance(body_velocity, torch.Tensor):
+      velocity_available = True
+      foot_velocity = body_velocity[ids][:, asset_cfg.body_ids, :]
+    else:
+      velocity_available = False
+      foot_velocity = torch.zeros_like(feet)
     root = asset.data.root_link_pos_w[ids]
     ground_contact = self._extra(
       env, STAIR_CURRENT_GROUND_CONTACT_KEY, (2,), torch.bool
@@ -666,11 +1217,31 @@ class stair_sequence_event_logger:
     support_fraction = self._extra(
       env, STAIR_CURRENT_SUPPORT_FRACTION_KEY, (2,), torch.float32
     )[ids]
+    support_layers = self._extra(
+      env, STAIR_CURRENT_SUPPORT_LAYER_KEY, (2,), torch.long
+    )[ids]
+    support_layer_available = isinstance(
+      env.extras.get(STAIR_CURRENT_SUPPORT_LAYER_KEY), torch.Tensor
+    )
+    stair_support = self._extra(env, STAIR_CURRENT_STAIR_SUPPORT_KEY, (2,), torch.bool)[
+      ids
+    ]
+    contact_duration = self._extra(
+      env, STAIR_CURRENT_CONTACT_DURATION_KEY, (2,), torch.float32
+    )[ids]
+    target_foot = self._extra(env, STAIR_TARGET_FOOT_KEY, (), torch.long)[ids]
     pair_depth = self._extra(env, STAIR_ADJACENT_PAIR_DEPTH_KEY, (), torch.float32)[ids]
     pair_height = self._extra(env, STAIR_ADJACENT_PAIR_HEIGHT_KEY, (), torch.float32)[
       ids
     ]
     ascent = self._extra(env, STAIR_ASCENT_DIR_KEY, (2,), torch.float32)[ids]
+    foot_s = torch.sum(feet[..., :2] * ascent[:, None, :], dim=-1)
+    foot_speed = torch.norm(foot_velocity, dim=-1)
+    slip_speed = torch.norm(foot_velocity[..., :2], dim=-1)
+    pair_min = torch.amin(support_fraction, dim=-1)
+    pair_mean = torch.mean(support_fraction, dim=-1)
+    pair_max = torch.amax(support_fraction, dim=-1)
+    pair_asymmetry = torch.abs(support_fraction[:, 0] - support_fraction[:, 1])
     phase = self._extra(env, STAIR_PHASE_KEY, (), torch.long)[ids]
     command = env.command_manager.get_command(command_name)
     if command is None:
@@ -681,6 +1252,17 @@ class stair_sequence_event_logger:
       "root": root.detach().cpu().tolist(),
       "ground": ground_contact.detach().cpu().tolist(),
       "support": support_fraction.detach().cpu().tolist(),
+      "support_layers": support_layers.detach().cpu().tolist(),
+      "stair_support": stair_support.detach().cpu().tolist(),
+      "contact_duration": contact_duration.detach().cpu().tolist(),
+      "target_foot": target_foot.detach().cpu().tolist(),
+      "foot_s": foot_s.detach().cpu().tolist(),
+      "foot_speed": foot_speed.detach().cpu().tolist(),
+      "slip_speed": slip_speed.detach().cpu().tolist(),
+      "pair_min": pair_min.detach().cpu().tolist(),
+      "pair_mean": pair_mean.detach().cpu().tolist(),
+      "pair_max": pair_max.detach().cpu().tolist(),
+      "pair_asymmetry": pair_asymmetry.detach().cpu().tolist(),
       "pair_depth": pair_depth.detach().cpu().tolist(),
       "pair_height": pair_height.detach().cpu().tolist(),
       "ascent": ascent.detach().cpu().tolist(),
@@ -695,6 +1277,8 @@ class stair_sequence_event_logger:
       feet_row = selected["feet"][index]
       command_row = selected["command"][index]
       payloads[env_id] = {
+        "logger_version": 2,
+        "event_family": "legacy",
         "time": time,
         "frame_idx": frame_idx,
         "event_layer": selected["layer"][index],
@@ -710,8 +1294,38 @@ class stair_sequence_event_logger:
         "right_contact": int(selected["ground"][index][1]),
         "left_support_ratio": selected["support"][index][0],
         "right_support_ratio": selected["support"][index][1],
+        "left_geometric_overlap": selected["support"][index][0],
+        "right_geometric_overlap": selected["support"][index][1],
+        "pair_quality_min": selected["pair_min"][index],
+        "pair_quality_mean": selected["pair_mean"][index],
+        "pair_quality_max": selected["pair_max"][index],
+        "pair_quality_asymmetry": selected["pair_asymmetry"][index],
+        "left_support_layer": selected["support_layers"][index][0],
+        "right_support_layer": selected["support_layers"][index][1],
+        "support_layer_valid": int(support_layer_available),
+        "left_stair_contact": int(selected["stair_support"][index][0]),
+        "right_stair_contact": int(selected["stair_support"][index][1]),
         "pair_depth": selected["pair_depth"][index],
         "pair_height": selected["pair_height"][index],
+        "left_foot_s": selected["foot_s"][index][0],
+        "right_foot_s": selected["foot_s"][index][1],
+        "left_foot_speed": selected["foot_speed"][index][0],
+        "right_foot_speed": selected["foot_speed"][index][1],
+        "left_tangential_slip_speed": selected["slip_speed"][index][0],
+        "right_tangential_slip_speed": selected["slip_speed"][index][1],
+        "slip_valid": int(velocity_available),
+        "slip_source": (
+          "foot_link_horizontal_speed_proxy" if velocity_available else ""
+        ),
+        "left_contact_duration": selected["contact_duration"][index][0],
+        "right_contact_duration": selected["contact_duration"][index][1],
+        "target_foot": selected["target_foot"][index],
+        "swing_foot": selected["target_foot"][index],
+        "support_foot": (
+          1 - selected["target_foot"][index]
+          if selected["target_foot"][index] in (0, 1)
+          else ""
+        ),
         "root_x": selected["root"][index][0],
         "root_y": selected["root"][index][1],
         "root_z": selected["root"][index][2],
@@ -880,6 +1494,7 @@ class stair_sequence_event_logger:
         errors.append("flat")
       payload.update(
         {
+          "event_family": "confirmation",
           "is_confirmation": 1,
           "confirmation_correct": int(correct[env_id].item()),
           "confirmation_error_type": "|".join(errors),
@@ -901,6 +1516,30 @@ class stair_sequence_event_logger:
           confirmation_delay=(int(delay[env_id].item()) if delay[env_id] >= 0 else ""),
         )
 
+    contact_valid = self._extra(
+      env, STAIR_ORACLE_CONTACT_VALID_BY_FOOT_KEY, (2,), torch.bool
+    ).bool()
+    contact_layer = self._extra(
+      env, STAIR_ORACLE_CONTACT_LAYER_BY_FOOT_KEY, (2,), torch.long
+    ).long()
+    for foot_id in range(2):
+      contact_proxy = (
+        confirmation_event
+        & contact_valid[:, foot_id]
+        & (contact_layer[:, foot_id] == confirmation_layer)
+      )
+      self._record_oracle_contact_events(
+        env,
+        contact_proxy,
+        foot_id,
+        contact_layer[:, foot_id],
+        "confirmation_contact_proxy",
+        asset_cfg,
+        command_name,
+        event_family="confirmation",
+        update_sequence_counts=False,
+      )
+
     payloads = self._event_payloads(
       env,
       duplicate,
@@ -911,6 +1550,7 @@ class stair_sequence_event_logger:
     for env_id, payload in payloads.items():
       payload.update(
         {
+          "event_family": "confirmation",
           "is_confirmation": 1,
           "confirmation_correct": 0,
           "confirmation_error_type": "duplicate",
@@ -933,6 +1573,7 @@ class stair_sequence_event_logger:
     for env_id, payload in payloads.items():
       payload.update(
         {
+          "event_family": "confirmation",
           "is_confirmation": 1,
           "confirmation_correct": 1,
           "confirmation_error_type": "",

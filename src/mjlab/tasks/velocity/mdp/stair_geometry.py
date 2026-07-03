@@ -47,11 +47,38 @@ STAIR_CURRENT_GROUND_CONTACT_KEY = "slow_latent_stair_current_ground_contact"
 STAIR_CURRENT_STAIR_SUPPORT_KEY = "slow_latent_stair_current_stair_support"
 STAIR_CURRENT_SUPPORT_FRACTION_KEY = "slow_latent_stair_current_support_fraction"
 STAIR_CURRENT_SUPPORT_LAYER_KEY = "slow_latent_stair_current_support_layer"
+STAIR_CURRENT_CONTACT_DURATION_KEY = "slow_latent_stair_current_contact_duration"
 STAIR_GEOMETRY_OCCUPANCY_KEY = "slow_latent_stair_geometry_occupancy"
 STAIR_ADJACENT_PAIR_DEPTH_KEY = "slow_latent_stair_adjacent_pair_depth"
 STAIR_ADJACENT_PAIR_HEIGHT_KEY = "slow_latent_stair_adjacent_pair_height"
 STAIR_ADJACENT_PAIR_VALID_KEY = "slow_latent_stair_adjacent_pair_valid"
 STAIR_ADJACENT_PAIR_EVENT_KEY = "slow_latent_stair_adjacent_pair_event"
+STAIR_ORACLE_CONTACT_VALID_BY_FOOT_KEY = (
+  "slow_latent_stair_oracle_contact_valid_by_foot"
+)
+STAIR_ORACLE_CONTACT_LAYER_BY_FOOT_KEY = (
+  "slow_latent_stair_oracle_contact_layer_by_foot"
+)
+STAIR_ORACLE_CONTACT_SEQUENCE_BY_FOOT_KEY = (
+  "slow_latent_stair_oracle_contact_sequence_by_foot"
+)
+STAIR_ORACLE_CONTACT_POINT_BY_FOOT_KEY = (
+  "slow_latent_stair_oracle_contact_point_by_foot"
+)
+STAIR_ORACLE_CONTACT_NORMAL_BY_FOOT_KEY = (
+  "slow_latent_stair_oracle_contact_normal_by_foot"
+)
+STAIR_ORACLE_CONTACT_FORCE_BY_FOOT_KEY = (
+  "slow_latent_stair_oracle_contact_force_by_foot"
+)
+STAIR_ORACLE_CONTACT_S_BY_FOOT_KEY = "slow_latent_stair_oracle_contact_s_by_foot"
+STAIR_ORACLE_TOE_S_BY_FOOT_KEY = "slow_latent_stair_oracle_toe_s_by_foot"
+STAIR_ORACLE_HEEL_S_BY_FOOT_KEY = "slow_latent_stair_oracle_heel_s_by_foot"
+STAIR_ORACLE_FOOT_CENTER_S_BY_FOOT_KEY = (
+  "slow_latent_stair_oracle_foot_center_s_by_foot"
+)
+STAIR_ORACLE_RISER_S_BY_FOOT_KEY = "slow_latent_stair_oracle_riser_s_by_foot"
+STAIR_ORACLE_ROOT_S_BY_FOOT_KEY = "slow_latent_stair_oracle_root_s_by_foot"
 SAFE_STRIDE_VALID_KEY = "slow_latent_safe_stride_valid"
 SAFE_TREAD_LOWER_BOUND_KEY = "slow_latent_safe_tread_lower_bound"
 MINIMUM_SAFE_STRIDE_KEY = "slow_latent_minimum_safe_stride"

@@ -14,6 +14,7 @@ from tools.analyze_stair_intervals import (
   SequenceRecord,
   _calibrate,
   _calibrate_quality_buckets,
+  _extract_evidence,
   _fuse_sequence,
   _load_inputs,
   _macro_f1,
@@ -24,6 +25,7 @@ from tools.analyze_stair_intervals import (
   _shuffled_quality_overrides,
   _support_quality,
   analyze,
+  analyze_descriptive,
 )
 
 
@@ -88,6 +90,116 @@ def _event_row(
     "left_support_ratio": left_support_ratio,
     "right_support_ratio": right_support_ratio,
   }
+
+
+def test_v2_trajectory_and_contact_evidence_are_extracted(tmp_path: Path) -> None:
+  run = tmp_path / "model_seed42"
+  _write_rows(
+    run / "stair_sequences.csv",
+    [_sequence_row("1", 0.30, 3, oracle=True)],
+  )
+  events = [
+    _event_row("1", 0, "first_layer1_collision", 0, layer=1, root_x=0.0),
+    {
+      **_event_row(
+        "1",
+        1,
+        "pair_enter",
+        10,
+        layer=2,
+        root_x=0.2,
+        pair_depth=0.25,
+      ),
+      "pair_quality_min": 0.55,
+      "pair_quality_mean": 0.65,
+      "pair_quality_max": 0.75,
+      "pair_quality_asymmetry": 0.20,
+    },
+    {
+      **_event_row(
+        "1",
+        2,
+        "pair_stable_for_N_frames",
+        12,
+        layer=2,
+        root_x=0.2,
+        pair_depth=0.28,
+      ),
+      "pair_quality_min": 0.90,
+      "pair_quality_mean": 0.92,
+      "pair_quality_max": 0.94,
+      "pair_quality_asymmetry": 0.04,
+    },
+    {
+      **_event_row(
+        "1",
+        3,
+        "pair_peak_quality",
+        14,
+        layer=2,
+        root_x=0.2,
+      ),
+      "peak_pair_depth": 0.29,
+      "peak_pair_height": 0.10,
+      "pair_quality_min": 0.95,
+      "pair_quality_mean": 0.96,
+      "pair_quality_max": 0.97,
+      "pair_quality_asymmetry": 0.02,
+    },
+    {
+      **_event_row("1", 4, "oracle_riser_contact", 20, layer=2, root_x=0.50),
+      "foot_id": 0,
+      "contact_valid": 1,
+      "contact_point_s": 0.60,
+      "toe_s": 0.61,
+      "root_s": 0.50,
+    },
+    {
+      **_event_row("1", 5, "oracle_riser_contact", 30, layer=3, root_x=0.80),
+      "foot_id": 0,
+      "contact_valid": 1,
+      "contact_point_s": 0.90,
+      "toe_s": 0.92,
+      "root_s": 0.79,
+    },
+    {
+      **_event_row("1", 6, "oracle_riser_contact", 40, layer=4, root_x=1.10),
+      "foot_id": 0,
+      "contact_valid": 0,
+      "contact_point_s": "",
+      "toe_s": 1.20,
+      "root_s": 1.10,
+    },
+  ]
+  _write_rows(run / "stair_events.csv", events)
+
+  sequences, loaded_events, _excluded = _load_inputs([run], False)
+  evidence = _extract_evidence(sequences, loaded_events, set())
+  by_type = {item.evidence_type: item for item in evidence}
+
+  assert by_type["adjacent_support_first_v2"].center == pytest.approx(0.25)
+  assert by_type["adjacent_support_stable_v2"].center == pytest.approx(0.28)
+  assert by_type["adjacent_support_peak_v2"].center == pytest.approx(0.29)
+  assert by_type["adjacent_support_peak_v2"].quality_min == pytest.approx(0.95)
+  assert by_type["oracle_contact_point_proxy_v2"].center == pytest.approx(0.30)
+  assert by_type["oracle_toe_proxy_v2"].center == pytest.approx(0.31)
+  assert by_type["oracle_root_proxy_v2"].center == pytest.approx(0.29)
+  assert (
+    sum(item.evidence_type == "oracle_contact_point_proxy_v2" for item in evidence) == 1
+  )
+
+  output = tmp_path / "descriptive"
+  analyze_descriptive([run], output)
+  single_event_rows = list(csv.DictReader((output / "single_event_stats.csv").open()))
+  assert {row["evidence_type"] for row in single_event_rows} >= {
+    "adjacent_support_first_v2",
+    "adjacent_support_stable_v2",
+    "adjacent_support_peak_v2",
+    "oracle_contact_point_proxy_v2",
+    "oracle_toe_proxy_v2",
+    "oracle_root_proxy_v2",
+  }
+  assert (output / "logger_v2_event_counts.csv").exists()
 
 
 def _make_run(root: Path, seed: int, depth: float, depth_bin: int) -> Path:
