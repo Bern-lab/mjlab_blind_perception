@@ -83,6 +83,10 @@ Added
   raw expected-riser contact as an independent oracle. Events are counted on
   rising edges, while TensorBoard reports precision, recall, false-confirmation,
   duplicate, missed-event, and detection-delay metrics.
+- Added a held-out offline stair-interval analysis tool that calibrates physical
+  evidence on one rollout seed, selects conflict handling on another, and
+  reports support, contact-proxy, fusion, and shuffled-baseline metrics only on
+  a final test seed.
 
 Changed
 ^^^^^^^
