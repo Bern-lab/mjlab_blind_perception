@@ -10,8 +10,10 @@ from tools.analyze_stair_intervals import (
   Evidence,
   IntervalEvidence,
   Prediction,
+  QualityScheme,
   SequenceRecord,
   _calibrate,
+  _calibrate_quality_buckets,
   _fuse_sequence,
   _load_inputs,
   _macro_f1,
@@ -19,6 +21,8 @@ from tools.analyze_stair_intervals import (
   _reclassify_confirmation_events,
   _regression_stats,
   _shuffled_evidence,
+  _shuffled_quality_overrides,
+  _support_quality,
   analyze,
 )
 
@@ -65,6 +69,8 @@ def _event_row(
   root_x: float,
   pair_depth: float = 0.0,
   pair_height: float = 0.0,
+  left_support_ratio: float = 0.0,
+  right_support_ratio: float = 0.0,
 ) -> dict[str, object]:
   return {
     "sequence_id": sequence_id,
@@ -79,6 +85,8 @@ def _event_row(
     "ascent_dir_y": 0.0,
     "pair_depth": pair_depth,
     "pair_height": pair_height,
+    "left_support_ratio": left_support_ratio,
+    "right_support_ratio": right_support_ratio,
   }
 
 
@@ -104,6 +112,8 @@ def _make_run(root: Path, seed: int, depth: float, depth_bin: int) -> Path:
       root_x=0.1,
       pair_depth=depth - 0.02,
       pair_height=0.09,
+      left_support_ratio=0.75,
+      right_support_ratio=0.90,
     ),
     _event_row("1", 2, "confirmation", 30, layer=2, root_x=depth),
     _event_row("1", 3, "confirmation_duplicate", 35, layer=3, root_x=0.5),
@@ -117,6 +127,8 @@ def _make_run(root: Path, seed: int, depth: float, depth_bin: int) -> Path:
       root_x=0.1,
       pair_depth=depth + 0.01,
       pair_height=0.105,
+      left_support_ratio=1.0,
+      right_support_ratio=1.0,
     ),
     _event_row(
       "2",
@@ -198,6 +210,28 @@ def test_stage1_full_analysis_uses_composite_keys_and_held_out_split(
   }
   assert (output / "interval_shrink_curve.csv").exists()
   assert (output / "sequence_interval_predictions.csv").exists()
+  quality_summary = list(
+    csv.DictReader((output / "support_quality_interval_summary.csv").open())
+  )
+  assert {row["method"] for row in quality_summary} == {
+    "full_only",
+    "binary_partial_full",
+    "quality_binned",
+    "quality_aware",
+    "shuffled_quality",
+  }
+  assert {row["test_seeds"] for row in quality_summary} == {"44"}
+  quality_calibration = list(
+    csv.DictReader((output / "support_quality_calibration.csv").open())
+  )
+  assert any(
+    row["row_type"] == "bucket_selection" and row["selected"] == "1"
+    for row in quality_calibration
+  )
+  assert any(
+    row["row_type"] == "neighbor_selection" and row["selected"] == "1"
+    for row in quality_calibration
+  )
 
 
 def test_input_ordering_and_additional_layer_reconstruction(
@@ -253,6 +287,53 @@ def test_calibration_uses_only_calibration_seed() -> None:
   assert calibration.sample_count == 1
   assert calibration.q05 == pytest.approx(0.05)
   assert calibration.q95 == pytest.approx(0.05)
+
+
+def test_support_quality_features_and_bucket_calibration_use_seed42() -> None:
+  assert _support_quality(
+    {"left_support_ratio": "0.9", "right_support_ratio": "0.6"}
+  ) == pytest.approx((0.6, 0.75, 0.9, 0.3))
+  missing = _support_quality({})
+  assert all(math.isnan(value) for value in missing)
+
+  evidence = [
+    Evidence(
+      key=("run42", "1"),
+      seed=42,
+      evidence_type="adjacent_support_partial",
+      frame_idx=1,
+      event_id=1,
+      center=0.20,
+      height_center=0.1,
+      true_depth=0.25,
+      true_height=0.1,
+      depth_bin=0,
+      proxy_type="test",
+      confidence="low",
+      quality_min=0.7,
+    ),
+    Evidence(
+      key=("run44", "1"),
+      seed=44,
+      evidence_type="adjacent_support_partial",
+      frame_idx=1,
+      event_id=1,
+      center=0.20,
+      height_center=0.1,
+      true_depth=0.35,
+      true_height=0.1,
+      depth_bin=7,
+      proxy_type="test",
+      confidence="low",
+      quality_min=0.7,
+    ),
+  ]
+  calibrations = _calibrate_quality_buckets(
+    evidence, {42}, QualityScheme("test", (0.75,))
+  )
+
+  assert calibrations["partial_0"].sample_count == 1
+  assert calibrations["partial_0"].q50 == pytest.approx(0.05)
 
 
 def test_empty_intersection_records_explicit_fallback() -> None:
@@ -327,6 +408,7 @@ def test_shuffled_baseline_is_deterministic() -> None:
       depth_bin=index,
       proxy_type="test",
       confidence="medium",
+      quality_min=0.5 + index * 0.1,
     )
     evidence_by_key[sequence.key] = [
       IntervalEvidence(evidence, float(index), float(index) + 0.1)
@@ -340,6 +422,18 @@ def test_shuffled_baseline_is_deterministic() -> None:
   }
   assert all(
     first[sequence.key][0].evidence.key != sequence.key for sequence in sequences
+  )
+
+  quality_first = _shuffled_quality_overrides(
+    [values[0].evidence for values in evidence_by_key.values()], {44}, 17
+  )
+  quality_second = _shuffled_quality_overrides(
+    [values[0].evidence for values in evidence_by_key.values()], {44}, 17
+  )
+  assert quality_first == quality_second
+  assert all(
+    quality_first[(sequence.key, 1)] != 0.5 + index * 0.1
+    for index, sequence in enumerate(sequences)
   )
 
 

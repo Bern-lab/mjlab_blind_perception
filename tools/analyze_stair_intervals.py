@@ -33,12 +33,14 @@ SUPPORT_TYPES = {
   "adjacent_double_support_partial": "adjacent_support_partial",
   "adjacent_double_support_full": "adjacent_support_full",
 }
+SUPPORT_EVIDENCE_TYPES = set(SUPPORT_TYPES.values())
 DETECTOR_TYPES = {
   "detector_confirmation_proxy",
   "additional_layer_confirmation",
 }
 ORACLE_TYPES = {"oracle_contact_proxy"}
-ALL_EVIDENCE_TYPES = set(SUPPORT_TYPES.values()) | DETECTOR_TYPES | ORACLE_TYPES
+ALL_EVIDENCE_TYPES = SUPPORT_EVIDENCE_TYPES | DETECTOR_TYPES | ORACLE_TYPES
+MIN_SELECTION_COVERAGE = 0.85
 
 
 class AuditError(RuntimeError):
@@ -101,6 +103,10 @@ class Evidence:
   depth_bin: int
   proxy_type: str
   confidence: str
+  quality_min: float = math.nan
+  quality_mean: float = math.nan
+  quality_max: float = math.nan
+  quality_asymmetry: float = math.nan
 
 
 @dataclass(frozen=True)
@@ -119,6 +125,12 @@ class IntervalEvidence:
   evidence: Evidence
   lower: float
   upper: float
+
+
+@dataclass(frozen=True)
+class QualityScheme:
+  name: str
+  partial_thresholds: tuple[float, ...]
 
 
 @dataclass(frozen=True)
@@ -476,6 +488,19 @@ def _projected_root(event: EventRecord) -> float:
   return root_x * ascent_x + root_y * ascent_y
 
 
+def _support_quality(row: Mapping[str, str]) -> tuple[float, float, float, float]:
+  left = _as_float(row, "left_support_ratio")
+  right = _as_float(row, "right_support_ratio")
+  if not math.isfinite(left) or not math.isfinite(right):
+    return math.nan, math.nan, math.nan, math.nan
+  return (
+    min(left, right),
+    0.5 * (left + right),
+    max(left, right),
+    abs(left - right),
+  )
+
+
 def _extract_evidence(
   sequences: Mapping[SequenceKey, SequenceRecord],
   events: Sequence[EventRecord],
@@ -499,6 +524,9 @@ def _extract_evidence(
       if support_type is not None:
         pair_depth = _as_float(event.raw, "pair_depth")
         pair_height = _as_float(event.raw, "pair_height")
+        quality_min, quality_mean, quality_max, quality_asymmetry = _support_quality(
+          event.raw
+        )
         if math.isfinite(pair_depth) and pair_depth > 0.0:
           evidence.append(
             Evidence(
@@ -514,6 +542,10 @@ def _extract_evidence(
               depth_bin=sequence.depth_bin,
               proxy_type="adjacent_foot_projection",
               confidence="medium" if support_type.endswith("full") else "low",
+              quality_min=quality_min,
+              quality_mean=quality_mean,
+              quality_max=quality_max,
+              quality_asymmetry=quality_asymmetry,
             )
           )
     if entry is not None:
@@ -669,6 +701,172 @@ def _calibrated_evidence(
         upper=item.center + calibration.q95,
       )
     )
+  return output
+
+
+def _quality_bucket(quality: float, scheme: QualityScheme) -> str:
+  if not math.isfinite(quality):
+    return "missing"
+  if quality >= 1.0 - 1.0e-6:
+    return "full"
+  for index, threshold in enumerate(scheme.partial_thresholds):
+    if quality < threshold:
+      return f"partial_{index}"
+  return f"partial_{len(scheme.partial_thresholds)}"
+
+
+def _quality_bucket_bounds(bucket: str, scheme: QualityScheme) -> tuple[float, float]:
+  if bucket == "full":
+    return 1.0, 1.0
+  if not bucket.startswith("partial_"):
+    return math.nan, math.nan
+  index = int(bucket.removeprefix("partial_"))
+  lower = 0.0 if index == 0 else scheme.partial_thresholds[index - 1]
+  upper = (
+    1.0 if index == len(scheme.partial_thresholds) else scheme.partial_thresholds[index]
+  )
+  return lower, upper
+
+
+def _candidate_quality_schemes(
+  evidence: Sequence[Evidence], calibration_seeds: set[int]
+) -> list[QualityScheme]:
+  partial_quality = [
+    item.quality_min
+    for item in evidence
+    if item.seed in calibration_seeds
+    and item.evidence_type in SUPPORT_EVIDENCE_TYPES
+    and math.isfinite(item.quality_min)
+    and item.quality_min < 1.0 - 1.0e-6
+  ]
+  quantile_thresholds = tuple(
+    sorted(
+      {
+        _quantile(partial_quality, 1.0 / 3.0),
+        _quantile(partial_quality, 2.0 / 3.0),
+      }
+    )
+  )
+  quantile_thresholds = tuple(
+    value for value in quantile_thresholds if math.isfinite(value) and 0.0 < value < 1.0
+  )
+  return [
+    QualityScheme("coarse_075", (0.75,)),
+    QualityScheme("tiered_060_085", (0.60, 0.85)),
+    QualityScheme("calibration_tertiles", quantile_thresholds),
+  ]
+
+
+def _calibrate_quality_buckets(
+  evidence: Sequence[Evidence],
+  calibration_seeds: set[int],
+  scheme: QualityScheme,
+) -> dict[str, Calibration]:
+  grouped: dict[str, list[float]] = defaultdict(list)
+  for item in evidence:
+    if (
+      item.seed in calibration_seeds
+      and item.evidence_type in SUPPORT_EVIDENCE_TYPES
+      and math.isfinite(item.quality_min)
+    ):
+      grouped[_quality_bucket(item.quality_min, scheme)].append(
+        item.true_depth - item.center
+      )
+  output: dict[str, Calibration] = {}
+  for bucket, residuals in sorted(grouped.items()):
+    output[bucket] = Calibration(
+      evidence_type=f"{scheme.name}:{bucket}",
+      sample_count=len(residuals),
+      q05=_quantile(residuals, 0.05),
+      q50=_quantile(residuals, 0.50),
+      q95=_quantile(residuals, 0.95),
+      residual_mean=mean(residuals),
+      residual_std=pstdev(residuals),
+    )
+  return output
+
+
+def _quality_binned_intervals(
+  evidence: Sequence[Evidence],
+  scheme: QualityScheme,
+  calibrations: Mapping[str, Calibration],
+) -> list[IntervalEvidence]:
+  output: list[IntervalEvidence] = []
+  for item in evidence:
+    if item.evidence_type not in SUPPORT_EVIDENCE_TYPES or not math.isfinite(
+      item.quality_min
+    ):
+      continue
+    calibration = calibrations.get(_quality_bucket(item.quality_min, scheme))
+    if calibration is None:
+      continue
+    output.append(
+      IntervalEvidence(
+        evidence=item,
+        lower=item.center + calibration.q05,
+        upper=item.center + calibration.q95,
+      )
+    )
+  return output
+
+
+def _quality_calibration_samples(
+  evidence: Sequence[Evidence], calibration_seeds: set[int]
+) -> list[tuple[float, float]]:
+  return [
+    (item.quality_min, item.true_depth - item.center)
+    for item in evidence
+    if item.seed in calibration_seeds
+    and item.evidence_type in SUPPORT_EVIDENCE_TYPES
+    and math.isfinite(item.quality_min)
+  ]
+
+
+def _quality_aware_interval(
+  item: Evidence,
+  calibration_samples: Sequence[tuple[float, float]],
+  neighbor_count: int,
+  *,
+  quality_override: float | None = None,
+) -> IntervalEvidence | None:
+  quality = item.quality_min if quality_override is None else quality_override
+  if not math.isfinite(quality) or not calibration_samples:
+    return None
+  nearest = sorted(
+    calibration_samples,
+    key=lambda sample: (abs(sample[0] - quality), sample[0], sample[1]),
+  )[: min(neighbor_count, len(calibration_samples))]
+  residuals = [sample[1] for sample in nearest]
+  return IntervalEvidence(
+    evidence=item,
+    lower=item.center + _quantile(residuals, 0.05),
+    upper=item.center + _quantile(residuals, 0.95),
+  )
+
+
+def _quality_aware_intervals(
+  evidence: Sequence[Evidence],
+  calibration_samples: Sequence[tuple[float, float]],
+  neighbor_count: int,
+  quality_overrides: Mapping[tuple[SequenceKey, int], float] | None = None,
+) -> list[IntervalEvidence]:
+  output: list[IntervalEvidence] = []
+  for item in evidence:
+    if item.evidence_type not in SUPPORT_EVIDENCE_TYPES:
+      continue
+    override = (
+      quality_overrides.get((item.key, item.event_id))
+      if quality_overrides is not None
+      else None
+    )
+    interval = _quality_aware_interval(
+      item,
+      calibration_samples,
+      neighbor_count,
+      quality_override=override,
+    )
+    if interval is not None:
+      output.append(interval)
   return output
 
 
@@ -979,6 +1177,190 @@ def _select_fallback(
   return str(selected), rows
 
 
+def _intervals_by_key(
+  intervals: Sequence[IntervalEvidence],
+) -> dict[SequenceKey, list[IntervalEvidence]]:
+  grouped: dict[SequenceKey, list[IntervalEvidence]] = defaultdict(list)
+  for item in intervals:
+    grouped[item.evidence.key].append(item)
+  return grouped
+
+
+def _select_quality_scheme(
+  evidence: Sequence[Evidence],
+  calibration_seeds: set[int],
+  selection_sequences: Sequence[SequenceRecord],
+  prior: tuple[float, float],
+  fallback_policy: str,
+  thresholds: tuple[float, float],
+  outside_penalty: float,
+) -> tuple[
+  QualityScheme,
+  dict[str, dict[str, Calibration]],
+  list[dict[str, object]],
+]:
+  schemes = _candidate_quality_schemes(evidence, calibration_seeds)
+  calibrations_by_scheme: dict[str, dict[str, Calibration]] = {}
+  rows: list[dict[str, object]] = []
+  for scheme in schemes:
+    calibrations = _calibrate_quality_buckets(evidence, calibration_seeds, scheme)
+    calibrations_by_scheme[scheme.name] = calibrations
+    intervals = _quality_binned_intervals(evidence, scheme, calibrations)
+    predictions, _ = _predict_method(
+      selection_sequences,
+      _intervals_by_key(intervals),
+      "quality_binned",
+      SUPPORT_EVIDENCE_TYPES,
+      prior,
+      fallback_policy,
+    )
+    rows.append(
+      {
+        "selection_type": "bucket_scheme",
+        "candidate": scheme.name,
+        **_prediction_stats(predictions, thresholds, outside_penalty),
+      }
+    )
+
+  def score(row: Mapping[str, object]) -> float:
+    value = row["interval_score"]
+    if not isinstance(value, (int, float)):
+      raise TypeError("interval_score must be numeric.")
+    return float(value)
+
+  selected_name = min(rows, key=score)["candidate"]
+  selected_scheme = next(scheme for scheme in schemes if scheme.name == selected_name)
+  for row in rows:
+    row["selected"] = int(row["candidate"] == selected_scheme.name)
+  return selected_scheme, calibrations_by_scheme, rows
+
+
+def _select_quality_neighbors(
+  evidence: Sequence[Evidence],
+  calibration_seeds: set[int],
+  selection_sequences: Sequence[SequenceRecord],
+  prior: tuple[float, float],
+  fallback_policy: str,
+  thresholds: tuple[float, float],
+  outside_penalty: float,
+) -> tuple[int, list[tuple[float, float]], list[dict[str, object]]]:
+  calibration_samples = _quality_calibration_samples(evidence, calibration_seeds)
+  candidates = (128, 256, 512)
+  rows: list[dict[str, object]] = []
+  for neighbor_count in candidates:
+    intervals = _quality_aware_intervals(evidence, calibration_samples, neighbor_count)
+    predictions, _ = _predict_method(
+      selection_sequences,
+      _intervals_by_key(intervals),
+      "quality_aware",
+      SUPPORT_EVIDENCE_TYPES,
+      prior,
+      fallback_policy,
+    )
+    rows.append(
+      {
+        "selection_type": "neighbor_count",
+        "candidate": neighbor_count,
+        **_prediction_stats(predictions, thresholds, outside_penalty),
+      }
+    )
+
+  def numeric(row: Mapping[str, object], key: str) -> float:
+    value = row[key]
+    if not isinstance(value, (int, float)):
+      raise TypeError(f"{key} must be numeric.")
+    return float(value)
+
+  def score(row: Mapping[str, object]) -> tuple[float, int]:
+    value = row["interval_score"]
+    candidate = row["candidate"]
+    if not isinstance(value, (int, float)) or not isinstance(candidate, int):
+      raise TypeError("Quality-neighbor selection values must be numeric.")
+    return float(value), candidate
+
+  eligible = [row for row in rows if numeric(row, "coverage") >= MIN_SELECTION_COVERAGE]
+  if eligible:
+    selected_row = min(eligible, key=score)
+    selection_reason = "minimum_interval_score_with_coverage_constraint"
+  else:
+    selected_row = min(
+      rows,
+      key=lambda row: (
+        -numeric(row, "coverage"),
+        numeric(row, "interval_score"),
+      ),
+    )
+    selection_reason = "coverage_constraint_unmet_selected_highest_coverage"
+  selected_value = selected_row["candidate"]
+  if not isinstance(selected_value, int):
+    raise TypeError("Selected quality neighbor count must be an integer.")
+  selected = selected_value
+  for row in rows:
+    row["selected"] = int(row["candidate"] == selected)
+    row["coverage_constraint_met"] = int(
+      numeric(row, "coverage") >= MIN_SELECTION_COVERAGE
+    )
+    row["selection_reason"] = selection_reason if row["candidate"] == selected else ""
+  return selected, calibration_samples, rows
+
+
+def _shuffled_quality_overrides(
+  evidence: Sequence[Evidence],
+  seeds: set[int],
+  random_seed: int,
+) -> dict[tuple[SequenceKey, int], float]:
+  items = [
+    item
+    for item in evidence
+    if item.seed in seeds
+    and item.evidence_type in SUPPORT_EVIDENCE_TYPES
+    and math.isfinite(item.quality_min)
+  ]
+  items.sort(key=lambda item: (item.key, item.frame_idx, item.event_id))
+  if len(items) <= 1:
+    return {(item.key, item.event_id): item.quality_min for item in items}
+  offset = random.Random(random_seed).randrange(1, len(items))
+  shifted = items[offset:] + items[:offset]
+  return {
+    (item.key, item.event_id): donor.quality_min
+    for item, donor in zip(items, shifted, strict=True)
+  }
+
+
+def _sequence_quality(
+  evidence: Sequence[Evidence], seeds: set[int]
+) -> dict[SequenceKey, float]:
+  quality: dict[SequenceKey, float] = {}
+  for item in evidence:
+    if (
+      item.seed in seeds
+      and item.evidence_type in SUPPORT_EVIDENCE_TYPES
+      and math.isfinite(item.quality_min)
+    ):
+      quality[item.key] = max(quality.get(item.key, 0.0), item.quality_min)
+  return quality
+
+
+def _conditional_calibration_error(
+  predictions: Sequence[Prediction],
+  quality_by_key: Mapping[SequenceKey, float],
+  scheme: QualityScheme,
+  target_coverage: float = 0.90,
+) -> float:
+  grouped: dict[str, list[Prediction]] = defaultdict(list)
+  for prediction in predictions:
+    quality = quality_by_key.get(prediction.key)
+    if quality is not None:
+      grouped[_quality_bucket(quality, scheme)].append(prediction)
+  total = sum(len(items) for items in grouped.values())
+  if total == 0:
+    return math.nan
+  return sum(
+    len(items) / total * abs(mean(item.covered for item in items) - target_coverage)
+    for items in grouped.values()
+  )
+
+
 def _single_event_rows(
   evidence: Sequence[Evidence],
   calibrated: Sequence[IntervalEvidence],
@@ -1083,6 +1465,177 @@ def _pair_support_rows(
           "pair_height_bias": height_stats["bias"],
           "pair_height_correlation": height_stats["correlation"],
           "pair_height_r_squared": height_stats["r_squared"],
+        }
+      )
+  return rows
+
+
+def _support_quality_stats_rows(
+  evidence: Sequence[Evidence],
+  scheme: QualityScheme,
+  calibration_seeds: set[int],
+  selection_seeds: set[int],
+  test_seeds: set[int],
+) -> list[dict[str, object]]:
+  rows: list[dict[str, object]] = []
+  for split in ("calibration", "selection", "test"):
+    split_items = [
+      item
+      for item in evidence
+      if item.evidence_type in SUPPORT_EVIDENCE_TYPES
+      and math.isfinite(item.quality_min)
+      and _split_name(item.seed, calibration_seeds, selection_seeds, test_seeds)
+      == split
+    ]
+    buckets = sorted(
+      {_quality_bucket(item.quality_min, scheme) for item in split_items}
+    )
+    for bucket in ["all", *buckets]:
+      items = (
+        split_items
+        if bucket == "all"
+        else [
+          item
+          for item in split_items
+          if _quality_bucket(item.quality_min, scheme) == bucket
+        ]
+      )
+      stats = _regression_stats(
+        [item.center for item in items], [item.true_depth for item in items]
+      )
+      residual_abs = [abs(item.center - item.true_depth) for item in items]
+      lower, upper = (
+        (math.nan, math.nan)
+        if bucket == "all"
+        else _quality_bucket_bounds(bucket, scheme)
+      )
+      rows.append(
+        {
+          "split": split,
+          "selected_scheme": scheme.name,
+          "quality_bucket": bucket,
+          "quality_lower": lower,
+          "quality_upper": upper,
+          "num_sequences": len({item.key for item in items}),
+          **stats,
+          "mean_absolute_residual": (mean(residual_abs) if residual_abs else math.nan),
+          "pair_quality_min_mean": (
+            mean(item.quality_min for item in items) if items else math.nan
+          ),
+          "pair_quality_mean_mean": (
+            mean(item.quality_mean for item in items) if items else math.nan
+          ),
+          "pair_quality_max_mean": (
+            mean(item.quality_max for item in items) if items else math.nan
+          ),
+          "pair_quality_asymmetry_mean": (
+            mean(item.quality_asymmetry for item in items) if items else math.nan
+          ),
+        }
+      )
+  return rows
+
+
+def _support_quality_calibration_rows(
+  schemes: Sequence[QualityScheme],
+  calibrations_by_scheme: Mapping[str, Mapping[str, Calibration]],
+  selected_scheme: QualityScheme,
+  bucket_selection_rows: Sequence[Mapping[str, object]],
+  neighbor_selection_rows: Sequence[Mapping[str, object]],
+  selected_neighbors: int,
+  calibration_seeds: set[int],
+) -> list[dict[str, object]]:
+  rows: list[dict[str, object]] = []
+  seed_text = "|".join(map(str, sorted(calibration_seeds)))
+  for scheme in schemes:
+    for bucket, calibration in sorted(calibrations_by_scheme[scheme.name].items()):
+      lower, upper = _quality_bucket_bounds(bucket, scheme)
+      rows.append(
+        {
+          "row_type": "bucket_calibration",
+          "calibration_seeds": seed_text,
+          "scheme": scheme.name,
+          "selected": int(scheme.name == selected_scheme.name),
+          "bucket": bucket,
+          "quality_lower": lower,
+          "quality_upper": upper,
+          "sample_count": calibration.sample_count,
+          "q05": calibration.q05,
+          "q50": calibration.q50,
+          "q95": calibration.q95,
+          "mean": calibration.residual_mean,
+          "std": calibration.residual_std,
+        }
+      )
+  for row in bucket_selection_rows:
+    rows.append(
+      {
+        "row_type": "bucket_selection",
+        "calibration_seeds": seed_text,
+        "scheme": row["candidate"],
+        "selected": row["selected"],
+        "interval_score": row["interval_score"],
+        "coverage": row["coverage"],
+        "mean_width": row["mean_width"],
+      }
+    )
+  for row in neighbor_selection_rows:
+    rows.append(
+      {
+        "row_type": "neighbor_selection",
+        "calibration_seeds": seed_text,
+        "neighbor_count": row["candidate"],
+        "selected": int(row["candidate"] == selected_neighbors),
+        "interval_score": row["interval_score"],
+        "coverage": row["coverage"],
+        "mean_width": row["mean_width"],
+        "coverage_constraint_met": row["coverage_constraint_met"],
+        "selection_reason": row["selection_reason"],
+      }
+    )
+  return rows
+
+
+def _support_quality_per_bin_rows(
+  predictions_by_method: Mapping[str, Sequence[Prediction]],
+  quality_by_key: Mapping[SequenceKey, float],
+  scheme: QualityScheme,
+  thresholds: tuple[float, float],
+  outside_penalty: float,
+) -> list[dict[str, object]]:
+  rows: list[dict[str, object]] = []
+  quality_buckets = sorted(
+    {_quality_bucket(quality, scheme) for quality in quality_by_key.values()}
+  )
+  for method, predictions in predictions_by_method.items():
+    for depth_bin in range(8):
+      subset = [
+        prediction for prediction in predictions if prediction.depth_bin == depth_bin
+      ]
+      rows.append(
+        {
+          "group_type": "depth_bin",
+          "method": method,
+          "group": depth_bin,
+          **_prediction_stats(subset, thresholds, outside_penalty),
+        }
+      )
+    for bucket in quality_buckets:
+      subset = [
+        prediction
+        for prediction in predictions
+        if prediction.key in quality_by_key
+        and _quality_bucket(quality_by_key[prediction.key], scheme) == bucket
+      ]
+      lower, upper = _quality_bucket_bounds(bucket, scheme)
+      rows.append(
+        {
+          "group_type": "quality_bucket",
+          "method": method,
+          "group": bucket,
+          "quality_lower": lower,
+          "quality_upper": upper,
+          **_prediction_stats(subset, thresholds, outside_penalty),
         }
       )
   return rows
@@ -1275,6 +1828,46 @@ def analyze(
   )
   _write_csv(output / "data_audit_summary.csv", audit_rows)
 
+  selected_quality_scheme, quality_calibrations, bucket_selection_rows = (
+    _select_quality_scheme(
+      evidence,
+      calibration_seeds,
+      selection_sequences,
+      prior,
+      fallback_policy,
+      thresholds,
+      outside_penalty,
+    )
+  )
+  selected_neighbors, quality_samples, neighbor_selection_rows = (
+    _select_quality_neighbors(
+      evidence,
+      calibration_seeds,
+      selection_sequences,
+      prior,
+      fallback_policy,
+      thresholds,
+      outside_penalty,
+    )
+  )
+  audit_rows.extend(
+    [
+      {
+        "metric": "selected_support_quality_scheme",
+        "actual": selected_quality_scheme.name,
+        "expected": "",
+        "status": "selected_on_seed43",
+      },
+      {
+        "metric": "selected_support_quality_neighbors",
+        "actual": selected_neighbors,
+        "expected": "",
+        "status": "selected_on_seed43",
+      },
+    ]
+  )
+  _write_csv(output / "data_audit_summary.csv", audit_rows)
+
   test_sequences = [
     sequence for sequence in sequence_values if sequence.seed in test_seeds
   ]
@@ -1318,6 +1911,105 @@ def analyze(
   )
   predictions_by_method["shuffled_evidence"] = shuffled_predictions
   all_traces.extend(shuffled_traces)
+
+  binary_support_intervals = [
+    item for item in calibrated if item.evidence.evidence_type in SUPPORT_EVIDENCE_TYPES
+  ]
+  full_only_intervals = [
+    item
+    for item in binary_support_intervals
+    if math.isfinite(item.evidence.quality_min)
+    and item.evidence.quality_min >= 1.0 - 1.0e-6
+  ]
+  quality_binned_intervals = _quality_binned_intervals(
+    evidence,
+    selected_quality_scheme,
+    quality_calibrations[selected_quality_scheme.name],
+  )
+  quality_aware_intervals = _quality_aware_intervals(
+    evidence, quality_samples, selected_neighbors
+  )
+  shuffled_quality_overrides = _shuffled_quality_overrides(
+    evidence, test_seeds, shuffle_seed
+  )
+  shuffled_quality_intervals = _quality_aware_intervals(
+    evidence,
+    quality_samples,
+    selected_neighbors,
+    shuffled_quality_overrides,
+  )
+  quality_interval_sets = {
+    "full_only": full_only_intervals,
+    "binary_partial_full": binary_support_intervals,
+    "quality_binned": quality_binned_intervals,
+    "quality_aware": quality_aware_intervals,
+    "shuffled_quality": shuffled_quality_intervals,
+  }
+  quality_predictions: dict[str, list[Prediction]] = {}
+  for method, intervals in quality_interval_sets.items():
+    predictions, _ = _predict_method(
+      test_sequences,
+      _intervals_by_key(intervals),
+      method,
+      SUPPORT_EVIDENCE_TYPES,
+      prior,
+      fallback_policy,
+    )
+    quality_predictions[method] = predictions
+
+  quality_by_key = _sequence_quality(evidence, test_seeds)
+  quality_summary_rows = []
+  for method, predictions in quality_predictions.items():
+    quality_summary_rows.append(
+      {
+        "split": "test",
+        "test_seeds": "|".join(map(str, sorted(test_seeds))),
+        "method": method,
+        "selected_bucket_scheme": selected_quality_scheme.name,
+        "selected_neighbor_count": selected_neighbors,
+        "geometric_overlap_is_privileged": True,
+        **_prediction_stats(predictions, thresholds, outside_penalty),
+        "conditional_calibration_error": _conditional_calibration_error(
+          predictions, quality_by_key, selected_quality_scheme
+        ),
+      }
+    )
+  _write_csv(
+    output / "support_quality_interval_summary.csv",
+    quality_summary_rows,
+  )
+  _write_csv(
+    output / "support_quality_stats.csv",
+    _support_quality_stats_rows(
+      evidence,
+      selected_quality_scheme,
+      calibration_seeds,
+      selection_seeds,
+      test_seeds,
+    ),
+  )
+  _write_csv(
+    output / "support_quality_per_bin_stats.csv",
+    _support_quality_per_bin_rows(
+      quality_predictions,
+      quality_by_key,
+      selected_quality_scheme,
+      thresholds,
+      outside_penalty,
+    ),
+  )
+  _write_csv(
+    output / "support_quality_calibration.csv",
+    _support_quality_calibration_rows(
+      _candidate_quality_schemes(evidence, calibration_seeds),
+      quality_calibrations,
+      selected_quality_scheme,
+      bucket_selection_rows,
+      neighbor_selection_rows,
+      selected_neighbors,
+      calibration_seeds,
+    ),
+  )
 
   interval_rows = [
     {
