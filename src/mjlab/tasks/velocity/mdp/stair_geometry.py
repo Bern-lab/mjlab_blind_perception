@@ -10,10 +10,12 @@ if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
 
 STAIR_PHASE_KEY = "slow_latent_stair_phase"
+STAIR_SEQUENCE_ID_KEY = "slow_latent_stair_sequence_id"
 STAIR_ENTRY_EVENT_KEY = "slow_latent_stair_entry_event"
 STAIR_EXIT_EVENT_KEY = "slow_latent_stair_exit_event"
 TOE_RISER_NEW_HIT_KEY = "slow_latent_toe_riser_new_hit"
 TOE_RISER_CONTACT_KEY = "slow_latent_toe_riser_contact"
+STAIR_TOE_RISER_HIT_LAYER_KEY = "slow_latent_stair_toe_riser_hit_layer"
 STAIR_ENTRY_RECENT_EVIDENCE_KEY = "slow_latent_stair_entry_recent_evidence"
 STAIR_ENTRY_EVIDENCE_ASCENT_DIR_KEY = "slow_latent_stair_entry_evidence_ascent_dir"
 STAIR_TARGET_FOOT_KEY = "slow_latent_stair_target_foot"
@@ -31,6 +33,25 @@ STAIR_RISER_HEIGHT_LABEL_KEY = "slow_latent_stair_riser_height_label"
 STAIR_SHAPE_LABEL_VALID_KEY = "slow_latent_stair_shape_label_valid"
 STAIR_DEPTH_LABEL_VALID_KEY = "slow_latent_stair_depth_label_valid"
 STAIR_DEPTH_CONFIRMATION_EVENT_KEY = "slow_latent_stair_depth_confirmation_event"
+STAIR_DEPTH_CONFIRMATION_AGE_KEY = "slow_latent_stair_depth_confirmation_age"
+STAIR_CONFIRMATION_CONDITION_KEY = "slow_latent_stair_confirmation_condition"
+STAIR_CONFIRMATION_LAYER_KEY = "slow_latent_stair_confirmation_layer"
+STAIR_CONFIRMATION_CONTACT_SEQUENCE_KEY = (
+  "slow_latent_stair_confirmation_contact_sequence"
+)
+STAIR_ORACLE_EXPECTED_RISER_CONTACT_KEY = (
+  "slow_latent_stair_oracle_expected_riser_contact"
+)
+STAIR_ORACLE_EXPECTED_RISER_LAYER_KEY = "slow_latent_stair_oracle_expected_riser_layer"
+STAIR_CURRENT_GROUND_CONTACT_KEY = "slow_latent_stair_current_ground_contact"
+STAIR_CURRENT_STAIR_SUPPORT_KEY = "slow_latent_stair_current_stair_support"
+STAIR_CURRENT_SUPPORT_FRACTION_KEY = "slow_latent_stair_current_support_fraction"
+STAIR_CURRENT_SUPPORT_LAYER_KEY = "slow_latent_stair_current_support_layer"
+STAIR_GEOMETRY_OCCUPANCY_KEY = "slow_latent_stair_geometry_occupancy"
+STAIR_ADJACENT_PAIR_DEPTH_KEY = "slow_latent_stair_adjacent_pair_depth"
+STAIR_ADJACENT_PAIR_HEIGHT_KEY = "slow_latent_stair_adjacent_pair_height"
+STAIR_ADJACENT_PAIR_VALID_KEY = "slow_latent_stair_adjacent_pair_valid"
+STAIR_ADJACENT_PAIR_EVENT_KEY = "slow_latent_stair_adjacent_pair_event"
 SAFE_STRIDE_VALID_KEY = "slow_latent_safe_stride_valid"
 SAFE_TREAD_LOWER_BOUND_KEY = "slow_latent_safe_tread_lower_bound"
 MINIMUM_SAFE_STRIDE_KEY = "slow_latent_minimum_safe_stride"

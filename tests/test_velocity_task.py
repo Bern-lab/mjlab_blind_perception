@@ -32,11 +32,16 @@ from mjlab.tasks.velocity.config.g1.blind_rough_step_danger_env_cfg import (
 from mjlab.tasks.velocity.config.g1.rl_cfg import (
   G1SlowLatentPolicyModelParams,
   G1SlowLatentRunnerParams,
+  unitree_g1_blind_rough_target_navigation_geometry_probe_runner_cfg,
   unitree_g1_blind_rough_target_navigation_semantic_v2_probe_runner_cfg,
   unitree_g1_blind_rough_target_navigation_semantic_v2_shadow_runner_cfg,
   unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg,
 )
-from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg, stair_aware_feet_gait
+from mjlab.tasks.velocity.mdp import (
+  UniformVelocityCommandCfg,
+  stair_aware_feet_gait,
+  stair_sequence_event_logger,
+)
 from mjlab.tasks.velocity.mdp.teacher_target_heading_command import (
   TeacherTargetHeadingVelocityCommandCfg,
 )
@@ -47,6 +52,7 @@ from mjlab.terrains.primitive_terrains import (
 )
 
 MAIN_BRANCH_VELOCITY_TASK_IDS = (
+  "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2GeometryProbe-Unitree-G1",
   "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2SafeStrideProbe-Unitree-G1",
   "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2Shadow-TeacherKL-Unitree-G1",
   "Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1",
@@ -344,7 +350,8 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   env_cfg = load_env_cfg(task_id)
   rl_cfg = cast(RslRlTeacherKLRunnerCfg, load_rl_cfg(task_id))
 
-  assert env_cfg.commands["twist"].ranges.lin_vel_x == (0.4, 1.0)
+  twist_command = cast(UniformVelocityCommandCfg, env_cfg.commands["twist"])
+  assert twist_command.ranges.lin_vel_x == (0.4, 1.0)
   velocity_stages = env_cfg.curriculum["command_vel"].params["velocity_stages"]
   assert velocity_stages[0]["lin_vel_x"] == (0.4, 0.8)
   assert velocity_stages[1]["lin_vel_x"] == (0.4, 1.0)
@@ -360,8 +367,18 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
     "shape_component_valid",
     "safe_stride_interval_valid",
     "stair_depth_confirmation_event",
+    "geometry_probe_validation",
+    "stair_depth_confirmation_age",
+    "stair_adjacent_pair_evidence",
   )
   assert "reset_stair_latent_cache" in env_cfg.events
+  sequence_logger = env_cfg.metrics["stair_sequence_event_logger"]
+  assert sequence_logger.func is stair_sequence_event_logger
+  assert sequence_logger.params["command_name"] == "twist"
+  assert sequence_logger.params["asset_cfg"].body_names == (
+    "left_ankle_roll_link",
+    "right_ankle_roll_link",
+  )
   assert rl_cfg.obs_groups["actor"] == ("actor",)
   assert rl_cfg.obs_groups["latent"] == ("latent",)
   foot_asset_cfg = env_cfg.rewards["foot_step_lip_volume_penalty"].params["asset_cfg"]
@@ -430,7 +447,14 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   )
   assert landing_reward.params["support_deficit_scale"] == 0.40
   latent_labels = env_cfg.observations["latent_labels"]
-  assert all(term.params == {} for term in latent_labels.terms.values())
+  assert latent_labels.terms["geometry_probe_validation"].params == {
+    "validation_fraction": 0.2
+  }
+  assert all(
+    term.params == {}
+    for name, term in latent_labels.terms.items()
+    if name != "geometry_probe_validation"
+  )
   toe_sensor_cfg = cast(
     ContactSensorCfg,
     next(
@@ -521,6 +545,22 @@ def test_semantic_v2_probe_freezes_policy_and_uses_dynamic_stride_input() -> Non
   assert cfg.load_iteration_on_resume is False
 
 
+def test_geometry_probe_freezes_policy_and_trains_independent_head() -> None:
+  cfg = unitree_g1_blind_rough_target_navigation_geometry_probe_runner_cfg()
+  actor_cfg = cast(RslRlGatedStairLatentModelCfg, cfg.actor)
+  algorithm_cfg = cast(RslRlPpoTeacherKLAlgorithmCfg, cfg.algorithm)
+
+  assert actor_cfg.geometry_probe_input == "shape"
+  assert actor_cfg.aux_stair_shape_coef == 1.0
+  assert actor_cfg.aux_safe_stride_coef == 0.0
+  assert algorithm_cfg.geometry_probe_only is True
+  assert algorithm_cfg.geometry_probe_permute_depth_labels is False
+  assert algorithm_cfg.safe_stride_probe_only is False
+  assert algorithm_cfg.teacher_kl_cfg.enabled is False
+  assert cfg.load_optimizer_on_resume is False
+  assert cfg.load_iteration_on_resume is False
+
+
 def test_step_danger_target_navigation_uses_local_geometric_danger_rewards() -> None:
   task_id = (
     "Mjlab-Velocity-Blind-Rough-TargetNavigation-StepDanger-TeacherKL-Unitree-G1"
@@ -603,7 +643,8 @@ def test_slow_latent_play_shows_step_danger_zones() -> None:
   assert vis.slab_depth == 0.10
   assert vis.slab_u_margin == 0.02
   assert vis.slab_v_margin == 0.05
-  assert cfg.commands["twist"].ranges.lin_vel_x == (0.6, 0.9)
+  twist_command = cast(UniformVelocityCommandCfg, cfg.commands["twist"])
+  assert twist_command.ranges.lin_vel_x == (0.6, 0.9)
 
 
 def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:

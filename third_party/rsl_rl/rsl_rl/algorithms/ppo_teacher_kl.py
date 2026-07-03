@@ -37,6 +37,9 @@ class PPOTeacherKL(PPO):
         teacher_checkpoint_path: str | None = None,
         safe_stride_probe_only: bool = False,
         safe_stride_probe_learning_rate: float = 1.0e-3,
+        geometry_probe_only: bool = False,
+        geometry_probe_learning_rate: float = 1.0e-3,
+        geometry_probe_permute_depth_labels: bool = False,
         **kwargs: Any,
     ) -> None:
         """Initialize PPO and store teacher-guidance configuration."""
@@ -94,8 +97,14 @@ class PPOTeacherKL(PPO):
             "log_kl_when_lambda_zero": self.teacher_kl_cfg.get("log_kl_when_lambda_zero", True),
         })
         self._safe_stride_update_statistics: dict[str, torch.Tensor] | None = None
+        self._geometry_probe_update_statistics: dict[str, torch.Tensor] | None = None
         self.safe_stride_probe_only = bool(safe_stride_probe_only)
+        self.geometry_probe_only = bool(geometry_probe_only)
+        self.geometry_probe_permute_depth_labels = bool(geometry_probe_permute_depth_labels)
+        if self.safe_stride_probe_only and self.geometry_probe_only:
+            raise ValueError("SafeStride and geometry Probe modes are mutually exclusive.")
         self._safe_stride_probe_frozen_state: dict[str, torch.Tensor] | None = None
+        self._geometry_probe_frozen_state: dict[str, torch.Tensor] | None = None
         if self.safe_stride_probe_only:
             if self.teacher_guidance_enabled:
                 raise ValueError("safe_stride_probe_only requires teacher guidance to be disabled.")
@@ -130,6 +139,26 @@ class PPOTeacherKL(PPO):
             )
             self.learning_rate = float(safe_stride_probe_learning_rate)
             self.freeze_normalization_updates = True
+        if self.geometry_probe_only:
+            if self.teacher_guidance_enabled:
+                raise ValueError("geometry_probe_only requires teacher guidance to be disabled.")
+            if self.rnd is not None or self.symmetry is not None:
+                raise ValueError("geometry_probe_only does not support RND or symmetry.")
+            geometry_probe_head = getattr(self.actor, "geometry_probe_head", None)
+            if geometry_probe_head is None:
+                raise ValueError("geometry_probe_only requires actor.geometry_probe_head.")
+            for parameter in self.actor.parameters():
+                parameter.requires_grad_(False)
+            for parameter in self.critic.parameters():
+                parameter.requires_grad_(False)
+            for parameter in geometry_probe_head.parameters():
+                parameter.requires_grad_(True)
+            self.optimizer = torch.optim.Adam(
+                geometry_probe_head.parameters(),
+                lr=float(geometry_probe_learning_rate),
+            )
+            self.learning_rate = float(geometry_probe_learning_rate)
+            self.freeze_normalization_updates = True
 
     def _capture_safe_stride_probe_frozen_state(self) -> dict[str, torch.Tensor]:
         """Snapshot every actor/critic tensor outside the isolated decoder."""
@@ -149,6 +178,25 @@ class PPOTeacherKL(PPO):
         for name, expected in self._safe_stride_probe_frozen_state.items():
             if name not in current or not torch.equal(current[name], expected):
                 raise RuntimeError(f"SafeStride probe modified frozen state tensor {name!r}.")
+
+    def _capture_geometry_probe_frozen_state(self) -> dict[str, torch.Tensor]:
+        """Snapshot every actor/critic tensor outside the geometry Probe."""
+        frozen: dict[str, torch.Tensor] = {}
+        for name, value in self.actor.state_dict().items():
+            if not name.startswith("geometry_probe_head."):
+                frozen[f"actor.{name}"] = value.detach().cpu().clone()
+        for name, value in self.critic.state_dict().items():
+            frozen[f"critic.{name}"] = value.detach().cpu().clone()
+        return frozen
+
+    def _verify_geometry_probe_frozen_state(self) -> None:
+        """Fail immediately if any frozen policy or normalization tensor drifts."""
+        if self._geometry_probe_frozen_state is None:
+            return
+        current = self._capture_geometry_probe_frozen_state()
+        for name, expected in self._geometry_probe_frozen_state.items():
+            if name not in current or not torch.equal(current[name], expected):
+                raise RuntimeError(f"Geometry Probe modified frozen state tensor {name!r}.")
 
     def set_teacher_checkpoint(self, checkpoint_path: str | None) -> None:
         """Set or clear the checkpoint path used to initialize the frozen teacher."""
@@ -824,6 +872,138 @@ class PPOTeacherKL(PPO):
         else:
             self._safe_stride_update_statistics[key] = previous + value
 
+    def _accumulate_geometry_probe_component(
+        self,
+        prediction: torch.Tensor,
+        label: torch.Tensor,
+        valid: torch.Tensor,
+        cohort: str,
+    ) -> None:
+        """Accumulate exact sufficient moments for one geometry cohort."""
+        if self._geometry_probe_update_statistics is None:
+            return
+        # Discrete depth cohorts often contain one exact label value. Float64
+        # keeps their zero variance from becoming a large cancellation error.
+        prediction_flat = prediction.detach().double()
+        label_flat = label.detach().double()
+        weight = valid.detach().double()
+        error = prediction_flat - label_flat
+        moments = {
+            "count": weight.sum(),
+            "label_sum": (label_flat * weight).sum(),
+            "prediction_sum": (prediction_flat * weight).sum(),
+            "label_square_sum": (label_flat.square() * weight).sum(),
+            "prediction_square_sum": (prediction_flat.square() * weight).sum(),
+            "cross_sum": (label_flat * prediction_flat * weight).sum(),
+            "absolute_error_sum": (error.abs() * weight).sum(),
+            "signed_error_sum": (error * weight).sum(),
+            "squared_error_sum": (error.square() * weight).sum(),
+        }
+        for name, value in moments.items():
+            key = f"{cohort}_{name}"
+            previous = self._geometry_probe_update_statistics.get(key)
+            if previous is None:
+                self._geometry_probe_update_statistics[key] = value
+            else:
+                self._geometry_probe_update_statistics[key] = previous + value
+
+    def _accumulate_geometry_probe_statistics(
+        self,
+        predictions: torch.Tensor,
+        labels: torch.Tensor,
+        component_valid: torch.Tensor,
+        validation: torch.Tensor,
+        confirmation_age: torch.Tensor,
+    ) -> None:
+        """Accumulate train/validation, age, and depth-bin Probe statistics."""
+        train = 1.0 - validation
+        split_masks = {"train": train, "validation": validation}
+        component_names = ("depth", "height")
+        for component_index, component_name in enumerate(component_names):
+            for split_name, split_mask in split_masks.items():
+                valid = component_valid[..., component_index] * split_mask[..., 0]
+                self._accumulate_geometry_probe_component(
+                    predictions[..., component_index],
+                    labels[..., component_index],
+                    valid,
+                    f"{split_name}_{component_name}",
+                )
+
+        validation_depth = component_valid[..., 0] * validation[..., 0]
+        age = confirmation_age[..., 0]
+        age_masks = {
+            "age_0": age == 0,
+            "age_1_4": (age >= 1) & (age <= 4),
+            "age_5_16": (age >= 5) & (age <= 16),
+            "age_17_plus": age >= 17,
+        }
+        for age_name, age_mask in age_masks.items():
+            self._accumulate_geometry_probe_component(
+                predictions[..., 0],
+                labels[..., 0],
+                validation_depth * age_mask.to(validation_depth.dtype),
+                f"validation_depth_{age_name}",
+            )
+
+        depth_bin_width = labels.new_tensor((0.35 - 0.25) / 7.0)
+        depth_bin = torch.round((labels[..., 0] - 0.25) / depth_bin_width)
+        depth_bin = depth_bin.long().clamp(0, 7)
+        for bin_index in range(8):
+            self._accumulate_geometry_probe_component(
+                predictions[..., 0],
+                labels[..., 0],
+                validation_depth * (depth_bin == bin_index).to(validation_depth.dtype),
+                f"validation_depth_bin_{bin_index}",
+            )
+
+    def _finalize_geometry_probe_statistics(self) -> dict[str, float]:
+        """Return update-global held-out geometry Probe metrics."""
+        statistics = self._geometry_probe_update_statistics
+        if not statistics:
+            return {}
+        reduced = {name: value.detach().clone() for name, value in statistics.items()}
+        if self.is_multi_gpu:
+            distributed = cast(Any, torch.distributed)
+            for value in reduced.values():
+                distributed.all_reduce(value, op=distributed.ReduceOp.SUM)
+
+        cohorts = sorted(key.removesuffix("_count") for key in reduced if key.endswith("_count"))
+        logs: dict[str, float] = {}
+        for cohort in cohorts:
+            count = reduced[f"{cohort}_count"]
+            if count.item() <= 0.0:
+                continue
+            label_mean = reduced[f"{cohort}_label_sum"] / count
+            prediction_mean = reduced[f"{cohort}_prediction_sum"] / count
+            label_variance = (reduced[f"{cohort}_label_square_sum"] / count - label_mean.square()).clamp_min(0.0)
+            prediction_variance = (
+                reduced[f"{cohort}_prediction_square_sum"] / count - prediction_mean.square()
+            ).clamp_min(0.0)
+            covariance = reduced[f"{cohort}_cross_sum"] / count - label_mean * prediction_mean
+            correlation_valid = (label_variance > 1.0e-12) & (prediction_variance > 1.0e-12)
+            correlation = torch.where(
+                correlation_valid,
+                covariance / torch.sqrt(label_variance * prediction_variance).clamp_min(1.0e-12),
+                torch.zeros_like(covariance),
+            )
+            label_squared_deviation = label_variance * count
+            r_squared = torch.where(
+                label_squared_deviation > count * 1.0e-12,
+                1.0 - reduced[f"{cohort}_squared_error_sum"] / label_squared_deviation.clamp_min(1.0e-12),
+                torch.zeros_like(label_squared_deviation),
+            )
+            prefix = f"slow_latent_geometry_probe_global_{cohort}"
+            logs[f"{prefix}_valid_count"] = (count / max(self.num_learning_epochs, 1)).item()
+            logs[f"{prefix}_label_mean"] = label_mean.item()
+            logs[f"{prefix}_pred_mean"] = prediction_mean.item()
+            logs[f"{prefix}_label_std"] = torch.sqrt(label_variance).item()
+            logs[f"{prefix}_pred_std"] = torch.sqrt(prediction_variance).item()
+            logs[f"{prefix}_correlation"] = correlation.item()
+            logs[f"{prefix}_r_squared"] = r_squared.item()
+            logs[f"{prefix}_mae"] = (reduced[f"{cohort}_absolute_error_sum"] / count).item()
+            logs[f"{prefix}_signed_error"] = (reduced[f"{cohort}_signed_error_sum"] / count).item()
+        return logs
+
     @staticmethod
     def _compute_label_out_of_range_ratios(
         labels: torch.Tensor,
@@ -1126,6 +1306,26 @@ class PPOTeacherKL(PPO):
             depth_confirmation_event_padded = labels[..., 16:17].float()
         else:
             depth_confirmation_event_padded = torch.zeros_like(event_labels_padded)
+        if labels.shape[-1] >= 18:
+            geometry_probe_validation_padded = labels[..., 17:18].float()
+        else:
+            geometry_probe_validation_padded = torch.zeros_like(event_labels_padded)
+        if labels.shape[-1] >= 19:
+            depth_confirmation_age_padded = labels[..., 18:19].float()
+        else:
+            depth_confirmation_age_padded = torch.full_like(
+                event_labels_padded,
+                -1.0,
+            )
+        if labels.shape[-1] >= 23:
+            adjacent_pair_evidence_padded = labels[..., 19:23].float()
+        else:
+            adjacent_pair_evidence_padded = torch.zeros(
+                *labels.shape[:-1],
+                4,
+                device=labels.device,
+                dtype=labels.dtype,
+            )
         if labels.shape[-1] >= 13:
             collision_risk_now = labels[..., 10:11].float()
             landing_touchdown_now = labels[..., 11:12].float()
@@ -1214,6 +1414,27 @@ class PPOTeacherKL(PPO):
                     batch.masks,
                 ),
             )
+            geometry_probe_validation = cast(
+                torch.Tensor,
+                unpad_trajectories(
+                    geometry_probe_validation_padded,
+                    batch.masks,
+                ),
+            )
+            depth_confirmation_age = cast(
+                torch.Tensor,
+                unpad_trajectories(
+                    depth_confirmation_age_padded,
+                    batch.masks,
+                ),
+            )
+            adjacent_pair_evidence = cast(
+                torch.Tensor,
+                unpad_trajectories(
+                    adjacent_pair_evidence_padded,
+                    batch.masks,
+                ),
+            )
         else:
             event_labels_raw = event_labels_raw_padded
             event_labels = event_labels_padded
@@ -1230,6 +1451,9 @@ class PPOTeacherKL(PPO):
             safe_stride_upper = safe_stride_upper_padded
             safe_stride_interval_valid = safe_stride_interval_valid_padded
             depth_confirmation_event = depth_confirmation_event_padded
+            geometry_probe_validation = geometry_probe_validation_padded
+            depth_confirmation_age = depth_confirmation_age_padded
+            adjacent_pair_evidence = adjacent_pair_evidence_padded
 
         total_loss = torch.zeros((), device=self.device)
         logs: dict[str, float] = {}
@@ -1422,9 +1646,42 @@ class PPOTeacherKL(PPO):
             logs["slow_latent_future_risk_quality_label_overlap_mean"] = self._distributed_mean_scalar(
                 label_overlap
             ).item()
-        if shape_coef != 0.0 and "stair_shape" in aux_outputs:
+        if shape_coef != 0.0 and ("geometry_probe" in aux_outputs or "stair_shape" in aux_outputs):
             huber_delta = float(getattr(self.actor, "stair_shape_huber_delta", 0.05))
-            shape_predictions = aux_outputs["stair_shape"]
+            if "geometry_probe" in aux_outputs:
+                shape_predictions = aux_outputs["geometry_probe"]
+            else:
+                shape_predictions = aux_outputs["stair_shape"]
+            geometry_component_valid = shape_component_valid
+            if self.geometry_probe_only:
+                confirmation_age = depth_confirmation_age[..., 0]
+                sparse_age_sample = (
+                    (confirmation_age == 0)
+                    | (confirmation_age == 1)
+                    | (confirmation_age == 4)
+                    | (confirmation_age == 8)
+                    | (confirmation_age == 16)
+                    | (confirmation_age == 32)
+                )
+                depth_sample = sparse_age_sample.to(shape_component_valid.dtype)
+                height_sample = (sparse_age_sample | (event_labels_raw[..., 0] > 0.5)).to(shape_component_valid.dtype)
+                geometry_sample = torch.stack(
+                    [depth_sample, height_sample],
+                    dim=-1,
+                )
+                geometry_component_valid = shape_component_valid * geometry_sample
+            shape_loss_valid = geometry_component_valid
+            if self.geometry_probe_only:
+                shape_loss_valid = geometry_component_valid * (1.0 - geometry_probe_validation)
+            shape_loss_labels = shape_labels
+            if self.geometry_probe_only and self.geometry_probe_permute_depth_labels:
+                shape_loss_labels = shape_labels.clone()
+                depth_labels_flat = shape_loss_labels[..., 0].reshape(-1)
+                depth_valid_flat = shape_loss_valid[..., 0].reshape(-1) > 0.5
+                depth_valid_indices = depth_valid_flat.nonzero(as_tuple=False).squeeze(-1)
+                if depth_valid_indices.numel() > 1:
+                    depth_values = depth_labels_flat[depth_valid_indices].clone()
+                    depth_labels_flat[depth_valid_indices] = depth_values.roll(1)
             shape_lower_bounds = shape_labels.new_tensor([
                 float(getattr(self.actor, "tread_depth_min", 0.18)),
                 float(getattr(self.actor, "riser_height_min", 0.088)),
@@ -1433,20 +1690,66 @@ class PPOTeacherKL(PPO):
                 float(getattr(self.actor, "tread_depth_max", 0.35)),
                 float(getattr(self.actor, "riser_height_max", 0.25)),
             ])
-            shape_loss_raw = self._compute_normalized_stair_shape_loss(
-                shape_predictions,
-                shape_labels,
-                shape_component_valid,
-                shape_lower_bounds,
-                shape_upper_bounds,
-                huber_delta,
-            )
+            if self.geometry_probe_only:
+                shape_loss_raw = shape_predictions.new_zeros(())
+                for component_index in range(2):
+                    shape_loss_raw = shape_loss_raw + self._compute_normalized_stair_shape_loss(
+                        shape_predictions[..., component_index : component_index + 1],
+                        shape_loss_labels[..., component_index : component_index + 1],
+                        shape_loss_valid[..., component_index : component_index + 1],
+                        shape_lower_bounds[component_index : component_index + 1],
+                        shape_upper_bounds[component_index : component_index + 1],
+                        huber_delta,
+                    )
+            else:
+                shape_loss_raw = self._compute_normalized_stair_shape_loss(
+                    shape_predictions,
+                    shape_loss_labels,
+                    shape_loss_valid,
+                    shape_lower_bounds,
+                    shape_upper_bounds,
+                    huber_delta,
+                )
             shape_mae, shape_huber = self._compute_stair_shape_component_errors(
                 shape_predictions,
                 shape_labels,
-                shape_component_valid,
+                shape_loss_valid,
                 huber_delta,
             )
+            if self.geometry_probe_only:
+                self._accumulate_geometry_probe_statistics(
+                    shape_predictions,
+                    shape_labels,
+                    geometry_component_valid,
+                    geometry_probe_validation,
+                    depth_confirmation_age,
+                )
+                pair_valid = adjacent_pair_evidence[..., 2]
+                pair_event = adjacent_pair_evidence[..., 3]
+                self._accumulate_geometry_probe_component(
+                    adjacent_pair_evidence[..., 0],
+                    shape_labels[..., 0],
+                    pair_valid,
+                    "physical_pair_frame_depth",
+                )
+                self._accumulate_geometry_probe_component(
+                    adjacent_pair_evidence[..., 1],
+                    shape_labels[..., 1],
+                    pair_valid,
+                    "physical_pair_frame_height",
+                )
+                self._accumulate_geometry_probe_component(
+                    adjacent_pair_evidence[..., 0],
+                    shape_labels[..., 0],
+                    pair_event,
+                    "physical_pair_event_depth",
+                )
+                self._accumulate_geometry_probe_component(
+                    adjacent_pair_evidence[..., 1],
+                    shape_labels[..., 1],
+                    pair_event,
+                    "physical_pair_event_height",
+                )
             shape_loss = shape_coef * shape_loss_raw
             total_loss = total_loss + shape_loss
             normalized_huber_mean = self._distributed_mean_scalar(shape_loss_raw)
@@ -1463,6 +1766,16 @@ class PPOTeacherKL(PPO):
             logs["slow_latent_riser_height_valid_ratio"] = self._distributed_mean_scalar(
                 shape_component_valid[..., 1].mean()
             ).item()
+            if self.geometry_probe_only:
+                logs["slow_latent_geometry_probe_validation_ratio"] = self._distributed_mean_scalar(
+                    geometry_probe_validation.mean()
+                ).item()
+                logs["slow_latent_geometry_probe_depth_sample_ratio"] = self._distributed_mean_scalar(
+                    geometry_component_valid[..., 0].mean()
+                ).item()
+                logs["slow_latent_geometry_probe_permuted_depth_labels"] = float(
+                    self.geometry_probe_permute_depth_labels
+                )
             stair_positive_float = (stair_labels > 0.5).to(shape_valid.dtype)
             stair_positive_count = stair_positive_float.sum().clamp_min(1.0)
             flat_count = (1.0 - stair_positive_float).sum().clamp_min(1.0)
@@ -2018,13 +2331,18 @@ class PPOTeacherKL(PPO):
     def update(self) -> dict[str, float]:
         """Run a PPO update and advance the teacher-KL schedule."""
         self._safe_stride_update_statistics = {}
+        self._geometry_probe_update_statistics = {}
         if self.safe_stride_probe_only:
             loss_dict = self._update_safe_stride_probe_only()
+        elif self.geometry_probe_only:
+            loss_dict = self._update_geometry_probe_only()
         else:
             loss_dict = self._update_teacher_imitation_only() if self.teacher_imitation_only else super().update()
         loss_dict.update(self._finalize_safe_stride_update_statistics())
+        loss_dict.update(self._finalize_geometry_probe_statistics())
         self._safe_stride_update_statistics = None
-        if not self.safe_stride_probe_only:
+        self._geometry_probe_update_statistics = None
+        if not self.safe_stride_probe_only and not self.geometry_probe_only:
             self.teacher_kl_iteration += 1
         return loss_dict
 
@@ -2092,6 +2410,64 @@ class PPOTeacherKL(PPO):
             "entropy": 0.0,
             "safe_stride_probe_only": 1.0,
             "safe_stride_probe_frozen_state_exact": 1.0,
+            **mean_logs,
+        }
+
+    def _update_geometry_probe_only(self) -> dict[str, float]:
+        """Optimize only GeometryProbeHead with a held-out validation subset."""
+        if self._geometry_probe_frozen_state is None:
+            self._geometry_probe_frozen_state = self._capture_geometry_probe_frozen_state()
+        if self.actor.is_recurrent or self.critic.is_recurrent:
+            generator = self.storage.recurrent_mini_batch_generator(
+                self.num_mini_batches,
+                self.num_learning_epochs,
+            )
+        else:
+            generator = self.storage.mini_batch_generator(
+                self.num_mini_batches,
+                self.num_learning_epochs,
+            )
+
+        mean_logs: dict[str, float] = {}
+        num_updates = 0
+        for batch in generator:
+            if batch.observations is None:
+                raise RuntimeError("Geometry Probe requires rollout observations.")
+            if batch.observations.batch_size[0] == 0:
+                continue
+            self.actor(
+                batch.observations,
+                masks=batch.masks,
+                hidden_state=batch.hidden_states[0],
+                stochastic_output=False,
+            )
+            loss, logs = self._compute_slow_latent_aux_loss(batch)
+            self.optimizer.zero_grad()
+            loss.backward()
+            geometry_probe_head = getattr(self.actor, "geometry_probe_head", None)
+            if geometry_probe_head is None:
+                raise RuntimeError("Geometry Probe head disappeared during update.")
+            torch.nn.utils.clip_grad_norm_(
+                geometry_probe_head.parameters(),
+                self.max_grad_norm,
+            )
+            self.optimizer.step()
+            num_updates += 1
+            for name, value in logs.items():
+                mean_logs[name] = mean_logs.get(name, 0.0) + value
+
+        if num_updates == 0:
+            raise RuntimeError("Geometry Probe update produced no non-empty mini-batches.")
+        for name in mean_logs:
+            mean_logs[name] /= num_updates
+        self._verify_geometry_probe_frozen_state()
+        self.storage.clear()
+        return {
+            "value": 0.0,
+            "surrogate": 0.0,
+            "entropy": 0.0,
+            "geometry_probe_only": 1.0,
+            "geometry_probe_frozen_state_exact": 1.0,
             **mean_logs,
         }
 
@@ -2192,6 +2568,19 @@ class PPOTeacherKL(PPO):
             )
             if safe_stride_width_head is not None:
                 safe_stride_width_head.train()
+            self._freeze_teacher()
+            return
+        if self.geometry_probe_only:
+            self.actor.eval()
+            self.critic.eval()
+            geometry_probe_head = getattr(
+                self.actor,
+                "geometry_probe_head",
+                None,
+            )
+            if geometry_probe_head is None:
+                raise RuntimeError("geometry_probe_only has no geometry Probe head.")
+            geometry_probe_head.train()
             self._freeze_teacher()
             return
         super().train_mode()

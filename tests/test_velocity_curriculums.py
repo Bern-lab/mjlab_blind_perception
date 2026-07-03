@@ -24,6 +24,11 @@ from mjlab.tasks.velocity.mdp.stair_geometry import (
   MINIMUM_SAFE_STRIDE_UPPER_KEY,
   MINIMUM_SAFE_STRIDE_VALID_KEY,
   MINIMUM_SAFE_STRIDE_WEIGHT_KEY,
+  STAIR_ADJACENT_PAIR_DEPTH_KEY,
+  STAIR_ADJACENT_PAIR_EVENT_KEY,
+  STAIR_ADJACENT_PAIR_HEIGHT_KEY,
+  STAIR_ADJACENT_PAIR_VALID_KEY,
+  STAIR_DEPTH_CONFIRMATION_AGE_KEY,
   STAIR_DEPTH_CONFIRMATION_EVENT_KEY,
   STAIR_DEPTH_LABEL_VALID_KEY,
   STAIR_ENTRY_EVENT_KEY,
@@ -139,7 +144,7 @@ def test_terrain_levels_vel_uses_target_reached_for_target_episodes() -> None:
     command_term,
   )
 
-  result = terrain_levels_vel(env, torch.arange(3), command_name="twist")
+  result = terrain_levels_vel(cast(Any, env), torch.arange(3), command_name="twist")
 
   assert terrain.last_move_up is not None
   assert terrain.last_move_up.tolist() == [True, False, True]
@@ -159,7 +164,7 @@ def test_terrain_levels_vel_keeps_distance_rule_without_target_state() -> None:
     command_term,
   )
 
-  result = terrain_levels_vel(env, torch.arange(2), command_name="twist")
+  result = terrain_levels_vel(cast(Any, env), torch.arange(2), command_name="twist")
 
   assert terrain.last_move_up is not None
   assert terrain.last_move_up.tolist() == [True, False]
@@ -189,7 +194,7 @@ def test_terrain_levels_vel_mixed_replay_sticks_after_high_level() -> None:
   terrain.terrain_levels[0] = 7
 
   result = terrain_levels_vel(
-    env,
+    cast(Any, env),
     torch.arange(2),
     command_name="twist",
     mixed_replay_start_level=8,
@@ -202,7 +207,7 @@ def test_terrain_levels_vel_mixed_replay_sticks_after_high_level() -> None:
   assert result["mixed_replay_low_ratio"].item() == torch.tensor(1.0).item()
 
   terrain_levels_vel(
-    env,
+    cast(Any, env),
     torch.tensor([0]),
     command_name="twist",
     mixed_replay_start_level=8,
@@ -780,6 +785,11 @@ def test_slow_latent_labels_follow_env_stair_state_machine() -> None:
       STAIR_SHAPE_LABEL_VALID_KEY: torch.tensor([True, True]),
       STAIR_DEPTH_LABEL_VALID_KEY: torch.tensor([False, True]),
       STAIR_DEPTH_CONFIRMATION_EVENT_KEY: torch.tensor([False, True]),
+      STAIR_DEPTH_CONFIRMATION_AGE_KEY: torch.tensor([-1, 3]),
+      STAIR_ADJACENT_PAIR_DEPTH_KEY: torch.tensor([0.28, 0.31]),
+      STAIR_ADJACENT_PAIR_HEIGHT_KEY: torch.tensor([0.17, 0.19]),
+      STAIR_ADJACENT_PAIR_VALID_KEY: torch.tensor([True, False]),
+      STAIR_ADJACENT_PAIR_EVENT_KEY: torch.tensor([True, False]),
       MINIMUM_SAFE_STRIDE_VALID_KEY: torch.tensor([False, True]),
       MINIMUM_SAFE_STRIDE_EXACT_KEY: torch.tensor([False, True]),
       MINIMUM_SAFE_STRIDE_INTERVAL_VALID_KEY: torch.tensor([False, True]),
@@ -801,11 +811,14 @@ def test_slow_latent_labels_follow_env_stair_state_machine() -> None:
       velocity_observations.stair_shape_component_valid_label(cast(Any, env)),
       velocity_observations.safe_stride_interval_valid_label(cast(Any, env)),
       velocity_observations.stair_depth_confirmation_event_label(cast(Any, env)),
+      velocity_observations.geometry_probe_validation_mask(cast(Any, env)),
+      velocity_observations.stair_depth_confirmation_age_label(cast(Any, env)),
+      velocity_observations.stair_adjacent_pair_evidence_label(cast(Any, env)),
     ],
     dim=-1,
   )
 
-  assert labels.shape == (2, 17)
+  assert labels.shape == (2, 23)
   torch.testing.assert_close(
     labels,
     torch.tensor(
@@ -828,6 +841,12 @@ def test_slow_latent_labels_follow_env_stair_state_machine() -> None:
           1.0,
           0.0,
           0.0,
+          0.0,
+          -1.0,
+          0.28,
+          0.17,
+          1.0,
+          1.0,
         ],
         [
           0.0,
@@ -847,6 +866,12 @@ def test_slow_latent_labels_follow_env_stair_state_machine() -> None:
           1.0,
           1.0,
           1.0,
+          0.0,
+          3.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
         ],
       ]
     ),

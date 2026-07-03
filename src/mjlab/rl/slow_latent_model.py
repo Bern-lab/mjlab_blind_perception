@@ -93,6 +93,7 @@ class LSTMSlowLatentMLPModel(MLPModel):
     dynamic_safe_stride_enabled: bool = False,
     safe_stride_phase_dim: int = 0,
     shadow_semantic_enabled: bool = False,
+    geometry_probe_input: str = "none",
     future_risk_weight_scale: float = 2.0,
     future_quality_weight_scale: float = 2.0,
     future_risk_huber_delta: float = 0.1,
@@ -197,6 +198,26 @@ class LSTMSlowLatentMLPModel(MLPModel):
       activation_cls(),
       nn.Linear(64, 2),
     )
+    if geometry_probe_input not in {"none", "shape", "hidden", "combined"}:
+      raise ValueError(
+        "geometry_probe_input must be one of none, shape, hidden, combined."
+      )
+    self.geometry_probe_input = geometry_probe_input
+    geometry_probe_input_dim = {
+      "none": 0,
+      "shape": self.shape_latent_dim,
+      "hidden": self.latent_hidden_dim,
+      "combined": self.shape_latent_dim + self.latent_hidden_dim,
+    }[geometry_probe_input]
+    self.geometry_probe_head: nn.Module | None = None
+    if geometry_probe_input_dim > 0:
+      # Keep action-sampling RNG identical across Probe input ablations.
+      with torch.random.fork_rng(devices=[]):
+        self.geometry_probe_head = nn.Sequential(
+          nn.Linear(geometry_probe_input_dim, 64),
+          activation_cls(),
+          nn.Linear(64, 2),
+        )
     dynamic_stride_input_dim = (
       self.shape_latent_dim + self.latent_hidden_dim + safe_stride_phase_dim
       if dynamic_safe_stride_enabled
@@ -337,6 +358,7 @@ class LSTMSlowLatentMLPModel(MLPModel):
     self._aux_future_collision_risk_logits: torch.Tensor | None = None
     self._aux_future_safe_landing_quality_logits: torch.Tensor | None = None
     self._aux_stair_shape_predictions: torch.Tensor | None = None
+    self._aux_geometry_probe_predictions: torch.Tensor | None = None
     self._aux_safe_stride_predictions: torch.Tensor | None = None
     self._aux_safe_stride_intervals: torch.Tensor | None = None
     self._shadow_semantic: torch.Tensor | None = None
@@ -412,6 +434,10 @@ class LSTMSlowLatentMLPModel(MLPModel):
 
   def _decode_stair_shape(self, shape_memory: torch.Tensor) -> torch.Tensor:
     shape01 = torch.sigmoid(self.stair_shape_head(shape_memory))
+    return self._denormalize_stair_shape(shape01)
+
+  def _denormalize_stair_shape(self, shape01: torch.Tensor) -> torch.Tensor:
+    """Map normalized depth/height predictions to physical units."""
     tread_depth = self.tread_depth_min + shape01[..., 0:1] * (
       self.tread_depth_max - self.tread_depth_min
     )
@@ -419,6 +445,24 @@ class LSTMSlowLatentMLPModel(MLPModel):
       self.riser_height_max - self.riser_height_min
     )
     return torch.cat([tread_depth, riser_height], dim=-1)
+
+  def _decode_geometry_probe(
+    self,
+    shape_memory: torch.Tensor,
+    h_t: torch.Tensor,
+  ) -> torch.Tensor | None:
+    """Decode physical stair geometry from the configured frozen feature set."""
+    if self.geometry_probe_head is None:
+      return None
+    if self.geometry_probe_input == "shape":
+      features = shape_memory
+    elif self.geometry_probe_input == "hidden":
+      features = h_t
+    else:
+      features = torch.cat([shape_memory, h_t], dim=-1)
+    return self._denormalize_stair_shape(
+      torch.sigmoid(self.geometry_probe_head(features))
+    )
 
   def _decode_safe_stride_interval(
     self,
@@ -657,6 +701,11 @@ class LSTMSlowLatentMLPModel(MLPModel):
           elif name == "2.bias":
             migrated_value.fill_(_DYNAMIC_SAFE_STRIDE_WIDTH_LOGIT)
           state_dict[key] = migrated_value
+    if self.geometry_probe_head is not None:
+      for name, value in self.geometry_probe_head.state_dict().items():
+        key = f"{prefix}geometry_probe_head.{name}"
+        if key not in state_dict:
+          state_dict[key] = value.detach().clone()
     super()._load_from_state_dict(
       state_dict,
       prefix,
@@ -937,6 +986,7 @@ class LSTMSlowLatentMLPModel(MLPModel):
     future_risk_logits: list[torch.Tensor] = []
     future_quality_logits: list[torch.Tensor] = []
     stair_shape_predictions: list[torch.Tensor] = []
+    geometry_probe_predictions: list[torch.Tensor] = []
     safe_stride_predictions: list[torch.Tensor] = []
     safe_stride_intervals: list[torch.Tensor] = []
 
@@ -981,6 +1031,7 @@ class LSTMSlowLatentMLPModel(MLPModel):
       future_quality_logit = self.future_safe_landing_quality_head(z_next)
       shape_memory = self._shape_memory(z_next)
       stair_shape_prediction = self._decode_stair_shape(shape_memory)
+      geometry_probe_prediction = self._decode_geometry_probe(shape_memory, h_t)
       safe_stride_features = self._safe_stride_features(
         shape_memory,
         h_t,
@@ -1005,6 +1056,8 @@ class LSTMSlowLatentMLPModel(MLPModel):
       future_risk_logits.append(future_risk_logit)
       future_quality_logits.append(future_quality_logit)
       stair_shape_predictions.append(stair_shape_prediction)
+      if geometry_probe_prediction is not None:
+        geometry_probe_predictions.append(geometry_probe_prediction)
       safe_stride_predictions.append(safe_stride_prediction)
       safe_stride_intervals.append(safe_stride_interval)
 
@@ -1045,6 +1098,11 @@ class LSTMSlowLatentMLPModel(MLPModel):
       future_quality_logits, dim=0
     )
     self._aux_stair_shape_predictions = torch.stack(stair_shape_predictions, dim=0)
+    self._aux_geometry_probe_predictions = (
+      torch.stack(geometry_probe_predictions, dim=0)
+      if geometry_probe_predictions
+      else None
+    )
     self._aux_safe_stride_predictions = torch.stack(safe_stride_predictions, dim=0)
     self._aux_safe_stride_intervals = torch.stack(safe_stride_intervals, dim=0)
     shadow_semantic = (
@@ -1091,6 +1149,11 @@ class LSTMSlowLatentMLPModel(MLPModel):
         torch.Tensor,
         unpad_trajectories(self._aux_stair_shape_predictions, masks),
       )
+      if self._aux_geometry_probe_predictions is not None:
+        self._aux_geometry_probe_predictions = cast(
+          torch.Tensor,
+          unpad_trajectories(self._aux_geometry_probe_predictions, masks),
+        )
       self._aux_safe_stride_predictions = cast(
         torch.Tensor,
         unpad_trajectories(self._aux_safe_stride_predictions, masks),
@@ -1124,6 +1187,10 @@ class LSTMSlowLatentMLPModel(MLPModel):
         self._aux_future_safe_landing_quality_logits.squeeze(0)
       )
       self._aux_stair_shape_predictions = self._aux_stair_shape_predictions.squeeze(0)
+      if self._aux_geometry_probe_predictions is not None:
+        self._aux_geometry_probe_predictions = (
+          self._aux_geometry_probe_predictions.squeeze(0)
+        )
       self._aux_safe_stride_predictions = self._aux_safe_stride_predictions.squeeze(0)
       self._aux_safe_stride_intervals = self._aux_safe_stride_intervals.squeeze(0)
       if shadow_semantic is not None:
@@ -1331,6 +1398,8 @@ class LSTMSlowLatentMLPModel(MLPModel):
       )
     if self._aux_stair_shape_predictions is not None:
       outputs["stair_shape"] = self._aux_stair_shape_predictions
+    if self._aux_geometry_probe_predictions is not None:
+      outputs["geometry_probe"] = self._aux_geometry_probe_predictions
     if self._aux_safe_stride_predictions is not None:
       outputs["safe_stride"] = self._aux_safe_stride_predictions
     if (

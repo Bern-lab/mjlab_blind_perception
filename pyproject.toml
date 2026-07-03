@@ -165,6 +165,7 @@ ignore = ["B011"]
 pythonVersion = "3.10"
 venvPath = "."
 venv = ".venv"
+extraPaths = ["third_party/rsl_rl"]
 ignore = ["./typings", "./src/mjlab/utils/lab_api", "./docs"]
 stubPath = "typings"
 

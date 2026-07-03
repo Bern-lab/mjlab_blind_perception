@@ -6,6 +6,9 @@ from . import temporal_stair_rewards as _temporal_stair_rewards
 from .curriculums import *  # noqa: F403
 from .observations import *  # noqa: F403
 from .rewards import *  # noqa: F403
+from .stair_sequence_logging import (
+  stair_sequence_event_logger as stair_sequence_event_logger,
+)
 from .target_heading_command import *  # noqa: F403
 from .terminations import *  # noqa: F403
 from .velocity_command import *  # noqa: F403

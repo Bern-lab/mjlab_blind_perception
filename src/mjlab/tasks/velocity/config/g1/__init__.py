@@ -12,6 +12,7 @@ from .blind_rough_teacher_kl_env_cfg import (
   unitree_g1_blind_rough_teacherkl_env_cfg,
 )
 from .rl_cfg import (
+  unitree_g1_blind_rough_target_navigation_geometry_probe_runner_cfg,
   unitree_g1_blind_rough_target_navigation_semantic_v2_probe_runner_cfg,
   unitree_g1_blind_rough_target_navigation_semantic_v2_shadow_runner_cfg,
   unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg,
@@ -25,6 +26,18 @@ register_mjlab_task(
   env_cfg=unitree_g1_blind_rough_teacherkl_env_cfg(),
   play_env_cfg=unitree_g1_blind_rough_teacherkl_env_cfg(play=True),
   rl_cfg=unitree_g1_blind_rough_teacherkl_runner_cfg(),
+  runner_cls=VelocityOnPolicyRunner,
+)
+
+register_mjlab_task(
+  task_id=(
+    "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2GeometryProbe-Unitree-G1"
+  ),
+  env_cfg=unitree_g1_blind_rough_target_navigation_semantic_v2_probe_env_cfg(),
+  play_env_cfg=(
+    unitree_g1_blind_rough_target_navigation_semantic_v2_probe_env_cfg(play=True)
+  ),
+  rl_cfg=unitree_g1_blind_rough_target_navigation_geometry_probe_runner_cfg(),
   runner_cls=VelocityOnPolicyRunner,
 )
 

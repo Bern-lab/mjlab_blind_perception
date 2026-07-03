@@ -150,6 +150,54 @@ def test_future_labels_use_max_risk_and_first_touchdown_quality() -> None:
     assert found[:, 0, 0].tolist() == pytest.approx([1.0, 1.0, 1.0, 0.0, 0.0])
 
 
+def test_geometry_probe_statistics_separate_validation_age_and_depth_bins() -> None:
+    """Held-out geometry metrics should preserve temporal and depth cohorts."""
+    alg = _build_teacher_kl({"enabled": False})
+    alg.num_learning_epochs = 1
+    alg._geometry_probe_update_statistics = {}
+    labels = torch.tensor([[0.25, 0.10], [0.30, 0.15], [0.35, 0.20], [0.30, 0.15]])
+    predictions = labels.clone()
+    predictions[3, 0] += 0.02
+    component_valid = torch.ones_like(labels)
+    validation = torch.tensor([[0.0], [1.0], [1.0], [1.0]])
+    confirmation_age = torch.tensor([[0.0], [1.0], [8.0], [32.0]])
+
+    alg._accumulate_geometry_probe_statistics(
+        predictions,
+        labels,
+        component_valid,
+        validation,
+        confirmation_age,
+    )
+    logs = alg._finalize_geometry_probe_statistics()
+
+    validation_prefix = "slow_latent_geometry_probe_global_validation_depth"
+    assert logs[f"{validation_prefix}_valid_count"] == pytest.approx(3.0)
+    assert logs[f"{validation_prefix}_mae"] == pytest.approx(0.02 / 3.0)
+    assert logs[f"{validation_prefix}_r_squared"] < 1.0
+    assert logs["slow_latent_geometry_probe_global_validation_depth_age_17_plus_valid_count"] == pytest.approx(1.0)
+    assert logs["slow_latent_geometry_probe_global_validation_depth_bin_7_valid_count"] == pytest.approx(1.0)
+
+
+def test_geometry_probe_constant_label_cohort_has_zero_correlation_and_r2() -> None:
+    """A single-depth cohort should not emit numerically explosive metrics."""
+    alg = _build_teacher_kl({"enabled": False})
+    alg.num_learning_epochs = 1
+    alg._geometry_probe_update_statistics = {}
+    alg._accumulate_geometry_probe_component(
+        torch.tensor([0.20, 0.30, 0.40]),
+        torch.tensor([0.30, 0.30, 0.30]),
+        torch.ones(3),
+        "constant_depth",
+    )
+
+    logs = alg._finalize_geometry_probe_statistics()
+    prefix = "slow_latent_geometry_probe_global_constant_depth"
+
+    assert logs[f"{prefix}_correlation"] == pytest.approx(0.0)
+    assert logs[f"{prefix}_r_squared"] == pytest.approx(0.0)
+
+
 def test_continuous_future_aux_losses_use_future_labels() -> None:
     """Future heads should regress worst risk and first-touchdown quality."""
     alg = _build_teacher_kl({"enabled": False})

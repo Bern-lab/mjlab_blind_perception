@@ -148,6 +148,8 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """Trailing deployable latent-observation channels containing gait phase."""
   shadow_semantic_enabled: bool = False
   """Record a fixed-position semantic16 shadow vector without actor feedback."""
+  geometry_probe_input: Literal["none", "shape", "hidden", "combined"] = "none"
+  """Frozen-latent geometry Probe input: shape8, recurrent h_t, or both."""
   future_risk_weight_scale: float = 2.0
   """Extra Huber weight applied in proportion to the risk label."""
   future_quality_weight_scale: float = 2.0
@@ -274,6 +276,12 @@ class RslRlPpoTeacherKLAlgorithmCfg(RslRlPpoAlgorithmCfg):
   """Freeze the policy and optimize only the SafeStride decoder."""
   safe_stride_probe_learning_rate: float = 1.0e-3
   """Learning rate for the isolated SafeStride decoder probe."""
+  geometry_probe_only: bool = False
+  """Freeze the policy and optimize only the independent geometry Probe."""
+  geometry_probe_learning_rate: float = 1.0e-3
+  """Learning rate for the frozen-latent geometry Probe."""
+  geometry_probe_permute_depth_labels: bool = False
+  """Train depth against deterministically permuted labels as a null control."""
 
 
 @dataclass

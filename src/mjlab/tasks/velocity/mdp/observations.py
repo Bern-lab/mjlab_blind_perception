@@ -19,6 +19,11 @@ from .stair_geometry import (
   MINIMUM_SAFE_STRIDE_UPPER_KEY,
   MINIMUM_SAFE_STRIDE_VALID_KEY,
   MINIMUM_SAFE_STRIDE_WEIGHT_KEY,
+  STAIR_ADJACENT_PAIR_DEPTH_KEY,
+  STAIR_ADJACENT_PAIR_EVENT_KEY,
+  STAIR_ADJACENT_PAIR_HEIGHT_KEY,
+  STAIR_ADJACENT_PAIR_VALID_KEY,
+  STAIR_DEPTH_CONFIRMATION_AGE_KEY,
   STAIR_DEPTH_CONFIRMATION_EVENT_KEY,
   STAIR_DEPTH_LABEL_VALID_KEY,
   STAIR_ENTRY_EVENT_KEY,
@@ -505,6 +510,51 @@ def stair_depth_confirmation_event_label(env: ManagerBasedRlEnv) -> torch.Tensor
   if event is None or stair_phase is None:
     return torch.zeros(env.num_envs, 1, device=env.device)
   return (event.bool() & (stair_phase >= 1)).float().unsqueeze(-1)
+
+
+def stair_depth_confirmation_age_label(env: ManagerBasedRlEnv) -> torch.Tensor:
+  """Return frames since strict depth confirmation, or -1 before confirmation."""
+  age = env.extras.get(STAIR_DEPTH_CONFIRMATION_AGE_KEY)
+  stair_phase = env.extras.get(STAIR_PHASE_KEY)
+  if age is None or stair_phase is None:
+    return torch.full((env.num_envs, 1), -1.0, device=env.device)
+  active_age = torch.where(
+    stair_phase >= 1,
+    age.float(),
+    torch.full_like(age, -1).float(),
+  )
+  return active_age.unsqueeze(-1)
+
+
+def geometry_probe_validation_mask(
+  env: ManagerBasedRlEnv,
+  validation_fraction: float = 0.2,
+) -> torch.Tensor:
+  """Assign a deterministic held-out environment subset to Probe validation."""
+  if not 0.0 < validation_fraction < 1.0:
+    raise ValueError("validation_fraction must be in (0, 1).")
+  env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+  hashed = torch.remainder(env_ids * 1_103_515_245 + 12_345, 10_000)
+  threshold = round(validation_fraction * 10_000)
+  return (hashed < threshold).float().unsqueeze(-1)
+
+
+def stair_adjacent_pair_evidence_label(env: ManagerBasedRlEnv) -> torch.Tensor:
+  """Return deployable adjacent-support pair observations and validity."""
+  zeros = torch.zeros(env.num_envs, device=env.device)
+  depth = env.extras.get(STAIR_ADJACENT_PAIR_DEPTH_KEY, zeros)
+  height = env.extras.get(STAIR_ADJACENT_PAIR_HEIGHT_KEY, zeros)
+  valid = env.extras.get(STAIR_ADJACENT_PAIR_VALID_KEY, zeros).bool()
+  event = env.extras.get(STAIR_ADJACENT_PAIR_EVENT_KEY, zeros).bool()
+  return torch.stack(
+    [
+      torch.where(valid, depth, zeros),
+      torch.where(valid, height, zeros),
+      valid.float(),
+      (event & valid).float(),
+    ],
+    dim=-1,
+  )
 
 
 def stair_future_event_labels(env: ManagerBasedRlEnv) -> torch.Tensor:

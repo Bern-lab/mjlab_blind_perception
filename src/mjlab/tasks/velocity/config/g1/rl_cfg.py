@@ -639,6 +639,32 @@ def unitree_g1_blind_rough_target_navigation_semantic_v2_probe_runner_cfg() -> (
   return cfg
 
 
+def unitree_g1_blind_rough_target_navigation_geometry_probe_runner_cfg() -> (
+  RslRlTeacherKLRunnerCfg
+):
+  """Create the isolated frozen-latent stair-geometry Probe experiment."""
+  cfg = unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg()
+  cfg.max_iterations = 300
+  cfg.save_interval = 100
+  cfg.experiment_name = "g1_blind_rough_target_navigation_semantic_v2_geometry_probe"
+  actor_cfg = cast(RslRlGatedStairLatentModelCfg, cfg.actor)
+  actor_cfg.geometry_probe_input = "shape"
+  actor_cfg.aux_event_coef = 0.0
+  actor_cfg.aux_stair_coef = 0.0
+  actor_cfg.aux_future_collision_risk_coef = 0.0
+  actor_cfg.aux_future_safe_landing_quality_coef = 0.0
+  actor_cfg.aux_stair_shape_coef = 1.0
+  actor_cfg.aux_safe_stride_coef = 0.0
+  algorithm_cfg = cast(RslRlPpoTeacherKLAlgorithmCfg, cfg.algorithm)
+  algorithm_cfg.safe_stride_probe_only = False
+  algorithm_cfg.geometry_probe_only = True
+  algorithm_cfg.geometry_probe_learning_rate = 1.0e-3
+  algorithm_cfg.teacher_kl_cfg.enabled = False
+  cfg.load_optimizer_on_resume = False
+  cfg.load_iteration_on_resume = False
+  return cfg
+
+
 def unitree_g1_blind_rough_lstm_teacherkl_runner_cfg(
   num_steps_per_env: int = G1_LSTM_TEACHER_KL_NUM_STEPS_PER_ENV,
 ) -> RslRlTeacherKLRunnerCfg:

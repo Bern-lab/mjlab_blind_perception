@@ -6,6 +6,7 @@ from dataclasses import dataclass, field, replace
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers.event_manager import EventTermCfg
+from mjlab.managers.metrics_manager import MetricsTermCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
@@ -657,6 +658,17 @@ def _configure_slow_latent_rewards(
   cfg.rewards["target_reached_bonus"].weight = params.target_reached_bonus_weight
 
   configure_g1_step_danger_rewards(cfg, params)
+  cfg.metrics["stair_sequence_event_logger"] = MetricsTermCfg(
+    func=mdp.stair_sequence_event_logger,
+    params={
+      "asset_cfg": SceneEntityCfg(
+        "robot",
+        body_names=("left_ankle_roll_link", "right_ankle_roll_link"),
+        preserve_order=True,
+      ),
+      "command_name": "twist",
+    },
+  )
 
 
 def _configure_latent_observations(
@@ -713,6 +725,18 @@ def _configure_latent_observations(
         ),
         "stair_depth_confirmation_event": ObservationTermCfg(
           func=mdp.stair_depth_confirmation_event_label,
+          params={},
+        ),
+        "geometry_probe_validation": ObservationTermCfg(
+          func=mdp.geometry_probe_validation_mask,
+          params={"validation_fraction": 0.2},
+        ),
+        "stair_depth_confirmation_age": ObservationTermCfg(
+          func=mdp.stair_depth_confirmation_age_label,
+          params={},
+        ),
+        "stair_adjacent_pair_evidence": ObservationTermCfg(
+          func=mdp.stair_adjacent_pair_evidence_label,
           params={},
         ),
       },

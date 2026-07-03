@@ -71,6 +71,18 @@ Added
   task. It loads a legacy policy while optimizing only the dynamic SafeStride
   decoders, freezes policy and normalization state, and verifies after every
   update that all non-SafeStride state remains bit-exact.
+- Added the
+  ``Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2GeometryProbe-Unitree-G1``
+  task for testing whether a frozen recurrent policy encodes stair depth and
+  height. It supports shape-memory, recurrent-hidden, and combined inputs,
+  excludes a deterministic held-out environment subset from training, and
+  reports confirmation-age and tread-depth-bin validation metrics. An optional
+  permuted-depth-label run provides a null control for spurious decoding.
+- Added opt-in stair sequence/event CSV export through
+  ``MJLAB_STAIR_EXPORT_DIR`` and reward-neutral confirmation diagnostics using
+  raw expected-riser contact as an independent oracle. Events are counted on
+  rising edges, while TensorBoard reports precision, recall, false-confirmation,
+  duplicate, missed-event, and detection-delay metrics.
 
 Changed
 ^^^^^^^
