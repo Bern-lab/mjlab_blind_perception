@@ -1611,9 +1611,9 @@ class stair_sequence_event_logger:
     for env_id, payload in payloads.items():
       self._exporter.record_event(
         env_id,
-        "finish_without_collision",
+        "finish_without_legacy_expected_collision",
         payload,
-        once_key="finish_without_collision",
+        once_key="finish_without_legacy_expected_collision",
       )
     payloads = self._event_payloads(
       env,

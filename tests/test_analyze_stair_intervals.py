@@ -7,10 +7,12 @@ from pathlib import Path
 import pytest
 from tools.analyze_stair_intervals import (
   AuditError,
+  EventRecord,
   Evidence,
   IntervalEvidence,
   Prediction,
   QualityScheme,
+  SequenceKey,
   SequenceRecord,
   _calibrate,
   _calibrate_quality_buckets,
@@ -18,12 +20,15 @@ from tools.analyze_stair_intervals import (
   _fuse_sequence,
   _load_inputs,
   _macro_f1,
+  _multilayer_prediction_rows,
+  _multilayer_prefix_stats,
   _prediction_stats,
   _reclassify_confirmation_events,
   _regression_stats,
   _shuffled_evidence,
   _shuffled_quality_overrides,
   _support_quality,
+  _support_visits,
   analyze,
   analyze_descriptive,
 )
@@ -153,6 +158,7 @@ def test_v2_trajectory_and_contact_evidence_are_extracted(tmp_path: Path) -> Non
       "contact_point_s": 0.60,
       "toe_s": 0.61,
       "root_s": 0.50,
+      "contact_s_minus_riser_s": 0.001,
     },
     {
       **_event_row("1", 5, "oracle_riser_contact", 30, layer=3, root_x=0.80),
@@ -161,14 +167,16 @@ def test_v2_trajectory_and_contact_evidence_are_extracted(tmp_path: Path) -> Non
       "contact_point_s": 0.90,
       "toe_s": 0.92,
       "root_s": 0.79,
+      "contact_s_minus_riser_s": -0.002,
     },
     {
       **_event_row("1", 6, "oracle_riser_contact", 40, layer=4, root_x=1.10),
       "foot_id": 0,
-      "contact_valid": 0,
-      "contact_point_s": "",
+      "contact_valid": 1,
+      "contact_point_s": 3.20,
       "toe_s": 1.20,
       "root_s": 1.10,
+      "contact_s_minus_riser_s": 2.0,
     },
   ]
   _write_rows(run / "stair_events.csv", events)
@@ -200,6 +208,80 @@ def test_v2_trajectory_and_contact_evidence_are_extracted(tmp_path: Path) -> Non
     "oracle_root_proxy_v2",
   }
   assert (output / "logger_v2_event_counts.csv").exists()
+
+
+def test_multilayer_support_slope_recovers_depth_with_foot_offset() -> None:
+  key: SequenceKey = ("model_seed42", "1")
+  sequence = SequenceRecord(
+    key=key,
+    run_id=key[0],
+    seed=42,
+    sequence_id=key[1],
+    env_id=0,
+    depth_bin=3,
+    true_depth=0.30,
+    true_height=0.10,
+    termination_reason="confirmed_exit",
+    raw={},
+  )
+
+  def support_event(
+    event_id: int,
+    frame: int,
+    left_layer: int,
+    right_layer: int,
+  ) -> EventRecord:
+    return EventRecord(
+      key=key,
+      run_id=key[0],
+      seed=42,
+      event_id=event_id,
+      event_type="pair_full",
+      frame_idx=frame,
+      time=frame * 0.02,
+      event_layer=max(left_layer, right_layer),
+      raw={
+        "event_family": "support_trajectory",
+        "left_support_layer": str(left_layer),
+        "right_support_layer": str(right_layer),
+        "left_stair_contact": "1",
+        "right_stair_contact": "1",
+        "left_foot_s": str(0.10 + 0.30 * left_layer),
+        "right_foot_s": str(0.12 + 0.30 * right_layer),
+        "left_geometric_overlap": "1.0",
+        "right_geometric_overlap": "1.0",
+      },
+    )
+
+  events = [
+    support_event(0, 10, 1, 2),
+    support_event(1, 20, 3, 2),
+    support_event(2, 30, 3, 4),
+  ]
+  sequences: dict[SequenceKey, SequenceRecord] = {key: sequence}
+  visits = _support_visits(sequences, events)
+  predictions = _multilayer_prediction_rows(sequences, visits)
+  prefix_four = {
+    row["method"]: row for row in predictions if row["prefix_distinct_layers"] == 4
+  }
+
+  assert len(visits) == 4
+  assert prefix_four["huber_oracle_layer_foot_offset"][
+    "predicted_depth"
+  ] == pytest.approx(0.30)
+  assert prefix_four["huber_oracle_transition_order_foot_offset"][
+    "predicted_depth"
+  ] == pytest.approx(0.30)
+  stats = _multilayer_prefix_stats(sequences, visits, predictions)
+  row = next(
+    item
+    for item in stats
+    if item["prefix_distinct_layers"] == 4
+    and item["method"] == "huber_oracle_layer_foot_offset"
+  )
+  assert row["eligible_sequences"] == 1
+  assert row["predicted_sequences"] == 1
+  assert row["mae"] == pytest.approx(0.0)
 
 
 def _make_run(root: Path, seed: int, depth: float, depth_bin: int) -> Path:

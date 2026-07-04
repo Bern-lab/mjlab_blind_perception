@@ -18,8 +18,12 @@ from pathlib import Path
 from statistics import mean, median, pstdev
 from typing import Iterable, Mapping, Sequence, TypedDict
 
+import numpy as np
+
 CsvRow = dict[str, str]
 SequenceKey = tuple[str, str]
+CONTACT_ASSOCIATION_MAX_S_RESIDUAL = 0.03
+MULTILAYER_PREFIX_COUNTS = (2, 3, 4, 5)
 
 EXPECTED_STAGE0_COUNTS = {
   "sequences": 8562,
@@ -71,6 +75,21 @@ class FusionTrace(TypedDict):
   fallback_reason: str
 
 
+class MultilayerPredictionRow(TypedDict):
+  run_id: str
+  seed: int
+  sequence_id: str
+  depth_bin: int
+  true_depth: float
+  prefix_distinct_layers: int
+  available_distinct_layers: int
+  num_support_points: int
+  observed_layers: str
+  method: str
+  predicted_depth: float
+  error: float
+
+
 @dataclass(frozen=True)
 class SequenceRecord:
   key: SequenceKey
@@ -116,6 +135,22 @@ class Evidence:
   quality_mean: float = math.nan
   quality_max: float = math.nan
   quality_asymmetry: float = math.nan
+
+
+@dataclass(frozen=True)
+class SupportVisit:
+  key: SequenceKey
+  seed: int
+  sequence_id: str
+  foot_id: int
+  support_layer: int
+  frame_idx: int
+  event_id: int
+  event_type: str
+  foot_s: float
+  quality: float
+  true_depth: float
+  depth_bin: int
 
 
 @dataclass(frozen=True)
@@ -518,6 +553,15 @@ def _support_quality(row: Mapping[str, str]) -> tuple[float, float, float, float
   )
 
 
+def _contact_association_valid(event: EventRecord) -> bool:
+  if _as_int(event.raw, "contact_valid", 0) != 1:
+    return False
+  residual = _as_float(event.raw, "contact_s_minus_riser_s")
+  return not math.isfinite(residual) or (
+    abs(residual) <= CONTACT_ASSOCIATION_MAX_S_RESIDUAL
+  )
+
+
 def _extract_evidence(
   sequences: Mapping[SequenceKey, SequenceRecord],
   events: Sequence[EventRecord],
@@ -634,7 +678,7 @@ def _extract_evidence(
     for event in ordered:
       if (
         event.event_type == "oracle_riser_contact"
-        and _as_int(event.raw, "contact_valid", 0) == 1
+        and _contact_association_valid(event)
         and event.event_layer >= 2
       ):
         oracle_v2_by_foot[_as_int(event.raw, "foot_id", -1)].append(event)
@@ -726,6 +770,415 @@ def _extract_evidence(
     key=lambda item: (item.key, item.frame_idx, item.event_id, item.evidence_type)
   )
   return evidence
+
+
+_SUPPORT_VISIT_PRIORITY = {
+  "pair_enter": 0,
+  "pair_quality_cross_0.75": 1,
+  "pair_quality_cross_0.90": 2,
+  "pair_full": 3,
+  "pair_stable_for_N_frames": 4,
+}
+
+
+def _support_visits(
+  sequences: Mapping[SequenceKey, SequenceRecord],
+  events: Sequence[EventRecord],
+) -> list[SupportVisit]:
+  candidates: dict[tuple[SequenceKey, int, int], list[SupportVisit]] = defaultdict(list)
+  for event in events:
+    if event.event_type not in _SUPPORT_VISIT_PRIORITY:
+      continue
+    sequence = sequences[event.key]
+    for foot_id, side in enumerate(("left", "right")):
+      layer = _as_int(event.raw, f"{side}_support_layer", -1)
+      foot_s = _as_float(event.raw, f"{side}_foot_s")
+      stair_contact = _as_int(event.raw, f"{side}_stair_contact", int(layer > 0))
+      quality = _as_float(
+        event.raw,
+        f"{side}_geometric_overlap",
+        f"{side}_support_ratio",
+      )
+      if layer <= 0 or stair_contact != 1 or not math.isfinite(foot_s):
+        continue
+      candidates[(event.key, foot_id, layer)].append(
+        SupportVisit(
+          key=event.key,
+          seed=sequence.seed,
+          sequence_id=sequence.sequence_id,
+          foot_id=foot_id,
+          support_layer=layer,
+          frame_idx=event.frame_idx,
+          event_id=event.event_id,
+          event_type=event.event_type,
+          foot_s=foot_s,
+          quality=quality,
+          true_depth=sequence.true_depth,
+          depth_bin=sequence.depth_bin,
+        )
+      )
+
+  visits: list[SupportVisit] = []
+  for group in candidates.values():
+    best_priority = max(_SUPPORT_VISIT_PRIORITY[item.event_type] for item in group)
+    best = [
+      item
+      for item in group
+      if _SUPPORT_VISIT_PRIORITY[item.event_type] == best_priority
+    ]
+    center = median(item.foot_s for item in best)
+    selected = min(
+      best,
+      key=lambda item: (
+        abs(item.foot_s - center),
+        item.frame_idx,
+        item.event_id,
+      ),
+    )
+    visits.append(selected)
+  visits.sort(
+    key=lambda item: (
+      item.key,
+      item.frame_idx,
+      item.event_id,
+      item.foot_id,
+      item.support_layer,
+    )
+  )
+  return visits
+
+
+def _linear_slope(
+  visits: Sequence[SupportVisit],
+  layer_by_visit: Mapping[tuple[int, int], float],
+  *,
+  include_foot_offset: bool,
+  robust: bool,
+) -> float:
+  if len(visits) < 2:
+    return math.nan
+  layers = np.asarray(
+    [layer_by_visit[(visit.foot_id, visit.support_layer)] for visit in visits],
+    dtype=np.float64,
+  )
+  columns = [np.ones(len(visits), dtype=np.float64), layers]
+  if include_foot_offset:
+    columns.append(
+      np.asarray([visit.foot_id == 1 for visit in visits], dtype=np.float64)
+    )
+  design = np.column_stack(columns)
+  target = np.asarray([visit.foot_s for visit in visits], dtype=np.float64)
+  if np.linalg.matrix_rank(design) < design.shape[1]:
+    return math.nan
+  coefficients = np.linalg.lstsq(design, target, rcond=None)[0]
+  if robust:
+    for _iteration in range(12):
+      residual = target - design @ coefficients
+      scale = 1.4826 * np.median(np.abs(residual - np.median(residual)))
+      if not math.isfinite(float(scale)) or scale < 1.0e-6:
+        break
+      threshold = 1.345 * scale
+      weights = np.minimum(1.0, threshold / np.maximum(np.abs(residual), 1.0e-12))
+      weighted_design = design * np.sqrt(weights)[:, None]
+      weighted_target = target * np.sqrt(weights)
+      updated = np.linalg.lstsq(weighted_design, weighted_target, rcond=None)[0]
+      if float(np.max(np.abs(updated - coefficients))) < 1.0e-8:
+        coefficients = updated
+        break
+      coefficients = updated
+  return float(coefficients[1])
+
+
+def _endpoint_depth(visits: Sequence[SupportVisit]) -> float:
+  by_layer: dict[int, list[float]] = defaultdict(list)
+  for visit in visits:
+    by_layer[visit.support_layer].append(visit.foot_s)
+  if len(by_layer) < 2:
+    return math.nan
+  lower = min(by_layer)
+  upper = max(by_layer)
+  return abs(median(by_layer[upper]) - median(by_layer[lower])) / (upper - lower)
+
+
+def _multilayer_prediction_rows(
+  sequences: Mapping[SequenceKey, SequenceRecord],
+  visits: Sequence[SupportVisit],
+) -> list[MultilayerPredictionRow]:
+  by_sequence: dict[SequenceKey, list[SupportVisit]] = defaultdict(list)
+  for visit in visits:
+    by_sequence[visit.key].append(visit)
+  rows: list[MultilayerPredictionRow] = []
+  for key, sequence_visits in by_sequence.items():
+    sequence = sequences[key]
+    first_frame_by_layer: dict[int, int] = {}
+    for visit in sequence_visits:
+      first_frame_by_layer[visit.support_layer] = min(
+        first_frame_by_layer.get(visit.support_layer, visit.frame_idx),
+        visit.frame_idx,
+      )
+    ordered_layers = sorted(
+      first_frame_by_layer,
+      key=lambda layer: (first_frame_by_layer[layer], layer),
+    )
+    for prefix_count in MULTILAYER_PREFIX_COUNTS:
+      if len(ordered_layers) < prefix_count:
+        continue
+      prefix_layers = ordered_layers[:prefix_count]
+      selected = [
+        visit for visit in sequence_visits if visit.support_layer in prefix_layers
+      ]
+      oracle_layers = {
+        (visit.foot_id, visit.support_layer): float(visit.support_layer)
+        for visit in selected
+      }
+      ordinal_index = {layer: float(index) for index, layer in enumerate(prefix_layers)}
+      ordinal_layers = {
+        (visit.foot_id, visit.support_layer): ordinal_index[visit.support_layer]
+        for visit in selected
+      }
+      shuffled = list(prefix_layers)
+      random.Random(f"{sequence.run_id}:{sequence.sequence_id}:{prefix_count}").shuffle(
+        shuffled
+      )
+      shuffled_index = {
+        layer: float(shuffled[index]) for index, layer in enumerate(prefix_layers)
+      }
+      shuffled_layers = {
+        (visit.foot_id, visit.support_layer): shuffled_index[visit.support_layer]
+        for visit in selected
+      }
+      predictions = {
+        "endpoint_oracle_layer": _endpoint_depth(selected),
+        "ols_oracle_layer": _linear_slope(
+          selected,
+          oracle_layers,
+          include_foot_offset=False,
+          robust=False,
+        ),
+        "huber_oracle_layer": _linear_slope(
+          selected,
+          oracle_layers,
+          include_foot_offset=False,
+          robust=True,
+        ),
+        "huber_oracle_layer_foot_offset": _linear_slope(
+          selected,
+          oracle_layers,
+          include_foot_offset=True,
+          robust=True,
+        ),
+        "huber_oracle_transition_order_foot_offset": _linear_slope(
+          selected,
+          ordinal_layers,
+          include_foot_offset=True,
+          robust=True,
+        ),
+        "shuffled_oracle_layer_foot_offset": _linear_slope(
+          selected,
+          shuffled_layers,
+          include_foot_offset=True,
+          robust=True,
+        ),
+      }
+      for method, prediction in predictions.items():
+        if not math.isfinite(prediction):
+          continue
+        rows.append(
+          {
+            "run_id": sequence.run_id,
+            "seed": sequence.seed,
+            "sequence_id": sequence.sequence_id,
+            "depth_bin": sequence.depth_bin,
+            "true_depth": sequence.true_depth,
+            "prefix_distinct_layers": prefix_count,
+            "available_distinct_layers": len(ordered_layers),
+            "num_support_points": len(selected),
+            "observed_layers": "|".join(map(str, prefix_layers)),
+            "method": method,
+            "predicted_depth": prediction,
+            "error": prediction - sequence.true_depth,
+          }
+        )
+  return rows
+
+
+def _depth_class_from_prediction(depth: float) -> int:
+  if depth < 0.5 * (0.25 + 2.0 * 0.10 / 7.0 + 0.25 + 3.0 * 0.10 / 7.0):
+    return 0
+  if depth < 0.5 * (0.25 + 4.0 * 0.10 / 7.0 + 0.25 + 5.0 * 0.10 / 7.0):
+    return 1
+  return 2
+
+
+def _depth_class_from_bin(depth_bin: int) -> int:
+  if depth_bin <= 2:
+    return 0
+  if depth_bin <= 4:
+    return 1
+  return 2
+
+
+def _multilayer_prefix_stats(
+  sequences: Mapping[SequenceKey, SequenceRecord],
+  visits: Sequence[SupportVisit],
+  predictions: Sequence[MultilayerPredictionRow],
+) -> list[dict[str, object]]:
+  distinct_layers: dict[SequenceKey, set[int]] = defaultdict(set)
+  for visit in visits:
+    distinct_layers[visit.key].add(visit.support_layer)
+  methods = sorted({str(row["method"]) for row in predictions})
+  rows: list[dict[str, object]] = []
+  total_sequences = len(sequences)
+  for prefix_count in MULTILAYER_PREFIX_COUNTS:
+    eligible = sum(len(layers) >= prefix_count for layers in distinct_layers.values())
+    for method in methods:
+      items = [
+        row
+        for row in predictions
+        if row["method"] == method and row["prefix_distinct_layers"] == prefix_count
+      ]
+      regression = _regression_stats(
+        [row["predicted_depth"] for row in items],
+        [row["true_depth"] for row in items],
+      )
+      three_bin_accuracy = (
+        mean(
+          _depth_class_from_prediction(row["predicted_depth"])
+          == _depth_class_from_bin(row["depth_bin"])
+          for row in items
+        )
+        if items
+        else math.nan
+      )
+      rows.append(
+        {
+          "prefix_distinct_layers": prefix_count,
+          "method": method,
+          "total_sequences": total_sequences,
+          "eligible_sequences": eligible,
+          "predicted_sequences": len(items),
+          "availability_all": len(items) / max(total_sequences, 1),
+          "availability_eligible": len(items) / max(eligible, 1),
+          **regression,
+          "three_bin_accuracy": three_bin_accuracy,
+        }
+      )
+  return rows
+
+
+def _support_episode_paired_rows(
+  events: Sequence[EventRecord],
+) -> list[dict[str, object]]:
+  episodes: dict[tuple[SequenceKey, str], dict[str, EventRecord]] = defaultdict(dict)
+  for event in events:
+    episode_id = event.raw.get("pair_episode_id", "")
+    if event.raw.get("event_family") == "support_trajectory" and episode_id != "":
+      episodes[(event.key, episode_id)][event.event_type] = event
+  rows: list[dict[str, object]] = []
+  for target_type in (
+    "pair_peak_quality",
+    "pair_stable_for_N_frames",
+    "pair_full",
+  ):
+    pairs: list[tuple[float, float]] = []
+    for episode in episodes.values():
+      entry = episode.get("pair_enter")
+      target = episode.get(target_type)
+      if entry is None or target is None:
+        continue
+      label = _as_float(target.raw, "true_tread_depth")
+      entry_depth = _as_float(entry.raw, "pair_depth")
+      target_depth = _as_float(
+        target.raw,
+        "peak_pair_depth" if target_type == "pair_peak_quality" else "pair_depth",
+      )
+      if all(math.isfinite(value) for value in (label, entry_depth, target_depth)):
+        pairs.append((abs(entry_depth - label), abs(target_depth - label)))
+    rows.append(
+      {
+        "target_event": target_type,
+        "paired_episodes": len(pairs),
+        "entry_mae": mean(pair[0] for pair in pairs) if pairs else math.nan,
+        "target_mae": mean(pair[1] for pair in pairs) if pairs else math.nan,
+        "mean_mae_change": (
+          mean(pair[1] - pair[0] for pair in pairs) if pairs else math.nan
+        ),
+        "improved_ratio": (
+          mean(pair[1] < pair[0] for pair in pairs) if pairs else math.nan
+        ),
+        "unchanged_ratio": (
+          mean(abs(pair[1] - pair[0]) < 1.0e-6 for pair in pairs) if pairs else math.nan
+        ),
+      }
+    )
+  return rows
+
+
+def _contact_association_rows(events: Sequence[EventRecord]) -> list[dict[str, object]]:
+  raw = [
+    event
+    for event in events
+    if event.event_type == "oracle_riser_contact"
+    and _as_int(event.raw, "contact_valid", 0) == 1
+    and event.event_layer >= 2
+  ]
+  rows: list[dict[str, object]] = []
+  for mode, selected in (
+    ("raw", raw),
+    (
+      "association_valid",
+      [event for event in raw if _contact_association_valid(event)],
+    ),
+  ):
+    residuals = [
+      abs(_as_float(event.raw, "contact_s_minus_riser_s"))
+      for event in selected
+      if math.isfinite(_as_float(event.raw, "contact_s_minus_riser_s"))
+    ]
+    by_foot: dict[tuple[SequenceKey, int], list[EventRecord]] = defaultdict(list)
+    for event in selected:
+      by_foot[(event.key, _as_int(event.raw, "foot_id", -1))].append(event)
+    for field, proxy in (
+      ("contact_point_s", "contact_point"),
+      ("toe_s", "toe"),
+      ("root_s", "root"),
+    ):
+      predictions: list[float] = []
+      labels: list[float] = []
+      for foot_events in by_foot.values():
+        ordered = sorted(
+          foot_events,
+          key=lambda event: (event.frame_idx, event.time, event.event_id),
+        )
+        for previous, current in zip(ordered, ordered[1:], strict=False):
+          layer_gap = abs(current.event_layer - previous.event_layer)
+          previous_s = _as_float(previous.raw, field)
+          current_s = _as_float(current.raw, field)
+          label = _as_float(current.raw, "true_tread_depth")
+          if (
+            layer_gap > 0
+            and math.isfinite(previous_s)
+            and math.isfinite(current_s)
+            and math.isfinite(label)
+          ):
+            predictions.append(abs(current_s - previous_s) / layer_gap)
+            labels.append(label)
+      rows.append(
+        {
+          "mode": mode,
+          "proxy": proxy,
+          "num_events": len(selected),
+          "num_sequences": len({event.key for event in selected}),
+          "retained_ratio": len(selected) / max(len(raw), 1),
+          "association_abs_residual_mean": (mean(residuals) if residuals else math.nan),
+          "association_abs_residual_max": max(residuals, default=math.nan),
+          "association_s_threshold": (
+            CONTACT_ASSOCIATION_MAX_S_RESIDUAL if mode == "association_valid" else ""
+          ),
+          **_regression_stats(predictions, labels),
+        }
+      )
+  return rows
 
 
 def _split_name(
@@ -2241,6 +2694,13 @@ def analyze_descriptive(
   sequences, events, excluded = _load_inputs(input_dirs, include_process_end)
   additional, duplicates = _reclassify_confirmation_events(events)
   evidence = _extract_evidence(sequences, events, additional)
+  support_visits = _support_visits(sequences, events)
+  multilayer_predictions = _multilayer_prediction_rows(sequences, support_visits)
+  multilayer_stats = _multilayer_prefix_stats(
+    sequences,
+    support_visits,
+    multilayer_predictions,
+  )
   seeds = {sequence.seed for sequence in sequences.values()}
   single_event_rows = _single_event_rows(evidence, [], seeds, set(), set())
   descriptive_rows = [
@@ -2284,11 +2744,52 @@ def analyze_descriptive(
   _write_csv(output / "riser_displacement_stats.csv", riser_rows)
   _write_csv(output / "logger_v2_event_counts.csv", event_count_rows)
   _write_csv(
+    output / "support_visit_representatives.csv",
+    [
+      {
+        "run_id": visit.key[0],
+        "seed": visit.seed,
+        "sequence_id": visit.sequence_id,
+        "foot_id": visit.foot_id,
+        "support_layer": visit.support_layer,
+        "frame_idx": visit.frame_idx,
+        "event_id": visit.event_id,
+        "selected_event_type": visit.event_type,
+        "foot_s": visit.foot_s,
+        "quality": visit.quality,
+        "true_depth": visit.true_depth,
+        "depth_bin": visit.depth_bin,
+      }
+      for visit in support_visits
+    ],
+  )
+  _write_csv(
+    output / "support_episode_paired_stats.csv",
+    _support_episode_paired_rows(events),
+  )
+  _write_csv(
+    output / "contact_association_stats.csv",
+    _contact_association_rows(events),
+  )
+  _write_csv(
+    output / "multilayer_support_predictions.csv",
+    multilayer_predictions,
+  )
+  _write_csv(
+    output / "multilayer_support_prefix_stats.csv",
+    multilayer_stats,
+  )
+  _write_csv(
     output / "data_audit_summary.csv",
     [
       {"metric": "sequences", "actual": len(sequences)},
       {"metric": "events", "actual": len(events)},
       {"metric": "evidence", "actual": len(evidence)},
+      {"metric": "independent_support_visits", "actual": len(support_visits)},
+      {
+        "metric": "multilayer_predictions",
+        "actual": len(multilayer_predictions),
+      },
       {"metric": "excluded_process_end", "actual": excluded},
       {"metric": "duplicate_confirmations", "actual": len(duplicates)},
       {

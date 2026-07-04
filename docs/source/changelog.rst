@@ -95,6 +95,9 @@ Added
 Changed
 ^^^^^^^
 
+- Stair evidence analysis now rejects mis-associated riser contacts, reports
+  episode-paired support changes, and evaluates oracle-layer multi-step depth
+  estimates causally after two through five independently observed layers.
 - Semantic-v2 SafeStride now predicts an ordered physical interval as a lower
   bound plus a positive width constrained by the configured stride range.
   Auxiliary supervision regresses both privileged interval boundaries, while
