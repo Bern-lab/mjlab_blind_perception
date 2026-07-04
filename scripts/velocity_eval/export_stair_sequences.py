@@ -14,6 +14,7 @@ from scripts.velocity_eval.policy_io import (
   load_inference_policy,
   resolve_checkpoint_path,
 )
+from tqdm.auto import tqdm
 
 import mjlab
 from mjlab.envs import ManagerBasedRlEnv
@@ -36,6 +37,7 @@ class ExportStairSequencesConfig:
   seed: int = 42
   device: str | None = None
   flush_rows: int = 128
+  progress: bool = True
 
 
 def _count_csv_rows(path: Path) -> int:
@@ -84,6 +86,15 @@ def run_export(task_id: str, cfg: ExportStairSequencesConfig) -> Path:
     wandb_run_path=cfg.wandb_run_path,
     wandb_checkpoint_name=cfg.wandb_checkpoint_name,
   )
+  print(
+    "[Stage 0] Export start:",
+    f"task={task_id}",
+    f"seed={cfg.seed}",
+    f"envs={cfg.num_envs}",
+    f"steps={cfg.steps}",
+    f"device={device}",
+    f"output={output_dir}",
+  )
 
   raw_env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=None)
   wrapped = RslRlVecEnvWrapper(raw_env, clip_actions=agent_cfg.clip_actions)
@@ -96,7 +107,14 @@ def run_export(task_id: str, cfg: ExportStairSequencesConfig) -> Path:
       device=device,
     )
     obs = wrapped.get_observations()
-    for _step in range(cfg.steps):
+    progress = tqdm(
+      range(cfg.steps),
+      desc=f"stair export seed={cfg.seed}",
+      disable=not cfg.progress,
+      dynamic_ncols=True,
+      unit="step",
+    )
+    for _step in progress:
       with torch.no_grad():
         actions = policy(obs)
       step_result = wrapped.step(actions)
