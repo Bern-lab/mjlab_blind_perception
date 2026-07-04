@@ -98,6 +98,11 @@ Changed
 - Stair evidence analysis now rejects mis-associated riser contacts, reports
   episode-paired support changes, and evaluates oracle-layer multi-step depth
   estimates causally after two through five independently observed layers.
+- Stage 1 stair evidence analysis now rebuilds every multi-layer prefix from
+  support events available at that prefix cutoff, reports fixed five-layer
+  matched-cohort and paired-improvement statistics, separates valid, invalid,
+  and unknown riser-contact associations, and summarizes repeated shuffled-layer
+  controls with deterministic bootstrap confidence intervals.
 - Semantic-v2 SafeStride now predicts an ordered physical interval as a lower
   bound plus a positive width constrained by the configured stride range.
   Auxiliary supervision regresses both privileged interval boundaries, while

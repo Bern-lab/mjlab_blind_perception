@@ -10,23 +10,32 @@ from tools.analyze_stair_intervals import (
   EventRecord,
   Evidence,
   IntervalEvidence,
+  MultilayerPredictionRow,
   Prediction,
   QualityScheme,
   SequenceKey,
   SequenceRecord,
   _calibrate,
   _calibrate_quality_buckets,
+  _causal_support_prefixes,
+  _contact_association_rows,
+  _contact_association_state,
   _extract_evidence,
   _fuse_sequence,
   _load_inputs,
   _macro_f1,
+  _multilayer_baseline_comparison_rows,
+  _multilayer_matched_cohort_stats,
+  _multilayer_paired_change_rows,
   _multilayer_prediction_rows,
   _multilayer_prefix_stats,
+  _multilayer_shuffle_prediction_rows,
   _prediction_stats,
   _reclassify_confirmation_events,
   _regression_stats,
   _shuffled_evidence,
   _shuffled_quality_overrides,
+  _support_candidates,
   _support_quality,
   _support_visits,
   analyze,
@@ -282,6 +291,329 @@ def test_multilayer_support_slope_recovers_depth_with_foot_offset() -> None:
   assert row["eligible_sequences"] == 1
   assert row["predicted_sequences"] == 1
   assert row["mae"] == pytest.approx(0.0)
+
+
+def test_causal_prefix_excludes_future_and_same_frame_stable_support() -> None:
+  key: SequenceKey = ("model_seed42", "causal")
+  sequence = SequenceRecord(
+    key=key,
+    run_id=key[0],
+    seed=42,
+    sequence_id=key[1],
+    env_id=0,
+    depth_bin=3,
+    true_depth=0.30,
+    true_height=0.10,
+    termination_reason="confirmed_exit",
+    raw={},
+  )
+
+  def support_event(
+    event_id: int,
+    frame: int,
+    event_type: str,
+    left_layer: int,
+    right_layer: int,
+    left_s: float,
+    right_s: float,
+  ) -> EventRecord:
+    return EventRecord(
+      key=key,
+      run_id=key[0],
+      seed=42,
+      event_id=event_id,
+      event_type=event_type,
+      frame_idx=frame,
+      time=frame * 0.02,
+      event_layer=max(left_layer, right_layer),
+      raw={
+        "left_support_layer": str(left_layer),
+        "right_support_layer": str(right_layer),
+        "left_stair_contact": "1",
+        "right_stair_contact": "1",
+        "left_foot_s": str(left_s),
+        "right_foot_s": str(right_s),
+        "left_geometric_overlap": "1.0",
+        "right_geometric_overlap": "1.0",
+        "pair_depth": "0.30",
+      },
+    )
+
+  events = [
+    support_event(0, 10, "pair_enter", 1, 2, 0.30, 0.60),
+    support_event(1, 20, "pair_enter", 3, 2, 0.82, 0.60),
+    support_event(
+      2,
+      20,
+      "pair_stable_for_N_frames",
+      3,
+      2,
+      0.90,
+      0.60,
+    ),
+    support_event(3, 30, "pair_enter", 3, 4, 0.90, 1.20),
+  ]
+  sequences: dict[SequenceKey, SequenceRecord] = {key: sequence}
+  candidates = _support_candidates(sequences, events)
+  prefixes = {
+    prefix.prefix_distinct_layers: prefix
+    for prefix in _causal_support_prefixes(sequences, candidates)
+  }
+
+  prefix_three_layer_three = next(
+    visit
+    for visit in prefixes[3].representatives
+    if visit.foot_id == 0 and visit.support_layer == 3
+  )
+  prefix_four_layer_three = next(
+    visit
+    for visit in prefixes[4].representatives
+    if visit.foot_id == 0 and visit.support_layer == 3
+  )
+  assert (
+    prefixes[3].cutoff_frame,
+    prefixes[3].cutoff_event_id,
+  ) == (20, 1)
+  assert prefix_three_layer_three.event_type == "pair_enter"
+  assert prefix_three_layer_three.foot_s == pytest.approx(0.82)
+  assert prefix_four_layer_three.event_type == "pair_stable_for_N_frames"
+  assert prefix_four_layer_three.foot_s == pytest.approx(0.90)
+  assert all(
+    (visit.frame_idx, visit.event_id)
+    <= (prefixes[3].cutoff_frame, prefixes[3].cutoff_event_id)
+    for visit in prefixes[3].representatives
+  )
+
+
+def _multilayer_row(
+  sequence_id: str,
+  prefix: int,
+  prediction: float,
+  *,
+  final_layers: int,
+  method: str = "ols_oracle_layer",
+) -> MultilayerPredictionRow:
+  true_depth = 0.30
+  return {
+    "run_id": "model_seed42",
+    "seed": 42,
+    "sequence_id": sequence_id,
+    "depth_bin": 3,
+    "true_depth": true_depth,
+    "prefix_distinct_layers": prefix,
+    "final_available_distinct_layers": final_layers,
+    "num_support_points": prefix,
+    "observed_layers": "|".join(str(index) for index in range(1, prefix + 1)),
+    "prefix_cutoff_frame": prefix * 10,
+    "prefix_cutoff_event_id": prefix,
+    "max_representative_frame": prefix * 10,
+    "max_representative_event_id": prefix,
+    "causal_prefix": 1,
+    "method": method,
+    "predicted_depth": prediction,
+    "error": prediction - true_depth,
+  }
+
+
+def test_matched_cohort_and_paired_changes_use_same_five_layer_sequences() -> None:
+  predictions = [
+    _multilayer_row("four", prefix, 0.30, final_layers=4) for prefix in (2, 3, 4)
+  ]
+  predictions.extend(
+    _multilayer_row(
+      "five",
+      prefix,
+      prediction,
+      final_layers=5,
+    )
+    for prefix, prediction in zip(
+      (2, 3, 4, 5),
+      (0.36, 0.34, 0.32, 0.301),
+      strict=True,
+    )
+  )
+  predictions.extend(
+    _multilayer_row(
+      "five",
+      prefix,
+      0.34,
+      final_layers=5,
+      method="latest_adjacent_full_available_at_t_k",
+    )
+    for prefix in (4, 5)
+  )
+
+  stats = _multilayer_matched_cohort_stats(
+    predictions,
+    bootstrap_repeats=50,
+    analysis_seed=17,
+  )
+  assert {
+    row["num_sequences"] for row in stats if row["method"] == "ols_oracle_layer"
+  } == {1}
+  paired = _multilayer_paired_change_rows(
+    predictions,
+    bootstrap_repeats=50,
+    analysis_seed=17,
+  )
+  two_to_five = next(
+    row
+    for row in paired
+    if row["method"] == "ols_oracle_layer"
+    and row["prefix_from"] == 2
+    and row["prefix_to"] == 5
+  )
+  assert two_to_five["num_paired"] == 1
+  assert two_to_five["mean_abs_error_change"] == pytest.approx(-0.059)
+  assert two_to_five["improved_ratio"] == pytest.approx(1.0)
+  assert two_to_five["unchanged_ratio"] == pytest.approx(0.0)
+  assert two_to_five["worsened_ratio"] == pytest.approx(0.0)
+  baseline = _multilayer_baseline_comparison_rows(
+    predictions,
+    bootstrap_repeats=50,
+    analysis_seed=17,
+  )
+  prefix_five = next(
+    row
+    for row in baseline
+    if row["baseline_method"] == "latest_adjacent_full_available_at_t_k"
+    and row["prefix_distinct_layers"] == 5
+  )
+  assert prefix_five["num_paired"] == 1
+  assert prefix_five["primary_minus_baseline_mae"] == pytest.approx(-0.039)
+
+
+@pytest.mark.parametrize("residual", [None, "", "nan"])
+def test_contact_missing_residual_is_unknown(residual: str | None) -> None:
+  raw = {"contact_valid": "1"}
+  if residual is not None:
+    raw["contact_s_minus_riser_s"] = residual
+  event = EventRecord(
+    key=("model_seed42", "1"),
+    run_id="model_seed42",
+    seed=42,
+    event_id=1,
+    event_type="oracle_riser_contact",
+    frame_idx=1,
+    time=0.02,
+    event_layer=2,
+    raw=raw,
+  )
+  assert _contact_association_state(event) == "unknown"
+
+
+def test_contact_invalid_is_audited_but_excluded_from_strict_metrics() -> None:
+  def contact(
+    event_id: int, layer: int, residual: float, contact_s: float
+  ) -> EventRecord:
+    return EventRecord(
+      key=("model_seed42", "1"),
+      run_id="model_seed42",
+      seed=42,
+      event_id=event_id,
+      event_type="oracle_riser_contact",
+      frame_idx=event_id,
+      time=event_id * 0.02,
+      event_layer=layer,
+      raw={
+        "contact_valid": "1",
+        "contact_s_minus_riser_s": str(residual),
+        "contact_point_s": str(contact_s),
+        "toe_s": str(contact_s),
+        "root_s": str(contact_s),
+        "foot_id": "0",
+        "true_tread_depth": "0.30",
+      },
+    )
+
+  events = [
+    contact(1, 2, 0.0, 0.60),
+    contact(2, 3, 0.01, 0.90),
+    contact(3, 4, 0.20, 2.50),
+  ]
+  rows = _contact_association_rows(events)
+  raw = next(
+    row for row in rows if row["mode"] == "raw" and row["proxy"] == "contact_point"
+  )
+  strict = next(
+    row
+    for row in rows
+    if row["mode"] == "association_valid" and row["proxy"] == "contact_point"
+  )
+  assert raw["raw_count"] == 3
+  assert raw["valid_count"] == 2
+  assert raw["invalid_count"] == 1
+  assert raw["unknown_count"] == 0
+  assert raw["sample_count"] == 2
+  assert strict["sample_count"] == 1
+  assert strict["mae"] == pytest.approx(0.0)
+
+
+def test_repeated_multilayer_shuffle_is_reproducible_and_varied() -> None:
+  key: SequenceKey = ("model_seed42", "shuffle")
+  sequence = SequenceRecord(
+    key=key,
+    run_id=key[0],
+    seed=42,
+    sequence_id=key[1],
+    env_id=0,
+    depth_bin=3,
+    true_depth=0.30,
+    true_height=0.10,
+    termination_reason="confirmed_exit",
+    raw={},
+  )
+  events: list[EventRecord] = []
+  for index in range(4):
+    left_layer = index + 1
+    right_layer = index + 2
+    events.append(
+      EventRecord(
+        key=key,
+        run_id=key[0],
+        seed=42,
+        event_id=index,
+        event_type="pair_full",
+        frame_idx=(index + 1) * 10,
+        time=(index + 1) * 0.2,
+        event_layer=right_layer,
+        raw={
+          "left_support_layer": str(left_layer),
+          "right_support_layer": str(right_layer),
+          "left_stair_contact": "1",
+          "right_stair_contact": "1",
+          "left_foot_s": str(0.10 + 0.30 * left_layer),
+          "right_foot_s": str(0.12 + 0.30 * right_layer),
+          "left_geometric_overlap": "1.0",
+          "right_geometric_overlap": "1.0",
+          "pair_depth": "0.30",
+        },
+      )
+    )
+  sequences: dict[SequenceKey, SequenceRecord] = {key: sequence}
+  candidates = _support_candidates(sequences, events)
+  first = _multilayer_shuffle_prediction_rows(
+    sequences,
+    candidates,
+    repeats=12,
+    analysis_seed=17,
+  )
+  second = _multilayer_shuffle_prediction_rows(
+    sequences,
+    candidates,
+    repeats=12,
+    analysis_seed=17,
+  )
+
+  assert first == second
+  prefix_five: list[float] = []
+  for row in first:
+    if row["prefix_distinct_layers"] != 5:
+      continue
+    value = row["predicted_depth"]
+    assert isinstance(value, float)
+    prefix_five.append(round(value, 8))
+  assert len(set(prefix_five)) > 1
 
 
 def _make_run(root: Path, seed: int, depth: float, depth_bin: int) -> Path:

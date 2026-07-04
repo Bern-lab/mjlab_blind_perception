@@ -82,9 +82,14 @@ class MultilayerPredictionRow(TypedDict):
   depth_bin: int
   true_depth: float
   prefix_distinct_layers: int
-  available_distinct_layers: int
+  final_available_distinct_layers: int
   num_support_points: int
   observed_layers: str
+  prefix_cutoff_frame: int
+  prefix_cutoff_event_id: int
+  max_representative_frame: int
+  max_representative_event_id: int
+  causal_prefix: int
   method: str
   predicted_depth: float
   error: float
@@ -148,9 +153,21 @@ class SupportVisit:
   event_id: int
   event_type: str
   foot_s: float
+  pair_depth: float
   quality: float
   true_depth: float
   depth_bin: int
+
+
+@dataclass(frozen=True)
+class SupportPrefix:
+  sequence: SequenceRecord
+  prefix_distinct_layers: int
+  final_available_distinct_layers: int
+  observed_layers: tuple[int, ...]
+  cutoff_frame: int
+  cutoff_event_id: int
+  representatives: tuple[SupportVisit, ...]
 
 
 @dataclass(frozen=True)
@@ -251,6 +268,13 @@ def _as_int(row: Mapping[str, str], key: str, default: int = -1) -> int:
     return int(float(value))
   except ValueError:
     return default
+
+
+def _numeric_value(row: Mapping[str, object], key: str) -> float:
+  value = row.get(key)
+  if isinstance(value, int | float):
+    return float(value)
+  return math.nan
 
 
 def _seed_from_name(name: str) -> int:
@@ -553,13 +577,19 @@ def _support_quality(row: Mapping[str, str]) -> tuple[float, float, float, float
   )
 
 
-def _contact_association_valid(event: EventRecord) -> bool:
+def _contact_association_state(event: EventRecord) -> str:
   if _as_int(event.raw, "contact_valid", 0) != 1:
-    return False
+    return "not_contact_valid"
   residual = _as_float(event.raw, "contact_s_minus_riser_s")
-  return not math.isfinite(residual) or (
-    abs(residual) <= CONTACT_ASSOCIATION_MAX_S_RESIDUAL
-  )
+  if not math.isfinite(residual):
+    return "unknown"
+  if abs(residual) <= CONTACT_ASSOCIATION_MAX_S_RESIDUAL:
+    return "valid"
+  return "invalid"
+
+
+def _contact_association_valid(event: EventRecord) -> bool:
+  return _contact_association_state(event) == "valid"
 
 
 def _extract_evidence(
@@ -773,6 +803,7 @@ def _extract_evidence(
 
 
 _SUPPORT_VISIT_PRIORITY = {
+  "pair_peak_quality": -1,
   "pair_enter": 0,
   "pair_quality_cross_0.75": 1,
   "pair_quality_cross_0.90": 2,
@@ -781,15 +812,19 @@ _SUPPORT_VISIT_PRIORITY = {
 }
 
 
-def _support_visits(
+def _support_candidates(
   sequences: Mapping[SequenceKey, SequenceRecord],
   events: Sequence[EventRecord],
 ) -> list[SupportVisit]:
-  candidates: dict[tuple[SequenceKey, int, int], list[SupportVisit]] = defaultdict(list)
+  candidates: list[SupportVisit] = []
   for event in events:
     if event.event_type not in _SUPPORT_VISIT_PRIORITY:
       continue
     sequence = sequences[event.key]
+    pair_depth = _as_float(
+      event.raw,
+      "peak_pair_depth" if event.event_type == "pair_peak_quality" else "pair_depth",
+    )
     for foot_id, side in enumerate(("left", "right")):
       layer = _as_int(event.raw, f"{side}_support_layer", -1)
       foot_s = _as_float(event.raw, f"{side}_foot_s")
@@ -801,7 +836,7 @@ def _support_visits(
       )
       if layer <= 0 or stair_contact != 1 or not math.isfinite(foot_s):
         continue
-      candidates[(event.key, foot_id, layer)].append(
+      candidates.append(
         SupportVisit(
           key=event.key,
           seed=sequence.seed,
@@ -812,14 +847,35 @@ def _support_visits(
           event_id=event.event_id,
           event_type=event.event_type,
           foot_s=foot_s,
+          pair_depth=pair_depth,
           quality=quality,
           true_depth=sequence.true_depth,
           depth_bin=sequence.depth_bin,
         )
       )
+  candidates.sort(
+    key=lambda item: (
+      item.key,
+      item.frame_idx,
+      item.event_id,
+      item.foot_id,
+      item.support_layer,
+    )
+  )
+  return candidates
+
+
+def _select_support_representatives(
+  candidates: Sequence[SupportVisit],
+) -> list[SupportVisit]:
+  grouped: dict[tuple[SequenceKey, int, int], list[SupportVisit]] = defaultdict(list)
+  for candidate in candidates:
+    grouped[(candidate.key, candidate.foot_id, candidate.support_layer)].append(
+      candidate
+    )
 
   visits: list[SupportVisit] = []
-  for group in candidates.values():
+  for group in grouped.values():
     best_priority = max(_SUPPORT_VISIT_PRIORITY[item.event_type] for item in group)
     best = [
       item
@@ -846,6 +902,98 @@ def _support_visits(
     )
   )
   return visits
+
+
+def _support_visits(
+  sequences: Mapping[SequenceKey, SequenceRecord],
+  events: Sequence[EventRecord],
+) -> list[SupportVisit]:
+  """Return final representatives for descriptive, non-prefix output."""
+  return _select_support_representatives(_support_candidates(sequences, events))
+
+
+def _causal_support_prefixes(
+  sequences: Mapping[SequenceKey, SequenceRecord],
+  candidates: Sequence[SupportVisit],
+) -> list[SupportPrefix]:
+  by_sequence: dict[SequenceKey, list[SupportVisit]] = defaultdict(list)
+  for candidate in candidates:
+    by_sequence[candidate.key].append(candidate)
+
+  prefixes: list[SupportPrefix] = []
+  for key, sequence_candidates in by_sequence.items():
+    ordered = sorted(
+      sequence_candidates,
+      key=lambda item: (
+        item.frame_idx,
+        item.event_id,
+        item.foot_id,
+        item.support_layer,
+      ),
+    )
+    discovered: list[int] = []
+    discovered_set: set[int] = set()
+    cutoffs: dict[int, tuple[int, int]] = {}
+    index = 0
+    while index < len(ordered):
+      time_key = (ordered[index].frame_idx, ordered[index].event_id)
+      same_event: list[SupportVisit] = []
+      while (
+        index < len(ordered)
+        and (
+          ordered[index].frame_idx,
+          ordered[index].event_id,
+        )
+        == time_key
+      ):
+        same_event.append(ordered[index])
+        index += 1
+      new_layers = sorted(
+        {
+          item.support_layer
+          for item in same_event
+          if item.support_layer not in discovered_set
+        }
+      )
+      for layer in new_layers:
+        discovered.append(layer)
+        discovered_set.add(layer)
+        count = len(discovered)
+        if count in MULTILAYER_PREFIX_COUNTS:
+          cutoffs[count] = time_key
+
+    final_count = len(discovered)
+    for prefix_count in MULTILAYER_PREFIX_COUNTS:
+      cutoff = cutoffs.get(prefix_count)
+      if cutoff is None:
+        continue
+      observed_layers = tuple(discovered[:prefix_count])
+      allowed_layers = set(observed_layers)
+      visible = [
+        item
+        for item in ordered
+        if (item.frame_idx, item.event_id) <= cutoff
+        and item.support_layer in allowed_layers
+      ]
+      representatives = tuple(_select_support_representatives(visible))
+      prefixes.append(
+        SupportPrefix(
+          sequence=sequences[key],
+          prefix_distinct_layers=prefix_count,
+          final_available_distinct_layers=final_count,
+          observed_layers=observed_layers,
+          cutoff_frame=cutoff[0],
+          cutoff_event_id=cutoff[1],
+          representatives=representatives,
+        )
+      )
+  prefixes.sort(
+    key=lambda item: (
+      item.sequence.key,
+      item.prefix_distinct_layers,
+    )
+  )
+  return prefixes
 
 
 def _linear_slope(
@@ -902,103 +1050,116 @@ def _endpoint_depth(visits: Sequence[SupportVisit]) -> float:
 
 def _multilayer_prediction_rows(
   sequences: Mapping[SequenceKey, SequenceRecord],
-  visits: Sequence[SupportVisit],
+  candidates: Sequence[SupportVisit],
 ) -> list[MultilayerPredictionRow]:
-  by_sequence: dict[SequenceKey, list[SupportVisit]] = defaultdict(list)
-  for visit in visits:
-    by_sequence[visit.key].append(visit)
   rows: list[MultilayerPredictionRow] = []
-  for key, sequence_visits in by_sequence.items():
-    sequence = sequences[key]
-    first_frame_by_layer: dict[int, int] = {}
-    for visit in sequence_visits:
-      first_frame_by_layer[visit.support_layer] = min(
-        first_frame_by_layer.get(visit.support_layer, visit.frame_idx),
-        visit.frame_idx,
-      )
-    ordered_layers = sorted(
-      first_frame_by_layer,
-      key=lambda layer: (first_frame_by_layer[layer], layer),
+  prefixes = _causal_support_prefixes(sequences, candidates)
+  candidates_by_sequence: dict[SequenceKey, list[SupportVisit]] = defaultdict(list)
+  for candidate in candidates:
+    candidates_by_sequence[candidate.key].append(candidate)
+  for prefix in prefixes:
+    sequence = prefix.sequence
+    selected = list(prefix.representatives)
+    prefix_layers = list(prefix.observed_layers)
+    oracle_layers = {
+      (visit.foot_id, visit.support_layer): float(visit.support_layer)
+      for visit in selected
+    }
+    ordinal_index = {layer: float(index) for index, layer in enumerate(prefix_layers)}
+    ordinal_layers = {
+      (visit.foot_id, visit.support_layer): ordinal_index[visit.support_layer]
+      for visit in selected
+    }
+    shuffled = list(prefix_layers)
+    random.Random(
+      f"{sequence.run_id}:{sequence.sequence_id}:{prefix.prefix_distinct_layers}"
+    ).shuffle(shuffled)
+    shuffled_index = {
+      layer: float(shuffled[index]) for index, layer in enumerate(prefix_layers)
+    }
+    shuffled_layers = {
+      (visit.foot_id, visit.support_layer): shuffled_index[visit.support_layer]
+      for visit in selected
+    }
+    full_events: dict[tuple[int, int], float] = {}
+    cutoff = (prefix.cutoff_frame, prefix.cutoff_event_id)
+    for candidate in candidates_by_sequence[sequence.key]:
+      if (
+        candidate.event_type == "pair_full"
+        and (candidate.frame_idx, candidate.event_id) <= cutoff
+        and math.isfinite(candidate.pair_depth)
+      ):
+        full_events[(candidate.frame_idx, candidate.event_id)] = candidate.pair_depth
+    ordered_full = sorted(full_events.items())
+    predictions = {
+      "endpoint_oracle_layer": _endpoint_depth(selected),
+      "ols_oracle_layer": _linear_slope(
+        selected,
+        oracle_layers,
+        include_foot_offset=False,
+        robust=False,
+      ),
+      "huber_oracle_layer": _linear_slope(
+        selected,
+        oracle_layers,
+        include_foot_offset=False,
+        robust=True,
+      ),
+      "huber_oracle_layer_foot_offset": _linear_slope(
+        selected,
+        oracle_layers,
+        include_foot_offset=True,
+        robust=True,
+      ),
+      "huber_oracle_transition_order_foot_offset": _linear_slope(
+        selected,
+        ordinal_layers,
+        include_foot_offset=True,
+        robust=True,
+      ),
+      "shuffled_oracle_layer_foot_offset": _linear_slope(
+        selected,
+        shuffled_layers,
+        include_foot_offset=True,
+        robust=True,
+      ),
+      "first_adjacent_full": ordered_full[0][1] if ordered_full else math.nan,
+      "latest_adjacent_full_available_at_t_k": (
+        ordered_full[-1][1] if ordered_full else math.nan
+      ),
+    }
+    max_representative = max(
+      ((visit.frame_idx, visit.event_id) for visit in selected),
+      default=(-1, -1),
     )
-    for prefix_count in MULTILAYER_PREFIX_COUNTS:
-      if len(ordered_layers) < prefix_count:
-        continue
-      prefix_layers = ordered_layers[:prefix_count]
-      selected = [
-        visit for visit in sequence_visits if visit.support_layer in prefix_layers
-      ]
-      oracle_layers = {
-        (visit.foot_id, visit.support_layer): float(visit.support_layer)
-        for visit in selected
-      }
-      ordinal_index = {layer: float(index) for index, layer in enumerate(prefix_layers)}
-      ordinal_layers = {
-        (visit.foot_id, visit.support_layer): ordinal_index[visit.support_layer]
-        for visit in selected
-      }
-      shuffled = list(prefix_layers)
-      random.Random(f"{sequence.run_id}:{sequence.sequence_id}:{prefix_count}").shuffle(
-        shuffled
+    if max_representative > cutoff:
+      raise AuditError(
+        "Causal support prefix selected a representative after its cutoff."
       )
-      shuffled_index = {
-        layer: float(shuffled[index]) for index, layer in enumerate(prefix_layers)
-      }
-      shuffled_layers = {
-        (visit.foot_id, visit.support_layer): shuffled_index[visit.support_layer]
-        for visit in selected
-      }
-      predictions = {
-        "endpoint_oracle_layer": _endpoint_depth(selected),
-        "ols_oracle_layer": _linear_slope(
-          selected,
-          oracle_layers,
-          include_foot_offset=False,
-          robust=False,
-        ),
-        "huber_oracle_layer": _linear_slope(
-          selected,
-          oracle_layers,
-          include_foot_offset=False,
-          robust=True,
-        ),
-        "huber_oracle_layer_foot_offset": _linear_slope(
-          selected,
-          oracle_layers,
-          include_foot_offset=True,
-          robust=True,
-        ),
-        "huber_oracle_transition_order_foot_offset": _linear_slope(
-          selected,
-          ordinal_layers,
-          include_foot_offset=True,
-          robust=True,
-        ),
-        "shuffled_oracle_layer_foot_offset": _linear_slope(
-          selected,
-          shuffled_layers,
-          include_foot_offset=True,
-          robust=True,
-        ),
-      }
-      for method, prediction in predictions.items():
-        if not math.isfinite(prediction):
-          continue
-        rows.append(
-          {
-            "run_id": sequence.run_id,
-            "seed": sequence.seed,
-            "sequence_id": sequence.sequence_id,
-            "depth_bin": sequence.depth_bin,
-            "true_depth": sequence.true_depth,
-            "prefix_distinct_layers": prefix_count,
-            "available_distinct_layers": len(ordered_layers),
-            "num_support_points": len(selected),
-            "observed_layers": "|".join(map(str, prefix_layers)),
-            "method": method,
-            "predicted_depth": prediction,
-            "error": prediction - sequence.true_depth,
-          }
-        )
+    for method, prediction in predictions.items():
+      if not math.isfinite(prediction):
+        continue
+      rows.append(
+        {
+          "run_id": sequence.run_id,
+          "seed": sequence.seed,
+          "sequence_id": sequence.sequence_id,
+          "depth_bin": sequence.depth_bin,
+          "true_depth": sequence.true_depth,
+          "prefix_distinct_layers": prefix.prefix_distinct_layers,
+          "final_available_distinct_layers": prefix.final_available_distinct_layers,
+          "num_support_points": len(selected),
+          "observed_layers": "|".join(map(str, prefix_layers)),
+          "prefix_cutoff_frame": prefix.cutoff_frame,
+          "prefix_cutoff_event_id": prefix.cutoff_event_id,
+          "max_representative_frame": max_representative[0],
+          "max_representative_event_id": max_representative[1],
+          "causal_prefix": 1,
+          "method": method,
+          "predicted_depth": prediction,
+          "error": prediction - sequence.true_depth,
+        }
+      )
   return rows
 
 
@@ -1020,49 +1181,498 @@ def _depth_class_from_bin(depth_bin: int) -> int:
 
 def _multilayer_prefix_stats(
   sequences: Mapping[SequenceKey, SequenceRecord],
-  visits: Sequence[SupportVisit],
+  candidates: Sequence[SupportVisit],
   predictions: Sequence[MultilayerPredictionRow],
 ) -> list[dict[str, object]]:
   distinct_layers: dict[SequenceKey, set[int]] = defaultdict(set)
-  for visit in visits:
-    distinct_layers[visit.key].add(visit.support_layer)
+  for candidate in candidates:
+    distinct_layers[candidate.key].add(candidate.support_layer)
   methods = sorted({str(row["method"]) for row in predictions})
   rows: list[dict[str, object]] = []
-  total_sequences = len(sequences)
-  for prefix_count in MULTILAYER_PREFIX_COUNTS:
-    eligible = sum(len(layers) >= prefix_count for layers in distinct_layers.values())
-    for method in methods:
+  scopes: list[tuple[str, int | str, set[SequenceKey]]] = [
+    ("pooled", "all", set(sequences))
+  ]
+  for seed in sorted({sequence.seed for sequence in sequences.values()}):
+    scopes.append(
+      (
+        "seed",
+        seed,
+        {key for key, sequence in sequences.items() if sequence.seed == seed},
+      )
+    )
+  for scope, seed, keys in scopes:
+    total_sequences = len(keys)
+    for prefix_count in MULTILAYER_PREFIX_COUNTS:
+      eligible = sum(
+        key in keys and len(layers) >= prefix_count
+        for key, layers in distinct_layers.items()
+      )
+      for method in methods:
+        items = [
+          row
+          for row in predictions
+          if row["method"] == method
+          and row["prefix_distinct_layers"] == prefix_count
+          and (row["run_id"], row["sequence_id"]) in keys
+        ]
+        regression = _regression_stats(
+          [row["predicted_depth"] for row in items],
+          [row["true_depth"] for row in items],
+        )
+        three_bin_accuracy = (
+          mean(
+            _depth_class_from_prediction(row["predicted_depth"])
+            == _depth_class_from_bin(row["depth_bin"])
+            for row in items
+          )
+          if items
+          else math.nan
+        )
+        rows.append(
+          {
+            "scope": scope,
+            "seed": seed,
+            "prefix_distinct_layers": prefix_count,
+            "method": method,
+            "total_sequences": total_sequences,
+            "eligible_sequences": eligible,
+            "predicted_sequences": len(items),
+            "availability_all": len(items) / max(total_sequences, 1),
+            "availability_eligible": len(items) / max(eligible, 1),
+            **regression,
+            "three_bin_accuracy": three_bin_accuracy,
+          }
+        )
+  return rows
+
+
+def _stratified_bootstrap_mean_ci(
+  values_by_seed: Mapping[int, Sequence[float]],
+  *,
+  repeats: int,
+  seed: str,
+) -> tuple[float, float]:
+  clean = {
+    group: [value for value in values if math.isfinite(value)]
+    for group, values in values_by_seed.items()
+  }
+  clean = {group: values for group, values in clean.items() if values}
+  if not clean or repeats <= 0:
+    return math.nan, math.nan
+  generator = random.Random(seed)
+  estimates: list[float] = []
+  for _repeat in range(repeats):
+    sample: list[float] = []
+    for values in clean.values():
+      sample.extend(generator.choice(values) for _index in range(len(values)))
+    estimates.append(mean(sample))
+  return _quantile(estimates, 0.025), _quantile(estimates, 0.975)
+
+
+def _matched_cohort_keys(
+  predictions: Sequence[MultilayerPredictionRow],
+  *,
+  cohort_min_layers: int = 5,
+  primary_method: str = "ols_oracle_layer",
+) -> set[SequenceKey]:
+  prefixes_by_key: dict[SequenceKey, set[int]] = defaultdict(set)
+  for row in predictions:
+    if (
+      row["method"] == primary_method
+      and row["final_available_distinct_layers"] >= cohort_min_layers
+    ):
+      prefixes_by_key[(row["run_id"], row["sequence_id"])].add(
+        row["prefix_distinct_layers"]
+      )
+  required = set(MULTILAYER_PREFIX_COUNTS)
+  return {key for key, prefixes in prefixes_by_key.items() if required <= prefixes}
+
+
+def _multilayer_matched_cohort_stats(
+  predictions: Sequence[MultilayerPredictionRow],
+  *,
+  bootstrap_repeats: int,
+  analysis_seed: int,
+  cohort_min_layers: int = 5,
+) -> list[dict[str, object]]:
+  cohort = _matched_cohort_keys(
+    predictions,
+    cohort_min_layers=cohort_min_layers,
+  )
+  methods = sorted({row["method"] for row in predictions})
+  rows: list[dict[str, object]] = []
+  for method in methods:
+    for prefix_count in MULTILAYER_PREFIX_COUNTS:
       items = [
         row
         for row in predictions
-        if row["method"] == method and row["prefix_distinct_layers"] == prefix_count
+        if row["method"] == method
+        and row["prefix_distinct_layers"] == prefix_count
+        and (row["run_id"], row["sequence_id"]) in cohort
       ]
+      errors_by_seed: dict[int, list[float]] = defaultdict(list)
+      for item in items:
+        errors_by_seed[item["seed"]].append(abs(item["error"]))
+      ci_low, ci_high = _stratified_bootstrap_mean_ci(
+        errors_by_seed,
+        repeats=bootstrap_repeats,
+        seed=f"{analysis_seed}:matched:{method}:{prefix_count}",
+      )
       regression = _regression_stats(
         [row["predicted_depth"] for row in items],
         [row["true_depth"] for row in items],
       )
-      three_bin_accuracy = (
-        mean(
-          _depth_class_from_prediction(row["predicted_depth"])
-          == _depth_class_from_bin(row["depth_bin"])
-          for row in items
-        )
-        if items
-        else math.nan
+      rows.append(
+        {
+          "method": method,
+          "cohort_min_layers": cohort_min_layers,
+          "cohort_sequences": len(cohort),
+          "prefix_distinct_layers": prefix_count,
+          "num_sequences": len(items),
+          **regression,
+          "median_absolute_error": (
+            median(abs(item["error"]) for item in items) if items else math.nan
+          ),
+          "mae_bootstrap_ci_low": ci_low,
+          "mae_bootstrap_ci_high": ci_high,
+        }
+      )
+  return rows
+
+
+def _multilayer_paired_change_rows(
+  predictions: Sequence[MultilayerPredictionRow],
+  *,
+  bootstrap_repeats: int,
+  analysis_seed: int,
+  cohort_min_layers: int = 5,
+  unchanged_tolerance: float = 0.001,
+) -> list[dict[str, object]]:
+  cohort = _matched_cohort_keys(
+    predictions,
+    cohort_min_layers=cohort_min_layers,
+  )
+  methods = sorted({row["method"] for row in predictions})
+  transitions = ((2, 3), (3, 4), (4, 5), (2, 5))
+  indexed = {
+    (
+      row["method"],
+      row["run_id"],
+      row["sequence_id"],
+      row["prefix_distinct_layers"],
+    ): row
+    for row in predictions
+  }
+  rows: list[dict[str, object]] = []
+  for method in methods:
+    for prefix_from, prefix_to in transitions:
+      pairs: list[tuple[MultilayerPredictionRow, MultilayerPredictionRow]] = []
+      for run_id, sequence_id in sorted(cohort):
+        before = indexed.get((method, run_id, sequence_id, prefix_from))
+        after = indexed.get((method, run_id, sequence_id, prefix_to))
+        if before is not None and after is not None:
+          pairs.append((before, after))
+      changes_by_seed: dict[int, list[float]] = defaultdict(list)
+      changes: list[float] = []
+      before_errors: list[float] = []
+      after_errors: list[float] = []
+      for before, after in pairs:
+        before_error = abs(before["error"])
+        after_error = abs(after["error"])
+        change = after_error - before_error
+        before_errors.append(before_error)
+        after_errors.append(after_error)
+        changes.append(change)
+        changes_by_seed[before["seed"]].append(change)
+      ci_low, ci_high = _stratified_bootstrap_mean_ci(
+        changes_by_seed,
+        repeats=bootstrap_repeats,
+        seed=f"{analysis_seed}:paired:{method}:{prefix_from}:{prefix_to}",
       )
       rows.append(
         {
-          "prefix_distinct_layers": prefix_count,
           "method": method,
-          "total_sequences": total_sequences,
-          "eligible_sequences": eligible,
-          "predicted_sequences": len(items),
-          "availability_all": len(items) / max(total_sequences, 1),
-          "availability_eligible": len(items) / max(eligible, 1),
-          **regression,
-          "three_bin_accuracy": three_bin_accuracy,
+          "cohort_min_layers": cohort_min_layers,
+          "cohort_sequences": len(cohort),
+          "prefix_from": prefix_from,
+          "prefix_to": prefix_to,
+          "num_paired": len(pairs),
+          "mean_abs_error_before": (mean(before_errors) if before_errors else math.nan),
+          "mean_abs_error_after": mean(after_errors) if after_errors else math.nan,
+          "mean_abs_error_change": mean(changes) if changes else math.nan,
+          "median_abs_error_change": median(changes) if changes else math.nan,
+          "improved_ratio": (
+            mean(change < -unchanged_tolerance for change in changes)
+            if changes
+            else math.nan
+          ),
+          "unchanged_ratio": (
+            mean(abs(change) <= unchanged_tolerance for change in changes)
+            if changes
+            else math.nan
+          ),
+          "worsened_ratio": (
+            mean(change > unchanged_tolerance for change in changes)
+            if changes
+            else math.nan
+          ),
+          "unchanged_tolerance": unchanged_tolerance,
+          "change_ci_low": ci_low,
+          "change_ci_high": ci_high,
         }
       )
+  return rows
+
+
+def _multilayer_baseline_comparison_rows(
+  predictions: Sequence[MultilayerPredictionRow],
+  *,
+  bootstrap_repeats: int,
+  analysis_seed: int,
+  cohort_min_layers: int = 5,
+  primary_method: str = "ols_oracle_layer",
+) -> list[dict[str, object]]:
+  cohort = _matched_cohort_keys(
+    predictions,
+    cohort_min_layers=cohort_min_layers,
+    primary_method=primary_method,
+  )
+  indexed = {
+    (
+      row["method"],
+      row["run_id"],
+      row["sequence_id"],
+      row["prefix_distinct_layers"],
+    ): row
+    for row in predictions
+  }
+  rows: list[dict[str, object]] = []
+  for baseline_method in (
+    "first_adjacent_full",
+    "latest_adjacent_full_available_at_t_k",
+  ):
+    for prefix_count in MULTILAYER_PREFIX_COUNTS:
+      changes: list[float] = []
+      primary_errors: list[float] = []
+      baseline_errors: list[float] = []
+      changes_by_seed: dict[int, list[float]] = defaultdict(list)
+      for run_id, sequence_id in sorted(cohort):
+        primary = indexed.get((primary_method, run_id, sequence_id, prefix_count))
+        baseline = indexed.get((baseline_method, run_id, sequence_id, prefix_count))
+        if primary is None or baseline is None:
+          continue
+        primary_error = abs(primary["error"])
+        baseline_error = abs(baseline["error"])
+        change = primary_error - baseline_error
+        primary_errors.append(primary_error)
+        baseline_errors.append(baseline_error)
+        changes.append(change)
+        changes_by_seed[primary["seed"]].append(change)
+      ci_low, ci_high = _stratified_bootstrap_mean_ci(
+        changes_by_seed,
+        repeats=bootstrap_repeats,
+        seed=(f"{analysis_seed}:baseline:{baseline_method}:{prefix_count}"),
+      )
+      rows.append(
+        {
+          "primary_method": primary_method,
+          "baseline_method": baseline_method,
+          "cohort_min_layers": cohort_min_layers,
+          "cohort_sequences": len(cohort),
+          "prefix_distinct_layers": prefix_count,
+          "num_paired": len(changes),
+          "primary_mae": (mean(primary_errors) if primary_errors else math.nan),
+          "baseline_mae": (mean(baseline_errors) if baseline_errors else math.nan),
+          "primary_minus_baseline_mae": (mean(changes) if changes else math.nan),
+          "primary_better_ratio": (
+            mean(change < 0.0 for change in changes) if changes else math.nan
+          ),
+          "change_ci_low": ci_low,
+          "change_ci_high": ci_high,
+        }
+      )
+  return rows
+
+
+def _multilayer_shuffle_prediction_rows(
+  sequences: Mapping[SequenceKey, SequenceRecord],
+  candidates: Sequence[SupportVisit],
+  *,
+  repeats: int,
+  analysis_seed: int,
+) -> list[dict[str, object]]:
+  rows: list[dict[str, object]] = []
+  for prefix in _causal_support_prefixes(sequences, candidates):
+    selected = list(prefix.representatives)
+    prefix_layers = list(prefix.observed_layers)
+    for repeat in range(repeats):
+      shuffled = list(prefix_layers)
+      random.Random(
+        f"{analysis_seed}:{repeat}:{prefix.sequence.run_id}:"
+        f"{prefix.sequence.sequence_id}:{prefix.prefix_distinct_layers}"
+      ).shuffle(shuffled)
+      shuffled_index = {
+        layer: float(shuffled[index]) for index, layer in enumerate(prefix_layers)
+      }
+      shuffled_layers = {
+        (visit.foot_id, visit.support_layer): shuffled_index[visit.support_layer]
+        for visit in selected
+      }
+      prediction = _linear_slope(
+        selected,
+        shuffled_layers,
+        include_foot_offset=True,
+        robust=True,
+      )
+      if not math.isfinite(prediction):
+        continue
+      rows.append(
+        {
+          "run_id": prefix.sequence.run_id,
+          "seed": prefix.sequence.seed,
+          "sequence_id": prefix.sequence.sequence_id,
+          "prefix_distinct_layers": prefix.prefix_distinct_layers,
+          "final_available_distinct_layers": (prefix.final_available_distinct_layers),
+          "repeat": repeat,
+          "predicted_depth": prediction,
+          "true_depth": prefix.sequence.true_depth,
+          "error": prediction - prefix.sequence.true_depth,
+        }
+      )
+  return rows
+
+
+def _multilayer_shuffle_stats(
+  predictions: Sequence[MultilayerPredictionRow],
+  shuffled: Sequence[Mapping[str, object]],
+  *,
+  repeats: int,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+  matched = _matched_cohort_keys(predictions)
+  repeat_rows: list[dict[str, object]] = []
+  for cohort_name, cohort in (
+    ("all_eligible", None),
+    ("matched_5", matched),
+  ):
+    for prefix_count in MULTILAYER_PREFIX_COUNTS:
+      for repeat in range(repeats):
+        items = [
+          row
+          for row in shuffled
+          if row["prefix_distinct_layers"] == prefix_count
+          and row["repeat"] == repeat
+          and (
+            cohort is None or (str(row["run_id"]), str(row["sequence_id"])) in cohort
+          )
+        ]
+        regression = _regression_stats(
+          [_numeric_value(row, "predicted_depth") for row in items],
+          [_numeric_value(row, "true_depth") for row in items],
+        )
+        repeat_rows.append(
+          {
+            "cohort": cohort_name,
+            "prefix_distinct_layers": prefix_count,
+            "repeat": repeat,
+            **regression,
+          }
+        )
+
+  summary_rows: list[dict[str, object]] = []
+  for cohort_name in ("all_eligible", "matched_5"):
+    for prefix_count in MULTILAYER_PREFIX_COUNTS:
+      items = [
+        row
+        for row in repeat_rows
+        if row["cohort"] == cohort_name
+        and row["prefix_distinct_layers"] == prefix_count
+      ]
+      summary: dict[str, object] = {
+        "cohort": cohort_name,
+        "prefix_distinct_layers": prefix_count,
+        "shuffle_repeats": repeats,
+      }
+      for metric in ("mae", "bias", "correlation", "r_squared"):
+        values = [
+          _numeric_value(row, metric)
+          for row in items
+          if math.isfinite(_numeric_value(row, metric))
+        ]
+        summary[f"{metric}_mean"] = mean(values) if values else math.nan
+        summary[f"{metric}_std"] = pstdev(values) if values else math.nan
+        summary[f"{metric}_q025"] = _quantile(values, 0.025)
+        summary[f"{metric}_q50"] = _quantile(values, 0.50)
+        summary[f"{metric}_q975"] = _quantile(values, 0.975)
+      summary_rows.append(summary)
+  return repeat_rows, summary_rows
+
+
+def _multilayer_depth_bin_stats(
+  predictions: Sequence[MultilayerPredictionRow],
+) -> list[dict[str, object]]:
+  rows: list[dict[str, object]] = []
+  methods = sorted({row["method"] for row in predictions})
+  for method in methods:
+    for prefix_count in MULTILAYER_PREFIX_COUNTS:
+      for depth_bin in range(8):
+        items = [
+          row
+          for row in predictions
+          if row["method"] == method
+          and row["prefix_distinct_layers"] == prefix_count
+          and row["depth_bin"] == depth_bin
+        ]
+        regression = _regression_stats(
+          [row["predicted_depth"] for row in items],
+          [row["true_depth"] for row in items],
+        )
+        rows.append(
+          {
+            "method": method,
+            "prefix_distinct_layers": prefix_count,
+            "depth_bin": depth_bin,
+            "num_sequences": len(items),
+            **regression,
+          }
+        )
+  return rows
+
+
+def _multilayer_cross_seed_summary(
+  prefix_stats: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+  rows: list[dict[str, object]] = []
+  methods = sorted({str(row["method"]) for row in prefix_stats})
+  for method in methods:
+    for prefix_count in MULTILAYER_PREFIX_COUNTS:
+      items = [
+        row
+        for row in prefix_stats
+        if row["scope"] == "seed"
+        and row["method"] == method
+        and row["prefix_distinct_layers"] == prefix_count
+      ]
+      result: dict[str, object] = {
+        "method": method,
+        "prefix_distinct_layers": prefix_count,
+        "num_seeds": len(items),
+      }
+      for metric in (
+        "mae",
+        "bias",
+        "correlation",
+        "r_squared",
+        "availability_all",
+        "availability_eligible",
+      ):
+        values = [
+          _numeric_value(row, metric)
+          for row in items
+          if math.isfinite(_numeric_value(row, metric))
+        ]
+        result[f"{metric}_seed_mean"] = mean(values) if values else math.nan
+        result[f"{metric}_seed_std"] = pstdev(values) if values else math.nan
+      rows.append(result)
   return rows
 
 
@@ -1122,13 +1732,12 @@ def _contact_association_rows(events: Sequence[EventRecord]) -> list[dict[str, o
     and _as_int(event.raw, "contact_valid", 0) == 1
     and event.event_layer >= 2
   ]
+  states = Counter(_contact_association_state(event) for event in raw)
+  valid = [event for event in raw if _contact_association_state(event) == "valid"]
   rows: list[dict[str, object]] = []
   for mode, selected in (
     ("raw", raw),
-    (
-      "association_valid",
-      [event for event in raw if _contact_association_valid(event)],
-    ),
+    ("association_valid", valid),
   ):
     residuals = [
       abs(_as_float(event.raw, "contact_s_minus_riser_s"))
@@ -1169,6 +1778,13 @@ def _contact_association_rows(events: Sequence[EventRecord]) -> list[dict[str, o
           "proxy": proxy,
           "num_events": len(selected),
           "num_sequences": len({event.key for event in selected}),
+          "raw_count": len(raw),
+          "valid_count": states["valid"],
+          "invalid_count": states["invalid"],
+          "unknown_count": states["unknown"],
+          "valid_ratio": states["valid"] / max(len(raw), 1),
+          "invalid_ratio": states["invalid"] / max(len(raw), 1),
+          "unknown_ratio": states["unknown"] / max(len(raw), 1),
           "retained_ratio": len(selected) / max(len(raw), 1),
           "association_abs_residual_mean": (mean(residuals) if residuals else math.nan),
           "association_abs_residual_max": max(residuals, default=math.nan),
@@ -1178,6 +1794,37 @@ def _contact_association_rows(events: Sequence[EventRecord]) -> list[dict[str, o
           **_regression_stats(predictions, labels),
         }
       )
+  return rows
+
+
+def _contact_association_invalid_rows(
+  events: Sequence[EventRecord],
+) -> list[dict[str, object]]:
+  rows: list[dict[str, object]] = []
+  for event in events:
+    state = _contact_association_state(event)
+    if (
+      event.event_type != "oracle_riser_contact"
+      or event.event_layer < 2
+      or state not in {"invalid", "unknown"}
+    ):
+      continue
+    rows.append(
+      {
+        "run_id": event.run_id,
+        "seed": event.seed,
+        "sequence_id": event.key[1],
+        "event_id": event.event_id,
+        "frame_idx": event.frame_idx,
+        "foot_id": _as_int(event.raw, "foot_id", -1),
+        "event_layer": event.event_layer,
+        "association_state": state,
+        "contact_s_minus_riser_s": _as_float(event.raw, "contact_s_minus_riser_s"),
+        "contact_point_s": _as_float(event.raw, "contact_point_s"),
+        "toe_s": _as_float(event.raw, "toe_s"),
+        "riser_s": _as_float(event.raw, "riser_s"),
+      }
+    )
   return rows
 
 
@@ -2687,6 +3334,9 @@ def analyze_descriptive(
   output_dir: Path,
   *,
   include_process_end: bool = False,
+  multilayer_shuffle_repeats: int = 50,
+  bootstrap_repeats: int = 2000,
+  analysis_seed: int = 17,
 ) -> None:
   """Write uncalibrated single-seed Stage 1.2 evidence comparisons."""
   output = output_dir.expanduser().resolve()
@@ -2694,12 +3344,42 @@ def analyze_descriptive(
   sequences, events, excluded = _load_inputs(input_dirs, include_process_end)
   additional, duplicates = _reclassify_confirmation_events(events)
   evidence = _extract_evidence(sequences, events, additional)
+  support_candidates = _support_candidates(sequences, events)
   support_visits = _support_visits(sequences, events)
-  multilayer_predictions = _multilayer_prediction_rows(sequences, support_visits)
+  multilayer_predictions = _multilayer_prediction_rows(
+    sequences,
+    support_candidates,
+  )
   multilayer_stats = _multilayer_prefix_stats(
     sequences,
-    support_visits,
+    support_candidates,
     multilayer_predictions,
+  )
+  matched_stats = _multilayer_matched_cohort_stats(
+    multilayer_predictions,
+    bootstrap_repeats=bootstrap_repeats,
+    analysis_seed=analysis_seed,
+  )
+  paired_changes = _multilayer_paired_change_rows(
+    multilayer_predictions,
+    bootstrap_repeats=bootstrap_repeats,
+    analysis_seed=analysis_seed,
+  )
+  baseline_comparisons = _multilayer_baseline_comparison_rows(
+    multilayer_predictions,
+    bootstrap_repeats=bootstrap_repeats,
+    analysis_seed=analysis_seed,
+  )
+  shuffled_predictions = _multilayer_shuffle_prediction_rows(
+    sequences,
+    support_candidates,
+    repeats=multilayer_shuffle_repeats,
+    analysis_seed=analysis_seed,
+  )
+  shuffle_repeats, shuffle_summary = _multilayer_shuffle_stats(
+    multilayer_predictions,
+    shuffled_predictions,
+    repeats=multilayer_shuffle_repeats,
   )
   seeds = {sequence.seed for sequence in sequences.values()}
   single_event_rows = _single_event_rows(evidence, [], seeds, set(), set())
@@ -2772,6 +3452,10 @@ def analyze_descriptive(
     _contact_association_rows(events),
   )
   _write_csv(
+    output / "contact_association_invalid_samples.csv",
+    _contact_association_invalid_rows(events),
+  )
+  _write_csv(
     output / "multilayer_support_predictions.csv",
     multilayer_predictions,
   )
@@ -2780,16 +3464,45 @@ def analyze_descriptive(
     multilayer_stats,
   )
   _write_csv(
+    output / "multilayer_support_matched_cohort_stats.csv",
+    matched_stats,
+  )
+  _write_csv(
+    output / "multilayer_support_paired_changes.csv",
+    paired_changes,
+  )
+  _write_csv(
+    output / "multilayer_support_baseline_comparisons.csv",
+    baseline_comparisons,
+  )
+  _write_csv(
+    output / "multilayer_support_depth_bin_stats.csv",
+    _multilayer_depth_bin_stats(multilayer_predictions),
+  )
+  _write_csv(
+    output / "multilayer_support_cross_seed_summary.csv",
+    _multilayer_cross_seed_summary(multilayer_stats),
+  )
+  _write_csv(output / "multilayer_shuffle_repeats.csv", shuffle_repeats)
+  _write_csv(output / "multilayer_shuffle_summary.csv", shuffle_summary)
+  _write_csv(
     output / "data_audit_summary.csv",
     [
       {"metric": "sequences", "actual": len(sequences)},
       {"metric": "events", "actual": len(events)},
       {"metric": "evidence", "actual": len(evidence)},
+      {"metric": "support_candidates", "actual": len(support_candidates)},
       {"metric": "independent_support_visits", "actual": len(support_visits)},
       {
         "metric": "multilayer_predictions",
         "actual": len(multilayer_predictions),
       },
+      {
+        "metric": "multilayer_shuffle_repeats",
+        "actual": multilayer_shuffle_repeats,
+      },
+      {"metric": "bootstrap_repeats", "actual": bootstrap_repeats},
+      {"metric": "analysis_seed", "actual": analysis_seed},
       {"metric": "excluded_process_end", "actual": excluded},
       {"metric": "duplicate_confirmations", "actual": len(duplicates)},
       {
@@ -2818,12 +3531,18 @@ def main() -> None:
   parser.add_argument("--skip-expected-count-check", action="store_true")
   parser.add_argument("--outside-penalty", type=float, default=2.0)
   parser.add_argument("--shuffle-seed", type=int, default=17)
+  parser.add_argument("--multilayer-shuffle-repeats", type=int, default=50)
+  parser.add_argument("--bootstrap-repeats", type=int, default=2000)
+  parser.add_argument("--analysis-seed", type=int, default=17)
   args = parser.parse_args()
   if args.descriptive_only:
     analyze_descriptive(
       input_dirs=args.input_dirs,
       output_dir=args.output_dir,
       include_process_end=args.include_process_end,
+      multilayer_shuffle_repeats=args.multilayer_shuffle_repeats,
+      bootstrap_repeats=args.bootstrap_repeats,
+      analysis_seed=args.analysis_seed,
     )
     return
   analyze(
