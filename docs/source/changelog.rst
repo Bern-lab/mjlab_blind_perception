@@ -91,6 +91,18 @@ Added
   events, per-foot/per-layer riser contact edges, contact/riser-relative
   projections, explicit validity fields, and a single-seed descriptive analysis
   mode for comparing first, stable, full, and peak support evidence.
+- Added a Stage 2A stair probe dataset exporter that writes deployable
+  91-dimensional latent-observation histories with privileged stair labels and
+  label-audit summaries for offline probe training.
+- Added a Stage 2B offline stair probe trainer for testing whether a
+  SlowLatent-sized 16-dimensional bottleneck can decode stair level and tread
+  depth from exported deployable latent-observation histories. It includes a
+  depth-only upper-bound objective, validation baselines, and class-level
+  reports for isolating tread-depth learnability.
+- Added an opt-in privileged footprint history to the Stage 2 stair probe
+  exporter and trainer for diagnosing whether true foot/tread overlap anchors
+  make stair depth learnable from otherwise blind histories, including a
+  two-branch fusion probe and coarse three-group depth diagnostics.
 
 Changed
 ^^^^^^^
