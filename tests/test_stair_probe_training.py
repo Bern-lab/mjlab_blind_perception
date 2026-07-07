@@ -69,6 +69,44 @@ def _with_footprint(arrays: StairProbeArrays, *, dim: int = 18) -> StairProbeArr
   )
 
 
+def _with_sparse_events(arrays: StairProbeArrays, *, dim: int = 20) -> StairProbeArrays:
+  num_samples = arrays.obs_history.shape[0]
+  history_len = 5
+  sparse_events = np.arange(
+    num_samples * history_len * dim,
+    dtype=np.float32,
+  ).reshape(num_samples, history_len, dim)
+  return replace(
+    arrays,
+    sparse_foot_event_memory=sparse_events,
+    sparse_foot_event_valid_mask=np.ones(
+      (num_samples, history_len),
+      dtype=np.bool_,
+    ),
+  )
+
+
+def _with_safe_labels(arrays: StairProbeArrays) -> StairProbeArrays:
+  num_samples = arrays.obs_history.shape[0]
+  safe_valid = arrays.stair_active_label.astype(np.bool_)
+  center = np.where(safe_valid, 0.30 + 0.001 * np.arange(num_samples), 0.0)
+  return replace(
+    arrays,
+    true_riser_height=np.where(safe_valid, 0.18, 0.0).astype(np.float32),
+    safe_landing_center=center.astype(np.float32),
+    minimum_safe_stride=(center - 0.03).astype(np.float32),
+    maximum_safe_stride=(center + 0.03).astype(np.float32),
+    safe_stride_valid_label=safe_valid,
+    landing_touchdown_label=(np.arange(num_samples) % 3 == 0) & safe_valid,
+    landing_quality_label=np.where(safe_valid, 0.75, 0.0).astype(np.float32),
+    collision_risk_label=np.where(
+      (np.arange(num_samples) % 5 == 0) & safe_valid,
+      1.0,
+      0.0,
+    ).astype(np.float32),
+  )
+
+
 def test_gru_probe_forward_shapes_and_latent_dim() -> None:
   model = StairProbeGRU(
     obs_dim=91,
@@ -86,6 +124,10 @@ def test_gru_probe_forward_shapes_and_latent_dim() -> None:
   assert outputs["relative_level_logits"].shape == (5, NUM_RELATIVE_LEVEL_CLASSES)
   assert outputs["depth_bin_logits"].shape == (5, NUM_DEPTH_BIN_CLASSES)
   assert outputs["depth_reg"].shape == (5, 1)
+  assert outputs["touchdown_logit"].shape == (5, 1)
+  assert outputs["landing_quality"].shape == (5, 1)
+  assert outputs["collision_risk"].shape == (5, 1)
+  assert outputs["safe_stride"].shape == (5, 3)
 
 
 def test_two_branch_probe_forward_shapes_and_latent_dim() -> None:
@@ -109,6 +151,10 @@ def test_two_branch_probe_forward_shapes_and_latent_dim() -> None:
   assert outputs["relative_level_logits"].shape == (5, NUM_RELATIVE_LEVEL_CLASSES)
   assert outputs["depth_bin_logits"].shape == (5, NUM_DEPTH_BIN_CLASSES)
   assert outputs["depth_reg"].shape == (5, 1)
+  assert outputs["touchdown_logit"].shape == (5, 1)
+  assert outputs["landing_quality"].shape == (5, 1)
+  assert outputs["collision_risk"].shape == (5, 1)
+  assert outputs["safe_stride"].shape == (5, 3)
 
 
 def test_dataset_uses_last_history_frames() -> None:
@@ -168,6 +214,53 @@ def test_dataset_footprint_only_uses_footprint_history() -> None:
   assert torch.equal(item["obs_history"], expected)
 
 
+def test_dataset_sparse_event_only_uses_event_memory() -> None:
+  arrays = _with_sparse_events(_make_arrays(num_samples=4), dim=6)
+  dataset = StairProbeTorchDataset(
+    arrays,
+    np.array([0]),
+    history_len=3,
+    sparse_event_memory_len=4,
+    input_mode="sparse_event_only",
+  )
+
+  item = dataset[0]
+
+  assert item["obs_history"].shape == (4, 6)
+  assert arrays.sparse_foot_event_memory is not None
+  expected = torch.as_tensor(
+    arrays.sparse_foot_event_memory[0, :4, :],
+    dtype=torch.float32,
+  )
+  assert torch.equal(item["obs_history"], expected)
+
+
+def test_dataset_latent_plus_sparse_event_zero_pads_shorter_event_memory() -> None:
+  arrays = _with_sparse_events(_make_arrays(num_samples=4), dim=6)
+  dataset = StairProbeTorchDataset(
+    arrays,
+    np.array([0]),
+    history_len=6,
+    sparse_event_memory_len=4,
+    input_mode="latent_plus_sparse_event",
+  )
+
+  item = dataset[0]
+
+  assert item["obs_history"].shape == (6, 97)
+  assert dataset.input_dim == 97
+  assert dataset.input_history_len == 6
+  expected_latent = torch.as_tensor(arrays.obs_history[0, -6:, :], dtype=torch.float32)
+  assert torch.equal(item["obs_history"][:, :91], expected_latent)
+  assert torch.equal(item["obs_history"][4:, 91:], torch.zeros(2, 6))
+  assert arrays.sparse_foot_event_memory is not None
+  expected_events = torch.as_tensor(
+    arrays.sparse_foot_event_memory[0, :4, :],
+    dtype=torch.float32,
+  )
+  assert torch.equal(item["obs_history"][:4, 91:], expected_events)
+
+
 def test_dataset_two_branch_returns_separate_histories() -> None:
   arrays = _with_footprint(_make_arrays(num_samples=4), dim=3)
   dataset = StairProbeTorchDataset(
@@ -192,6 +285,32 @@ def test_dataset_two_branch_returns_separate_histories() -> None:
     dtype=torch.float32,
   )
   assert torch.equal(item["privileged_footprint_history"], expected_footprint)
+
+
+def test_dataset_two_branch_sparse_event_returns_separate_histories() -> None:
+  arrays = _with_sparse_events(_make_arrays(num_samples=4), dim=6)
+  dataset = StairProbeTorchDataset(
+    arrays,
+    np.array([0]),
+    history_len=3,
+    sparse_event_memory_len=4,
+    input_mode="two_branch_sparse_event",
+  )
+
+  item = dataset[0]
+
+  assert item["obs_history"].shape == (3, 91)
+  assert item["sparse_foot_event_memory"].shape == (4, 6)
+  assert dataset.input_dim == 97
+  assert dataset.input_history_len == 4
+  expected_latent = torch.as_tensor(arrays.obs_history[0, -3:, :], dtype=torch.float32)
+  assert torch.equal(item["obs_history"], expected_latent)
+  assert arrays.sparse_foot_event_memory is not None
+  expected_events = torch.as_tensor(
+    arrays.sparse_foot_event_memory[0, :4, :],
+    dtype=torch.float32,
+  )
+  assert torch.equal(item["sparse_foot_event_memory"], expected_events)
 
 
 def test_sequence_split_has_no_stair_sequence_leakage() -> None:
@@ -259,6 +378,16 @@ def test_depth_only_objective_filters_to_depth_valid_samples() -> None:
   assert np.all(depth_arrays.sequence_id >= 0)
 
 
+def test_safe_landing_objective_filters_to_stair_samples() -> None:
+  arrays = _with_safe_labels(_make_arrays(num_samples=24))
+
+  safe_arrays = filter_arrays_for_objective(arrays, "safe_landing")
+
+  assert safe_arrays.obs_history.shape[0] == int(arrays.stair_active_label.sum())
+  assert safe_arrays.safe_stride_valid_label is not None
+  assert safe_arrays.safe_stride_valid_label.all()
+
+
 def test_depth_only_loss_ignores_non_depth_tasks() -> None:
   cfg = TrainStairProbeConfig(objective="depth_only")
   outputs = {
@@ -303,6 +432,63 @@ def test_depth_only_auto_selection_metric_targets_depth_bin_macro_f1() -> None:
   assert resolve_selection_metric(cfg) == "depth_bin_macro_f1"
 
 
+def test_safe_landing_auto_selection_metric_targets_val_loss() -> None:
+  cfg = TrainStairProbeConfig(objective="safe_landing", selection_metric="auto")
+
+  assert resolve_selection_metric(cfg) == "val_loss"
+
+
+def test_safe_landing_loss_ignores_depth_tasks() -> None:
+  cfg = TrainStairProbeConfig(objective="safe_landing")
+  outputs = {
+    "probe_latent": torch.zeros(2, 16, requires_grad=True),
+    "stair_active_logit": torch.randn(2, 1, requires_grad=True),
+    "level_delta_logits": torch.randn(2, 4, requires_grad=True),
+    "relative_level_logits": torch.randn(2, 8, requires_grad=True),
+    "depth_bin_logits": torch.randn(2, 8, requires_grad=True),
+    "depth_reg": torch.randn(2, 1, requires_grad=True),
+    "touchdown_logit": torch.zeros(2, 1, requires_grad=True),
+    "landing_quality": torch.zeros(2, 1, requires_grad=True),
+    "collision_risk": torch.zeros(2, 1, requires_grad=True),
+    "safe_stride": torch.zeros(2, 3, requires_grad=True),
+  }
+  batch = {
+    "stair_active": torch.tensor([1.0, 0.0]),
+    "level_delta": torch.tensor([1, 2]),
+    "relative_level": torch.tensor([1, 7]),
+    "depth_bin": torch.tensor([3, 4]),
+    "depth_valid": torch.tensor([True, True]),
+    "depth_norm": torch.tensor([0.4, 0.5]),
+    "landing_touchdown": torch.tensor([1.0, 0.0]),
+    "landing_quality": torch.tensor([0.8, 0.0]),
+    "collision_risk": torch.tensor([0.0, 1.0]),
+    "safe_stride_valid": torch.tensor([True, False]),
+    "minimum_safe_stride": torch.tensor([0.25, 0.0]),
+    "maximum_safe_stride": torch.tensor([0.35, 0.0]),
+    "safe_landing_center": torch.tensor([0.30, 0.0]),
+  }
+  weights = ProbeLossWeights(
+    active_pos_weight=torch.tensor(100.0),
+    level_delta=torch.tensor([10.0, 20.0, 30.0, 40.0]),
+    relative_level=torch.arange(1, 9, dtype=torch.float32),
+    depth_bin=torch.ones(8),
+  )
+
+  loss_a, parts_a = compute_probe_loss(outputs, batch, weights, cfg)
+  batch["depth_bin"] = torch.tensor([0, 0])
+  batch["depth_norm"] = torch.tensor([99.0, -99.0])
+  batch["level_delta"] = torch.tensor([0, 0])
+  loss_b, parts_b = compute_probe_loss(outputs, batch, weights, cfg)
+
+  assert loss_a.item() == loss_b.item()
+  assert parts_a["active_loss"] == 0.0
+  assert parts_a["depth_bin_loss"] == 0.0
+  assert parts_a["depth_reg_loss"] == 0.0
+  assert parts_b["level_delta_loss"] == 0.0
+  assert parts_a["touchdown_loss"] > 0.0
+  assert parts_a["safe_stride_loss"] > 0.0
+
+
 def test_metrics_report_macro_scores_without_nan() -> None:
   labels = {
     "stair_active": np.array([1, 1, 0, 0]),
@@ -327,6 +513,50 @@ def test_metrics_report_macro_scores_without_nan() -> None:
   assert "level_delta_macro_f1" in metrics
   assert "depth_bin_macro_f1" in metrics
   assert "depth_3group_macro_f1" in metrics
+
+
+def test_metrics_report_safe_landing_scores_without_nan() -> None:
+  labels = {
+    "stair_active": np.array([1, 1, 0, 0]),
+    "level_delta": np.array([0, 1, 0, 0]),
+    "relative_level": np.array([0, 1, 1, 0]),
+    "depth_bin": np.array([0, 1, 0, 0]),
+    "depth_valid": np.array([1, 1, 0, 0]),
+    "true_tread_depth": np.array([0.25, 0.30, 0.0, 0.0], dtype=np.float32),
+    "safe_stride_valid": np.array([1, 1, 0, 0], dtype=np.bool_),
+    "minimum_safe_stride": np.array([0.20, 0.25, 0.0, 0.0], dtype=np.float32),
+    "maximum_safe_stride": np.array([0.30, 0.35, 0.0, 0.0], dtype=np.float32),
+    "safe_landing_center": np.array([0.25, 0.30, 0.0, 0.0], dtype=np.float32),
+    "landing_touchdown": np.array([1, 0, 0, 0], dtype=np.float32),
+    "landing_quality": np.array([0.8, 0.0, 0.0, 0.0], dtype=np.float32),
+    "collision_risk": np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32),
+  }
+  predictions = {
+    "stair_active_prob": np.array([0.9, 0.8, 0.1, 0.7]),
+    "level_delta_pred": np.array([0, 0, 0, 0]),
+    "relative_level_pred": np.array([0, 1, 0, 0]),
+    "depth_bin_pred": np.array([0, 2, 0, 0]),
+    "depth_reg": np.array([0.0, 0.5, 0.0, 0.0], dtype=np.float32),
+    "touchdown_prob": np.array([0.9, 0.4, 0.2, 0.1], dtype=np.float32),
+    "landing_quality_pred": np.array([0.7, 0.1, 0.0, 0.0], dtype=np.float32),
+    "collision_risk_pred": np.array([0.2, 0.8, 0.1, 0.0], dtype=np.float32),
+    "safe_stride_pred": np.array(
+      [
+        [0.22, 0.32, 0.27],
+        [0.26, 0.36, 0.31],
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+      ],
+      dtype=np.float32,
+    ),
+  }
+
+  metrics = compute_metrics(labels, predictions, val_loss=1.25)
+
+  assert all(math.isfinite(value) for value in metrics.values())
+  assert metrics["touchdown_f1"] == 1.0
+  assert math.isclose(metrics["safe_stride_center_mae_m"], 0.015, rel_tol=1.0e-5)
+  assert math.isclose(metrics["landing_quality_mae"], 0.1, rel_tol=1.0e-5)
 
 
 def test_baselines_include_depth_constant_mae() -> None:

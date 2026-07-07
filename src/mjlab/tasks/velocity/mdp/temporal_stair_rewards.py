@@ -83,7 +83,9 @@ from .stair_geometry import (
   STAIR_TARGET_FOOT_KEY,
   STAIR_TOE_RISER_HIT_LAYER_KEY,
   STAIR_TREAD_DEPTH_LABEL_KEY,
+  TOE_RISER_CONTACT_BY_FOOT_KEY,
   TOE_RISER_CONTACT_KEY,
+  TOE_RISER_NEW_HIT_BY_FOOT_KEY,
   TOE_RISER_NEW_HIT_KEY,
   cached_stair_shape,
   stair_shape_for_sequence,
@@ -387,6 +389,12 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     self._toe_riser_contact = torch.zeros(
       env.num_envs, device=env.device, dtype=torch.bool
     )
+    self._toe_riser_new_hit_by_foot = torch.zeros(
+      env.num_envs, num_feet, device=env.device, dtype=torch.bool
+    )
+    self._toe_riser_contact_by_foot = torch.zeros(
+      env.num_envs, num_feet, device=env.device, dtype=torch.bool
+    )
     self._entry_evidence_timer = torch.zeros(env.num_envs, device=env.device)
     self._recent_entry_evidence = torch.zeros(
       env.num_envs, device=env.device, dtype=torch.bool
@@ -636,6 +644,8 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     env.extras[STAIR_EXIT_EVENT_KEY] = self._exit_event
     env.extras[TOE_RISER_NEW_HIT_KEY] = self._toe_riser_new_hit
     env.extras[TOE_RISER_CONTACT_KEY] = self._toe_riser_contact
+    env.extras[TOE_RISER_NEW_HIT_BY_FOOT_KEY] = self._toe_riser_new_hit_by_foot
+    env.extras[TOE_RISER_CONTACT_BY_FOOT_KEY] = self._toe_riser_contact_by_foot
     env.extras[STAIR_TOE_RISER_HIT_LAYER_KEY] = self._toe_riser_hit_layer
     env.extras[STAIR_ENTRY_RECENT_EVIDENCE_KEY] = self._recent_entry_evidence
     env.extras[STAIR_ENTRY_EVIDENCE_ASCENT_DIR_KEY] = self._entry_evidence_ascent_dir
@@ -735,6 +745,8 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     self._exit_event[env_ids] = False
     self._toe_riser_new_hit[env_ids] = False
     self._toe_riser_contact[env_ids] = False
+    self._toe_riser_new_hit_by_foot[env_ids] = False
+    self._toe_riser_contact_by_foot[env_ids] = False
     self._entry_evidence_timer[env_ids] = 0.0
     self._recent_entry_evidence[env_ids] = False
     self._entry_evidence_ascent_dir[env_ids] = 0.0
@@ -1262,6 +1274,8 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     self._exit_event.zero_()
     self._toe_riser_new_hit.zero_()
     self._toe_riser_contact.zero_()
+    self._toe_riser_new_hit_by_foot.zero_()
+    self._toe_riser_contact_by_foot.zero_()
     self._stair_depth_confirmation_event.zero_()
     self._adjacent_support_pair_event.zero_()
     self._current_ground_contact.zero_()
@@ -1530,6 +1544,8 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       toe_riser_contact = riser_contact.reshape(num_envs, -1).any(dim=-1)
       self._toe_riser_new_hit.copy_(toe_riser_new_hit)
       self._toe_riser_contact.copy_(toe_riser_contact)
+      self._toe_riser_new_hit_by_foot.copy_(new_hit_by_foot.reshape(num_envs, -1))
+      self._toe_riser_contact_by_foot.copy_(riser_contact.reshape(num_envs, -1))
       soft_boundary_contact = contact["soft_boundary_contact"].bool()
       blocked_riser_by_foot = contact["blocked_riser_by_foot"].bool()
       event_boundary_contact = contact["event_boundary_contact"].bool()

@@ -24,6 +24,19 @@ NUM_RELATIVE_LEVEL_CLASSES = 8
 NUM_DEPTH_BIN_CLASSES = 8
 NUM_DEPTH_GROUP_CLASSES = 3
 DEPTH_BIN_TO_GROUP = np.asarray([0, 0, 0, 1, 1, 2, 2, 2], dtype=np.int64)
+FOOTPRINT_INPUT_MODES = (
+  "footprint_only",
+  "latent_plus_footprint",
+  "two_branch_fusion",
+)
+SPARSE_EVENT_INPUT_MODES = (
+  "sparse_event_only",
+  "latent_plus_sparse_event",
+  "two_branch_sparse_event",
+)
+TWO_BRANCH_INPUT_MODES = ("two_branch_fusion", "two_branch_sparse_event")
+SAFE_HEAD_OUTPUT_DIM = 6
+DIAGNOSTIC_OUTPUT_DIM = 22 + SAFE_HEAD_OUTPUT_DIM
 
 
 @dataclass(frozen=True)
@@ -36,14 +49,18 @@ class TrainStairProbeConfig:
   seed: int = 12345
   history_len: int = 64
   footprint_history_len: int = 128
+  sparse_event_memory_len: int = 8
   input_mode: Literal[
     "latent_only",
     "footprint_only",
     "latent_plus_footprint",
     "two_branch_fusion",
+    "sparse_event_only",
+    "latent_plus_sparse_event",
+    "two_branch_sparse_event",
   ] = "latent_only"
   model: Literal["gru"] = "gru"
-  objective: Literal["multitask", "depth_only"] = "multitask"
+  objective: Literal["multitask", "depth_only", "safe_landing"] = "multitask"
   selection_metric: Literal[
     "auto",
     "val_loss",
@@ -52,6 +69,9 @@ class TrainStairProbeConfig:
     "depth_bin_macro_f1",
     "depth_3group_macro_f1",
     "depth_mae_m",
+    "safe_stride_center_mae_m",
+    "landing_quality_mae",
+    "touchdown_f1",
   ] = "auto"
   obs_dim: int = 91
   frame_hidden_dim: int = 128
@@ -75,16 +95,24 @@ class TrainStairProbeConfig:
   depth_bin_loss_coef: float = 1.0
   depth_reg_loss_coef: float = 1.0
   depth_huber_beta: float = 0.05
+  touchdown_loss_coef: float = 1.0
+  landing_quality_loss_coef: float = 1.0
+  collision_risk_loss_coef: float = 0.5
+  safe_stride_loss_coef: float = 1.0
+  safe_stride_huber_beta: float = 0.05
   max_prediction_rows: int = 5000
   progress: bool = True
 
 
-ObjectiveName = Literal["multitask", "depth_only"]
+ObjectiveName = Literal["multitask", "depth_only", "safe_landing"]
 InputMode = Literal[
   "latent_only",
   "footprint_only",
   "latent_plus_footprint",
   "two_branch_fusion",
+  "sparse_event_only",
+  "latent_plus_sparse_event",
+  "two_branch_sparse_event",
 ]
 MetricName = Literal[
   "val_loss",
@@ -93,6 +121,9 @@ MetricName = Literal[
   "depth_bin_macro_f1",
   "depth_3group_macro_f1",
   "depth_mae_m",
+  "safe_stride_center_mae_m",
+  "landing_quality_mae",
+  "touchdown_f1",
 ]
 
 
@@ -113,8 +144,18 @@ class StairProbeArrays:
   env_id: np.ndarray
   frame_idx: np.ndarray
   seed: np.ndarray
+  true_riser_height: np.ndarray | None = None
+  safe_landing_center: np.ndarray | None = None
+  minimum_safe_stride: np.ndarray | None = None
+  maximum_safe_stride: np.ndarray | None = None
+  safe_stride_valid_label: np.ndarray | None = None
+  landing_touchdown_label: np.ndarray | None = None
+  landing_quality_label: np.ndarray | None = None
+  collision_risk_label: np.ndarray | None = None
   privileged_footprint_history: np.ndarray | None = None
   privileged_footprint_valid_mask: np.ndarray | None = None
+  sparse_foot_event_memory: np.ndarray | None = None
+  sparse_foot_event_valid_mask: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -183,6 +224,10 @@ class StairProbeGRU(nn.Module):
       NUM_DEPTH_BIN_CLASSES,
     )
     self.depth_reg_head = self._make_head(probe_latent_dim, head_hidden_dim, 1)
+    self.touchdown_head = self._make_head(probe_latent_dim, head_hidden_dim, 1)
+    self.landing_quality_head = self._make_head(probe_latent_dim, head_hidden_dim, 1)
+    self.collision_risk_head = self._make_head(probe_latent_dim, head_hidden_dim, 1)
+    self.safe_stride_head = self._make_head(probe_latent_dim, head_hidden_dim, 3)
 
   @staticmethod
   def _make_head(in_dim: int, hidden_dim: int, out_dim: int) -> nn.Sequential:
@@ -211,6 +256,10 @@ class StairProbeGRU(nn.Module):
       "relative_level_logits": self.relative_level_head(z),
       "depth_bin_logits": self.depth_bin_head(z),
       "depth_reg": self.depth_reg_head(z),
+      "touchdown_logit": self.touchdown_head(z),
+      "landing_quality": self.landing_quality_head(z),
+      "collision_risk": self.collision_risk_head(z),
+      "safe_stride": self.safe_stride_head(z),
     }
 
 
@@ -293,6 +342,26 @@ class TwoBranchStairProbeGRU(nn.Module):
       head_hidden_dim,
       1,
     )
+    self.touchdown_head = StairProbeGRU._make_head(
+      probe_latent_dim,
+      head_hidden_dim,
+      1,
+    )
+    self.landing_quality_head = StairProbeGRU._make_head(
+      probe_latent_dim,
+      head_hidden_dim,
+      1,
+    )
+    self.collision_risk_head = StairProbeGRU._make_head(
+      probe_latent_dim,
+      head_hidden_dim,
+      1,
+    )
+    self.safe_stride_head = StairProbeGRU._make_head(
+      probe_latent_dim,
+      head_hidden_dim,
+      3,
+    )
 
   def encode_latent(
     self,
@@ -335,6 +404,10 @@ class TwoBranchStairProbeGRU(nn.Module):
       "relative_level_logits": self.relative_level_head(z),
       "depth_bin_logits": self.depth_bin_head(z),
       "depth_reg": self.depth_reg_head(z),
+      "touchdown_logit": self.touchdown_head(z),
+      "landing_quality": self.landing_quality_head(z),
+      "collision_risk": self.collision_risk_head(z),
+      "safe_stride": self.safe_stride_head(z),
     }
 
 
@@ -348,6 +421,7 @@ class StairProbeTorchDataset(Dataset):
     *,
     history_len: int,
     footprint_history_len: int = 128,
+    sparse_event_memory_len: int = 8,
     input_mode: InputMode = "latent_only",
   ) -> None:
     if history_len <= 0:
@@ -361,9 +435,12 @@ class StairProbeTorchDataset(Dataset):
       "footprint_only",
       "latent_plus_footprint",
       "two_branch_fusion",
+      "sparse_event_only",
+      "latent_plus_sparse_event",
+      "two_branch_sparse_event",
     ):
       raise ValueError(f"Unsupported input_mode '{input_mode}'.")
-    if input_mode != "latent_only":
+    if input_mode in FOOTPRINT_INPUT_MODES:
       if arrays.privileged_footprint_history is None:
         raise ValueError(
           f"input_mode={input_mode!r} requires privileged_footprint_history."
@@ -375,10 +452,23 @@ class StairProbeTorchDataset(Dataset):
           f"footprint_history_len={footprint_history_len} exceeds dataset "
           f"footprint history length {arrays.privileged_footprint_history.shape[1]}."
         )
+    if input_mode in SPARSE_EVENT_INPUT_MODES:
+      if arrays.sparse_foot_event_memory is None:
+        raise ValueError(
+          f"input_mode={input_mode!r} requires sparse_foot_event_memory."
+        )
+      if sparse_event_memory_len <= 0:
+        raise ValueError("sparse_event_memory_len must be positive.")
+      if sparse_event_memory_len > arrays.sparse_foot_event_memory.shape[1]:
+        raise ValueError(
+          f"sparse_event_memory_len={sparse_event_memory_len} exceeds dataset "
+          f"sparse event memory length {arrays.sparse_foot_event_memory.shape[1]}."
+        )
     self.arrays = arrays
     self.indices = indices.astype(np.int64, copy=True)
     self.history_len = int(history_len)
     self.footprint_history_len = int(footprint_history_len)
+    self.sparse_event_memory_len = int(sparse_event_memory_len)
     self.input_mode = input_mode
     self.input_history_len = self._resolve_input_history_len()
     self.input_dim = self._resolve_input_dim()
@@ -388,16 +478,26 @@ class StairProbeTorchDataset(Dataset):
       return self.history_len
     if self.input_mode == "footprint_only":
       return self.footprint_history_len
+    if self.input_mode == "sparse_event_only":
+      return self.sparse_event_memory_len
+    if self.input_mode in ("latent_plus_sparse_event", "two_branch_sparse_event"):
+      return max(self.history_len, self.sparse_event_memory_len)
     return max(self.history_len, self.footprint_history_len)
 
   def _resolve_input_dim(self) -> int:
     latent_dim = int(self.arrays.obs_history.shape[-1])
     footprint = self.arrays.privileged_footprint_history
     footprint_dim = 0 if footprint is None else int(footprint.shape[-1])
+    sparse_events = self.arrays.sparse_foot_event_memory
+    sparse_dim = 0 if sparse_events is None else int(sparse_events.shape[-1])
     if self.input_mode == "latent_only":
       return latent_dim
     if self.input_mode == "footprint_only":
       return footprint_dim
+    if self.input_mode == "sparse_event_only":
+      return sparse_dim
+    if self.input_mode in ("latent_plus_sparse_event", "two_branch_sparse_event"):
+      return latent_dim + sparse_dim
     return latent_dim + footprint_dim
 
   def __len__(self) -> int:
@@ -418,6 +518,21 @@ class StairProbeTorchDataset(Dataset):
     output[-selected.shape[0] :, :] = selected.astype(np.float32, copy=False)
     return output
 
+  def _sparse_event_history(
+    self,
+    memory: np.ndarray,
+    requested_len: int,
+    *,
+    output_len: int | None = None,
+  ) -> np.ndarray:
+    selected = memory[:requested_len, :]
+    resolved_output_len = self.input_history_len if output_len is None else output_len
+    if selected.shape[0] == resolved_output_len:
+      return selected.astype(np.float32, copy=False)
+    output = np.zeros((resolved_output_len, memory.shape[-1]), dtype=np.float32)
+    output[: selected.shape[0], :] = selected.astype(np.float32, copy=False)
+    return output
+
   def _model_input_history(self, sample_index: int) -> np.ndarray:
     arrays = self.arrays
     if self.input_mode == "latent_only":
@@ -425,7 +540,27 @@ class StairProbeTorchDataset(Dataset):
         arrays.obs_history[sample_index],
         self.history_len,
       )
+    sparse_events = arrays.sparse_foot_event_memory
+    if self.input_mode == "sparse_event_only":
+      if sparse_events is None:
+        raise RuntimeError("sparse foot-event memory is unavailable.")
+      return self._sparse_event_history(
+        sparse_events[sample_index],
+        self.sparse_event_memory_len,
+      )
     footprint = arrays.privileged_footprint_history
+    latent_input = self._right_aligned_history(
+      arrays.obs_history[sample_index],
+      self.history_len,
+    )
+    if self.input_mode in ("latent_plus_sparse_event", "two_branch_sparse_event"):
+      if sparse_events is None:
+        raise RuntimeError("sparse foot-event memory is unavailable.")
+      sparse_input = self._sparse_event_history(
+        sparse_events[sample_index],
+        self.sparse_event_memory_len,
+      )
+      return np.concatenate([latent_input, sparse_input], axis=-1)
     if footprint is None:
       raise RuntimeError("privileged footprint history is unavailable.")
     footprint_input = self._right_aligned_history(
@@ -434,10 +569,6 @@ class StairProbeTorchDataset(Dataset):
     )
     if self.input_mode == "footprint_only":
       return footprint_input
-    latent_input = self._right_aligned_history(
-      arrays.obs_history[sample_index],
-      self.history_len,
-    )
     return np.concatenate([latent_input, footprint_input], axis=-1)
 
   def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
@@ -445,10 +576,21 @@ class StairProbeTorchDataset(Dataset):
     arrays = self.arrays
     depth = float(arrays.true_tread_depth[sample_index])
     depth_norm = (depth - DEPTH_MIN_M) / (DEPTH_MAX_M - DEPTH_MIN_M)
-    if self.input_mode == "two_branch_fusion":
+    if self.input_mode in TWO_BRANCH_INPUT_MODES:
       footprint = arrays.privileged_footprint_history
-      if footprint is None:
-        raise RuntimeError("privileged footprint history is unavailable.")
+      sparse_events = arrays.sparse_foot_event_memory
+      if self.input_mode == "two_branch_fusion":
+        if footprint is None:
+          raise RuntimeError("privileged footprint history is unavailable.")
+        secondary_key = "privileged_footprint_history"
+        secondary_history = footprint[sample_index]
+        secondary_len = self.footprint_history_len
+      else:
+        if sparse_events is None:
+          raise RuntimeError("sparse foot-event memory is unavailable.")
+        secondary_key = "sparse_foot_event_memory"
+        secondary_history = sparse_events[sample_index]
+        secondary_len = self.sparse_event_memory_len
       payload = {
         "obs_history": torch.as_tensor(
           self._right_aligned_history(
@@ -458,11 +600,15 @@ class StairProbeTorchDataset(Dataset):
           ),
           dtype=torch.float32,
         ),
-        "privileged_footprint_history": torch.as_tensor(
-          self._right_aligned_history(
-            footprint[sample_index],
-            self.footprint_history_len,
-            output_len=self.footprint_history_len,
+        secondary_key: torch.as_tensor(
+          (
+            self._right_aligned_history
+            if self.input_mode == "two_branch_fusion"
+            else self._sparse_event_history
+          )(
+            secondary_history,
+            secondary_len,
+            output_len=secondary_len,
           ),
           dtype=torch.float32,
         ),
@@ -495,6 +641,54 @@ class StairProbeTorchDataset(Dataset):
         ),
         "depth_norm": torch.tensor(depth_norm, dtype=torch.float32),
         "true_tread_depth": torch.tensor(depth, dtype=torch.float32),
+        "true_riser_height": torch.tensor(
+          0.0
+          if arrays.true_riser_height is None
+          else float(arrays.true_riser_height[sample_index]),
+          dtype=torch.float32,
+        ),
+        "safe_landing_center": torch.tensor(
+          0.0
+          if arrays.safe_landing_center is None
+          else float(arrays.safe_landing_center[sample_index]),
+          dtype=torch.float32,
+        ),
+        "minimum_safe_stride": torch.tensor(
+          0.0
+          if arrays.minimum_safe_stride is None
+          else float(arrays.minimum_safe_stride[sample_index]),
+          dtype=torch.float32,
+        ),
+        "maximum_safe_stride": torch.tensor(
+          0.0
+          if arrays.maximum_safe_stride is None
+          else float(arrays.maximum_safe_stride[sample_index]),
+          dtype=torch.float32,
+        ),
+        "safe_stride_valid": torch.tensor(
+          False
+          if arrays.safe_stride_valid_label is None
+          else bool(arrays.safe_stride_valid_label[sample_index]),
+          dtype=torch.bool,
+        ),
+        "landing_touchdown": torch.tensor(
+          False
+          if arrays.landing_touchdown_label is None
+          else bool(arrays.landing_touchdown_label[sample_index]),
+          dtype=torch.float32,
+        ),
+        "landing_quality": torch.tensor(
+          0.0
+          if arrays.landing_quality_label is None
+          else float(arrays.landing_quality_label[sample_index]),
+          dtype=torch.float32,
+        ),
+        "collision_risk": torch.tensor(
+          0.0
+          if arrays.collision_risk_label is None
+          else float(arrays.collision_risk_label[sample_index]),
+          dtype=torch.float32,
+        ),
         "sample_type": torch.tensor(
           int(arrays.sample_type[sample_index]), dtype=torch.long
         ),
@@ -542,6 +736,46 @@ def load_stair_probe_arrays(
       env_id=np.asarray(data["env_id"], dtype=np.int64),
       frame_idx=np.asarray(data["frame_idx"], dtype=np.int64),
       seed=np.asarray(data["seed"], dtype=np.int64),
+      true_riser_height=(
+        np.asarray(data["true_riser_height"], dtype=np.float32)
+        if "true_riser_height" in data
+        else None
+      ),
+      safe_landing_center=(
+        np.asarray(data["safe_landing_center"], dtype=np.float32)
+        if "safe_landing_center" in data
+        else None
+      ),
+      minimum_safe_stride=(
+        np.asarray(data["minimum_safe_stride"], dtype=np.float32)
+        if "minimum_safe_stride" in data
+        else None
+      ),
+      maximum_safe_stride=(
+        np.asarray(data["maximum_safe_stride"], dtype=np.float32)
+        if "maximum_safe_stride" in data
+        else None
+      ),
+      safe_stride_valid_label=(
+        np.asarray(data["safe_stride_valid_label"], dtype=np.bool_)
+        if "safe_stride_valid_label" in data
+        else None
+      ),
+      landing_touchdown_label=(
+        np.asarray(data["landing_touchdown_label"], dtype=np.bool_)
+        if "landing_touchdown_label" in data
+        else None
+      ),
+      landing_quality_label=(
+        np.asarray(data["landing_quality_label"], dtype=np.float32)
+        if "landing_quality_label" in data
+        else None
+      ),
+      collision_risk_label=(
+        np.asarray(data["collision_risk_label"], dtype=np.float32)
+        if "collision_risk_label" in data
+        else None
+      ),
       privileged_footprint_history=(
         np.asarray(data["privileged_footprint_history"], dtype=np.float32)
         if "privileged_footprint_history" in data
@@ -550,6 +784,16 @@ def load_stair_probe_arrays(
       privileged_footprint_valid_mask=(
         np.asarray(data["privileged_footprint_valid_mask"], dtype=np.bool_)
         if "privileged_footprint_valid_mask" in data
+        else None
+      ),
+      sparse_foot_event_memory=(
+        np.asarray(data["sparse_foot_event_memory"], dtype=np.float32)
+        if "sparse_foot_event_memory" in data
+        else None
+      ),
+      sparse_foot_event_valid_mask=(
+        np.asarray(data["sparse_foot_event_valid_mask"], dtype=np.bool_)
+        if "sparse_foot_event_valid_mask" in data
         else None
       ),
     )
@@ -574,10 +818,23 @@ def validate_arrays(arrays: StairProbeArrays) -> None:
       raise ValueError(
         f"Array '{name}' has first dimension {value.shape[0]}, expected {num_samples}."
       )
+  if arrays.obs_valid_mask.shape != arrays.obs_history.shape[:2]:
+    raise ValueError("obs_valid_mask must match obs_history first two dims.")
   if arrays.obs_history.shape[-1] != 91:
     raise ValueError(f"Expected obs_dim 91, got {arrays.obs_history.shape[-1]}.")
   if np.isnan(arrays.obs_history).any():
     raise ValueError("obs_history contains NaN values.")
+  for name in (
+    "true_riser_height",
+    "safe_landing_center",
+    "minimum_safe_stride",
+    "maximum_safe_stride",
+    "landing_quality_label",
+    "collision_risk_label",
+  ):
+    value = getattr(arrays, name)
+    if value is not None and np.isnan(value).any():
+      raise ValueError(f"{name} contains NaN values.")
   footprint = arrays.privileged_footprint_history
   footprint_mask = arrays.privileged_footprint_valid_mask
   if footprint is None:
@@ -585,25 +842,50 @@ def validate_arrays(arrays: StairProbeArrays) -> None:
       raise ValueError(
         "privileged_footprint_valid_mask requires privileged_footprint_history."
       )
+  else:
+    if footprint.ndim != 3:
+      raise ValueError(
+        "privileged_footprint_history must have shape "
+        "(N, footprint_history_len, footprint_dim)."
+      )
+    if footprint.shape[0] != num_samples:
+      raise ValueError(
+        "privileged_footprint_history first dimension does not match obs_history."
+      )
+    if np.isnan(footprint).any():
+      raise ValueError("privileged_footprint_history contains NaN values.")
+    if footprint_mask is None:
+      raise ValueError(
+        "privileged_footprint_history requires privileged_footprint_valid_mask."
+      )
+    if footprint_mask.shape != footprint.shape[:2]:
+      raise ValueError(
+        "privileged_footprint_valid_mask must match footprint history first two dims."
+      )
+  sparse_events = arrays.sparse_foot_event_memory
+  sparse_mask = arrays.sparse_foot_event_valid_mask
+  if sparse_events is None:
+    if sparse_mask is not None:
+      raise ValueError(
+        "sparse_foot_event_valid_mask requires sparse_foot_event_memory."
+      )
     return
-  if footprint.ndim != 3:
+  if sparse_events.ndim != 3:
     raise ValueError(
-      "privileged_footprint_history must have shape "
-      "(N, footprint_history_len, footprint_dim)."
+      "sparse_foot_event_memory must have shape "
+      "(N, sparse_event_memory_len, sparse_event_dim)."
     )
-  if footprint.shape[0] != num_samples:
+  if sparse_events.shape[0] != num_samples:
     raise ValueError(
-      "privileged_footprint_history first dimension does not match obs_history."
+      "sparse_foot_event_memory first dimension does not match obs_history."
     )
-  if np.isnan(footprint).any():
-    raise ValueError("privileged_footprint_history contains NaN values.")
-  if footprint_mask is None:
+  if np.isnan(sparse_events).any():
+    raise ValueError("sparse_foot_event_memory contains NaN values.")
+  if sparse_mask is None:
+    raise ValueError("sparse_foot_event_memory requires sparse_foot_event_valid_mask.")
+  if sparse_mask.shape != sparse_events.shape[:2]:
     raise ValueError(
-      "privileged_footprint_history requires privileged_footprint_valid_mask."
-    )
-  if footprint_mask.shape != footprint.shape[:2]:
-    raise ValueError(
-      "privileged_footprint_valid_mask must match footprint history first two dims."
+      "sparse_foot_event_valid_mask must match sparse memory first two dims."
     )
 
 
@@ -643,12 +925,40 @@ def filter_arrays_for_objective(
   """Restrict arrays to samples relevant to the configured objective."""
   if objective == "multitask":
     return arrays
-  if objective != "depth_only":
+  if objective == "depth_only":
+    depth_indices = np.nonzero(arrays.depth_valid_label.astype(np.bool_))[0]
+    if depth_indices.size == 0:
+      raise ValueError("depth_only objective requires at least one depth-valid sample.")
+    return subset_arrays(arrays, depth_indices)
+  if objective != "safe_landing":
     raise ValueError(f"Unsupported objective '{objective}'.")
-  depth_indices = np.nonzero(arrays.depth_valid_label.astype(np.bool_))[0]
-  if depth_indices.size == 0:
-    raise ValueError("depth_only objective requires at least one depth-valid sample.")
-  return subset_arrays(arrays, depth_indices)
+  if (
+    arrays.safe_stride_valid_label is None
+    and arrays.landing_touchdown_label is None
+    and arrays.collision_risk_label is None
+  ):
+    raise ValueError("safe_landing objective requires safe-landing label arrays.")
+  safe_stride_valid = (
+    np.zeros(arrays.obs_history.shape[0], dtype=np.bool_)
+    if arrays.safe_stride_valid_label is None
+    else arrays.safe_stride_valid_label.astype(np.bool_)
+  )
+  touchdown = (
+    np.zeros(arrays.obs_history.shape[0], dtype=np.bool_)
+    if arrays.landing_touchdown_label is None
+    else arrays.landing_touchdown_label.astype(np.bool_)
+  )
+  collision = (
+    np.zeros(arrays.obs_history.shape[0], dtype=np.bool_)
+    if arrays.collision_risk_label is None
+    else arrays.collision_risk_label.astype(np.float32) > 0.0
+  )
+  keep = arrays.stair_active_label.astype(np.bool_) | safe_stride_valid | touchdown
+  keep |= collision
+  indices = np.nonzero(keep)[0]
+  if indices.size == 0:
+    raise ValueError("safe_landing objective has no usable samples.")
+  return subset_arrays(arrays, indices)
 
 
 def sample_arrays_for_objective(
@@ -661,7 +971,23 @@ def sample_arrays_for_objective(
   """Subsample arrays with labels that match the learning objective."""
   if max_samples is None or arrays.obs_history.shape[0] <= max_samples:
     return arrays
-  labels = arrays.depth_bin_label if objective == "depth_only" else arrays.sample_type
+  if objective == "depth_only":
+    labels = arrays.depth_bin_label
+  elif objective == "safe_landing" and arrays.landing_touchdown_label is not None:
+    touchdown = arrays.landing_touchdown_label.astype(np.int64)
+    safe_stride = (
+      np.zeros(arrays.obs_history.shape[0], dtype=np.int64)
+      if arrays.safe_stride_valid_label is None
+      else arrays.safe_stride_valid_label.astype(np.int64)
+    )
+    collision = (
+      np.zeros(arrays.obs_history.shape[0], dtype=np.int64)
+      if arrays.collision_risk_label is None
+      else (arrays.collision_risk_label.astype(np.float32) > 0.5).astype(np.int64)
+    )
+    labels = touchdown + 2 * safe_stride + 4 * collision
+  else:
+    labels = arrays.sample_type
   indices = stratified_sample_indices(labels, max_samples, seed)
   return subset_arrays(arrays, indices)
 
@@ -682,6 +1008,44 @@ def subset_arrays(arrays: StairProbeArrays, indices: np.ndarray) -> StairProbeAr
     env_id=arrays.env_id[indices],
     frame_idx=arrays.frame_idx[indices],
     seed=arrays.seed[indices],
+    true_riser_height=(
+      None if arrays.true_riser_height is None else arrays.true_riser_height[indices]
+    ),
+    safe_landing_center=(
+      None
+      if arrays.safe_landing_center is None
+      else arrays.safe_landing_center[indices]
+    ),
+    minimum_safe_stride=(
+      None
+      if arrays.minimum_safe_stride is None
+      else arrays.minimum_safe_stride[indices]
+    ),
+    maximum_safe_stride=(
+      None
+      if arrays.maximum_safe_stride is None
+      else arrays.maximum_safe_stride[indices]
+    ),
+    safe_stride_valid_label=(
+      None
+      if arrays.safe_stride_valid_label is None
+      else arrays.safe_stride_valid_label[indices]
+    ),
+    landing_touchdown_label=(
+      None
+      if arrays.landing_touchdown_label is None
+      else arrays.landing_touchdown_label[indices]
+    ),
+    landing_quality_label=(
+      None
+      if arrays.landing_quality_label is None
+      else arrays.landing_quality_label[indices]
+    ),
+    collision_risk_label=(
+      None
+      if arrays.collision_risk_label is None
+      else arrays.collision_risk_label[indices]
+    ),
     privileged_footprint_history=(
       None
       if arrays.privileged_footprint_history is None
@@ -691,6 +1055,16 @@ def subset_arrays(arrays: StairProbeArrays, indices: np.ndarray) -> StairProbeAr
       None
       if arrays.privileged_footprint_valid_mask is None
       else arrays.privileged_footprint_valid_mask[indices]
+    ),
+    sparse_foot_event_memory=(
+      None
+      if arrays.sparse_foot_event_memory is None
+      else arrays.sparse_foot_event_memory[indices]
+    ),
+    sparse_foot_event_valid_mask=(
+      None
+      if arrays.sparse_foot_event_valid_mask is None
+      else arrays.sparse_foot_event_valid_mask[indices]
     ),
   )
 
@@ -818,9 +1192,17 @@ def forward_probe_model(
 ) -> dict[str, torch.Tensor]:
   """Run either a single-history or two-branch probe model."""
   footprint_history = batch.get("privileged_footprint_history")
-  if footprint_history is None:
+  sparse_event_memory = batch.get("sparse_foot_event_memory")
+  if footprint_history is not None and sparse_event_memory is not None:
+    raise ValueError("A two-branch batch cannot contain two secondary histories.")
+  if footprint_history is None and sparse_event_memory is None:
     return model(batch["obs_history"])
-  return model(batch["obs_history"], footprint_history)
+  secondary_history = footprint_history
+  if secondary_history is None:
+    secondary_history = sparse_event_memory
+  if secondary_history is None:
+    raise RuntimeError("Two-branch model requires a secondary history tensor.")
+  return model(batch["obs_history"], secondary_history)
 
 
 def zero_like_loss(outputs: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -835,7 +1217,7 @@ def compute_probe_loss(
   cfg: TrainStairProbeConfig,
 ) -> tuple[torch.Tensor, dict[str, float]]:
   """Compute the multi-task Stage 2B probe loss."""
-  if cfg.objective == "depth_only":
+  if cfg.objective in ("depth_only", "safe_landing"):
     active_loss = zero_like_loss(outputs)
     level_delta_loss = zero_like_loss(outputs)
     relative_level_loss = zero_like_loss(outputs)
@@ -858,7 +1240,10 @@ def compute_probe_loss(
     )
 
   depth_valid = batch["depth_valid"].bool()
-  if bool(depth_valid.any().item()):
+  if cfg.objective == "safe_landing":
+    depth_bin_loss = zero_like_loss(outputs)
+    depth_reg_loss = zero_like_loss(outputs)
+  elif bool(depth_valid.any().item()):
     depth_bin_loss = F.cross_entropy(
       outputs["depth_bin_logits"][depth_valid],
       batch["depth_bin"][depth_valid],
@@ -880,6 +1265,54 @@ def compute_probe_loss(
     + cfg.depth_bin_loss_coef * depth_bin_loss
     + cfg.depth_reg_loss_coef * depth_reg_loss
   )
+  if cfg.objective == "safe_landing":
+    touchdown_loss = F.binary_cross_entropy_with_logits(
+      outputs["touchdown_logit"].squeeze(-1),
+      batch["landing_touchdown"],
+    )
+    touchdown_mask = batch["landing_touchdown"].bool()
+    landing_quality_pred = torch.sigmoid(outputs["landing_quality"].squeeze(-1))
+    if bool(touchdown_mask.any().item()):
+      landing_quality_loss = F.smooth_l1_loss(
+        landing_quality_pred[touchdown_mask],
+        batch["landing_quality"][touchdown_mask],
+        beta=0.1,
+      )
+    else:
+      landing_quality_loss = zero_like_loss(outputs)
+    collision_risk_loss = F.smooth_l1_loss(
+      torch.sigmoid(outputs["collision_risk"].squeeze(-1)),
+      batch["collision_risk"],
+      beta=0.1,
+    )
+    safe_stride_valid = batch["safe_stride_valid"].bool()
+    if bool(safe_stride_valid.any().item()):
+      safe_stride_target = torch.stack(
+        [
+          batch["minimum_safe_stride"],
+          batch["maximum_safe_stride"],
+          batch["safe_landing_center"],
+        ],
+        dim=-1,
+      )
+      safe_stride_loss = F.smooth_l1_loss(
+        outputs["safe_stride"][safe_stride_valid],
+        safe_stride_target[safe_stride_valid],
+        beta=cfg.safe_stride_huber_beta,
+      )
+    else:
+      safe_stride_loss = zero_like_loss(outputs)
+    total = (
+      cfg.touchdown_loss_coef * touchdown_loss
+      + cfg.landing_quality_loss_coef * landing_quality_loss
+      + cfg.collision_risk_loss_coef * collision_risk_loss
+      + cfg.safe_stride_loss_coef * safe_stride_loss
+    )
+  else:
+    touchdown_loss = zero_like_loss(outputs)
+    landing_quality_loss = zero_like_loss(outputs)
+    collision_risk_loss = zero_like_loss(outputs)
+    safe_stride_loss = zero_like_loss(outputs)
   parts = {
     "loss": float(total.detach().cpu().item()),
     "active_loss": float(active_loss.detach().cpu().item()),
@@ -887,6 +1320,10 @@ def compute_probe_loss(
     "relative_level_loss": float(relative_level_loss.detach().cpu().item()),
     "depth_bin_loss": float(depth_bin_loss.detach().cpu().item()),
     "depth_reg_loss": float(depth_reg_loss.detach().cpu().item()),
+    "touchdown_loss": float(touchdown_loss.detach().cpu().item()),
+    "landing_quality_loss": float(landing_quality_loss.detach().cpu().item()),
+    "collision_risk_loss": float(collision_risk_loss.detach().cpu().item()),
+    "safe_stride_loss": float(safe_stride_loss.detach().cpu().item()),
   }
   return total, parts
 
@@ -902,12 +1339,19 @@ def resolve_selection_metric(cfg: TrainStairProbeConfig) -> MetricName:
     return cfg.selection_metric
   if cfg.objective == "depth_only":
     return "depth_bin_macro_f1"
+  if cfg.objective == "safe_landing":
+    return "val_loss"
   return "val_loss"
 
 
 def metric_is_lower_better(metric_name: str) -> bool:
   """Return whether lower values are better for a validation metric."""
-  return metric_name in {"val_loss", "depth_mae_m"}
+  return metric_name in {
+    "val_loss",
+    "depth_mae_m",
+    "safe_stride_center_mae_m",
+    "landing_quality_mae",
+  }
 
 
 def metric_improved(metric_name: str, value: float, best_value: float | None) -> bool:
@@ -969,6 +1413,7 @@ def compute_metrics(
   val_loss: float,
 ) -> dict[str, float]:
   """Compute Stage 2B learnability metrics."""
+  sample_count = int(labels["stair_active"].shape[0])
   active_label = labels["stair_active"].astype(np.bool_)
   active_pred = predictions["stair_active_prob"] >= 0.5
   level_delta_label = labels["level_delta"].astype(np.int64)
@@ -980,6 +1425,48 @@ def compute_metrics(
   depth_bin_pred = predictions["depth_bin_pred"].astype(np.int64)
   pred_depth_m = predictions_to_depth_m(predictions["depth_reg"].astype(np.float32))
   true_depth_m = labels["true_tread_depth"].astype(np.float32)
+  touchdown_label = labels.get(
+    "landing_touchdown",
+    np.zeros(sample_count, dtype=np.float32),
+  ).astype(np.bool_)
+  touchdown_prob = predictions.get(
+    "touchdown_prob",
+    np.zeros(sample_count, dtype=np.float32),
+  ).astype(np.float32)
+  touchdown_pred = touchdown_prob >= 0.5
+  landing_quality_label = labels.get(
+    "landing_quality",
+    np.zeros(sample_count, dtype=np.float32),
+  ).astype(np.float32)
+  landing_quality_pred = predictions.get(
+    "landing_quality_pred",
+    np.zeros(sample_count, dtype=np.float32),
+  ).astype(np.float32)
+  collision_risk_label = labels.get(
+    "collision_risk",
+    np.zeros(sample_count, dtype=np.float32),
+  ).astype(np.float32)
+  collision_risk_pred = predictions.get(
+    "collision_risk_pred",
+    np.zeros(sample_count, dtype=np.float32),
+  ).astype(np.float32)
+  safe_stride_valid = labels.get(
+    "safe_stride_valid",
+    np.zeros(sample_count, dtype=np.bool_),
+  ).astype(np.bool_)
+  safe_stride_pred = predictions.get(
+    "safe_stride_pred",
+    np.zeros((sample_count, 3), dtype=np.float32),
+  ).astype(np.float32)
+  safe_stride_targets = np.stack(
+    [
+      labels.get("minimum_safe_stride", np.zeros(sample_count, dtype=np.float32)),
+      labels.get("maximum_safe_stride", np.zeros(sample_count, dtype=np.float32)),
+      labels.get("safe_landing_center", np.zeros(sample_count, dtype=np.float32)),
+    ],
+    axis=-1,
+  ).astype(np.float32)
+  landing_quality_mask = touchdown_label
 
   metrics = {
     "val_loss": float(val_loss),
@@ -998,7 +1485,43 @@ def compute_metrics(
     "relative_level_accuracy": float(np.mean(relative_label == relative_pred)),
     "relative_level_mae": float(np.mean(np.abs(relative_label - relative_pred))),
     "depth_valid_count": float(depth_valid.sum()),
+    "touchdown_count": float(touchdown_label.sum()),
+    "touchdown_accuracy": float(np.mean(touchdown_label == touchdown_pred)),
+    "touchdown_f1": binary_f1(touchdown_label, touchdown_pred),
+    "landing_quality_mae": float(
+      np.mean(
+        np.abs(
+          landing_quality_pred[landing_quality_mask]
+          - landing_quality_label[landing_quality_mask]
+        )
+      )
+      if bool(landing_quality_mask.any())
+      else 0.0
+    ),
+    "collision_risk_mae": float(
+      np.mean(np.abs(collision_risk_pred - collision_risk_label))
+    ),
+    "safe_stride_valid_count": float(safe_stride_valid.sum()),
   }
+  if bool(safe_stride_valid.any()):
+    safe_stride_abs_error = np.abs(
+      safe_stride_pred[safe_stride_valid] - safe_stride_targets[safe_stride_valid]
+    )
+    metrics.update(
+      {
+        "safe_stride_min_mae_m": float(safe_stride_abs_error[:, 0].mean()),
+        "safe_stride_max_mae_m": float(safe_stride_abs_error[:, 1].mean()),
+        "safe_stride_center_mae_m": float(safe_stride_abs_error[:, 2].mean()),
+      }
+    )
+  else:
+    metrics.update(
+      {
+        "safe_stride_min_mae_m": 0.0,
+        "safe_stride_max_mae_m": 0.0,
+        "safe_stride_center_mae_m": 0.0,
+      }
+    )
   if bool(depth_valid.any()):
     depth_group_label = depth_bins_to_groups(depth_bin_label[depth_valid])
     depth_group_pred = depth_bins_to_groups(depth_bin_pred[depth_valid])
@@ -1038,14 +1561,39 @@ def compute_metrics(
 
 def compute_baseline_metrics(labels: dict[str, np.ndarray]) -> dict[str, float]:
   """Compute majority/constant baselines for the same validation split."""
+  sample_count = int(labels["stair_active"].shape[0])
   active_label = labels["stair_active"].astype(np.bool_)
   level_delta_label = labels["level_delta"].astype(np.int64)
   relative_label = labels["relative_level"].astype(np.int64)
   depth_valid = labels["depth_valid"].astype(np.bool_)
   depth_bin_label = labels["depth_bin"].astype(np.int64)
   true_depth_m = labels["true_tread_depth"].astype(np.float32)
+  touchdown_label = labels.get(
+    "landing_touchdown",
+    np.zeros(sample_count, dtype=np.float32),
+  ).astype(np.bool_)
+  landing_quality_label = labels.get(
+    "landing_quality",
+    np.zeros(sample_count, dtype=np.float32),
+  ).astype(np.float32)
+  collision_risk_label = labels.get(
+    "collision_risk",
+    np.zeros(sample_count, dtype=np.float32),
+  ).astype(np.float32)
+  safe_stride_valid = labels.get(
+    "safe_stride_valid",
+    np.zeros(sample_count, dtype=np.bool_),
+  ).astype(np.bool_)
+  safe_landing_center = labels.get(
+    "safe_landing_center",
+    np.zeros(sample_count, dtype=np.float32),
+  ).astype(np.float32)
 
   active_majority = np.full(active_label.shape, active_label.mean() >= 0.5)
+  touchdown_majority = np.full(
+    touchdown_label.shape,
+    touchdown_label.mean() >= 0.5,
+  )
   level_majority_class = int(
     np.bincount(level_delta_label, minlength=NUM_LEVEL_DELTA_CLASSES).argmax()
   )
@@ -1076,7 +1624,26 @@ def compute_baseline_metrics(labels: dict[str, np.ndarray]) -> dict[str, float]:
       np.mean(np.abs(relative_majority - relative_label))
     ),
     "depth_valid_count": float(depth_valid.sum()),
+    "touchdown_majority_accuracy": float(
+      np.mean(touchdown_majority == touchdown_label)
+    ),
+    "touchdown_majority_f1": binary_f1(touchdown_label, touchdown_majority),
+    "landing_quality_mean_baseline_mae": float(
+      np.abs(landing_quality_label - landing_quality_label.mean()).mean()
+    ),
+    "collision_risk_mean_baseline_mae": float(
+      np.abs(collision_risk_label - collision_risk_label.mean()).mean()
+    ),
+    "safe_stride_valid_count": float(safe_stride_valid.sum()),
   }
+  if bool(safe_stride_valid.any()):
+    valid_center = safe_landing_center[safe_stride_valid]
+    center_mean = np.full(valid_center.shape, valid_center.mean())
+    baselines["safe_stride_center_mean_baseline_mae_m"] = float(
+      np.abs(center_mean - valid_center).mean()
+    )
+  else:
+    baselines["safe_stride_center_mean_baseline_mae_m"] = 0.0
   if bool(depth_valid.any()):
     valid_depth_bins = depth_bin_label[depth_valid]
     depth_majority_class = int(
@@ -1256,6 +1823,14 @@ def evaluate(
     "depth_bin": [],
     "depth_valid": [],
     "true_tread_depth": [],
+    "true_riser_height": [],
+    "safe_landing_center": [],
+    "minimum_safe_stride": [],
+    "maximum_safe_stride": [],
+    "safe_stride_valid": [],
+    "landing_touchdown": [],
+    "landing_quality": [],
+    "collision_risk": [],
     "sequence_id": [],
     "env_id": [],
     "frame_idx": [],
@@ -1267,6 +1842,10 @@ def evaluate(
     "relative_level_pred": [],
     "depth_bin_pred": [],
     "depth_reg": [],
+    "touchdown_prob": [],
+    "landing_quality_pred": [],
+    "collision_risk_pred": [],
+    "safe_stride_pred": [],
   }
 
   for batch in loader:
@@ -1284,6 +1863,20 @@ def evaluate(
     label_chunks["depth_bin"].append(batch["depth_bin"].cpu().numpy())
     label_chunks["depth_valid"].append(batch["depth_valid"].cpu().numpy())
     label_chunks["true_tread_depth"].append(batch["true_tread_depth"].cpu().numpy())
+    label_chunks["true_riser_height"].append(batch["true_riser_height"].cpu().numpy())
+    label_chunks["safe_landing_center"].append(
+      batch["safe_landing_center"].cpu().numpy()
+    )
+    label_chunks["minimum_safe_stride"].append(
+      batch["minimum_safe_stride"].cpu().numpy()
+    )
+    label_chunks["maximum_safe_stride"].append(
+      batch["maximum_safe_stride"].cpu().numpy()
+    )
+    label_chunks["safe_stride_valid"].append(batch["safe_stride_valid"].cpu().numpy())
+    label_chunks["landing_touchdown"].append(batch["landing_touchdown"].cpu().numpy())
+    label_chunks["landing_quality"].append(batch["landing_quality"].cpu().numpy())
+    label_chunks["collision_risk"].append(batch["collision_risk"].cpu().numpy())
     label_chunks["sequence_id"].append(batch["sequence_id"].cpu().numpy())
     label_chunks["env_id"].append(batch["env_id"].cpu().numpy())
     label_chunks["frame_idx"].append(batch["frame_idx"].cpu().numpy())
@@ -1304,6 +1897,16 @@ def evaluate(
     prediction_chunks["depth_reg"].append(
       outputs["depth_reg"].squeeze(-1).cpu().numpy()
     )
+    prediction_chunks["touchdown_prob"].append(
+      torch.sigmoid(outputs["touchdown_logit"]).squeeze(-1).cpu().numpy()
+    )
+    prediction_chunks["landing_quality_pred"].append(
+      torch.sigmoid(outputs["landing_quality"]).squeeze(-1).cpu().numpy()
+    )
+    prediction_chunks["collision_risk_pred"].append(
+      torch.sigmoid(outputs["collision_risk"]).squeeze(-1).cpu().numpy()
+    )
+    prediction_chunks["safe_stride_pred"].append(outputs["safe_stride"].cpu().numpy())
 
   labels = stack_batches(label_chunks)
   predictions = stack_batches(prediction_chunks)
@@ -1365,9 +1968,9 @@ def make_probe_model(
   """Construct the configured Stage 2B probe model."""
   if cfg.model != "gru":
     raise ValueError(f"Unsupported probe model '{cfg.model}'.")
-  if cfg.input_mode == "two_branch_fusion":
+  if cfg.input_mode in TWO_BRANCH_INPUT_MODES:
     if footprint_obs_dim is None:
-      raise ValueError("two_branch_fusion requires footprint_obs_dim.")
+      raise ValueError(f"{cfg.input_mode} requires a secondary branch obs dim.")
     return TwoBranchStairProbeGRU(
       latent_obs_dim=cfg.obs_dim if obs_dim is None else obs_dim,
       footprint_obs_dim=footprint_obs_dim,
@@ -1447,12 +2050,26 @@ def write_predictions_csv(
     "depth_bin_pred",
     "true_tread_depth",
     "pred_tread_depth",
+    "safe_stride_valid",
+    "minimum_safe_stride",
+    "maximum_safe_stride",
+    "safe_landing_center",
+    "pred_minimum_safe_stride",
+    "pred_maximum_safe_stride",
+    "pred_safe_landing_center",
+    "landing_touchdown_label",
+    "touchdown_prob",
+    "landing_quality_label",
+    "landing_quality_pred",
+    "collision_risk_label",
+    "collision_risk_pred",
   )
   path.parent.mkdir(parents=True, exist_ok=True)
   with path.open("w", encoding="utf-8", newline="") as stream:
     writer = csv.DictWriter(stream, fieldnames=fieldnames)
     writer.writeheader()
     pred_depth = predictions_to_depth_m(predictions["depth_reg"].astype(np.float32))
+    safe_stride_pred = predictions["safe_stride_pred"].astype(np.float32)
     for row in selected:
       writer.writerow(
         {
@@ -1472,6 +2089,19 @@ def write_predictions_csv(
           "depth_bin_pred": int(predictions["depth_bin_pred"][row]),
           "true_tread_depth": float(predictions["true_tread_depth"][row]),
           "pred_tread_depth": float(pred_depth[row]),
+          "safe_stride_valid": int(predictions["safe_stride_valid"][row]),
+          "minimum_safe_stride": float(predictions["minimum_safe_stride"][row]),
+          "maximum_safe_stride": float(predictions["maximum_safe_stride"][row]),
+          "safe_landing_center": float(predictions["safe_landing_center"][row]),
+          "pred_minimum_safe_stride": float(safe_stride_pred[row, 0]),
+          "pred_maximum_safe_stride": float(safe_stride_pred[row, 1]),
+          "pred_safe_landing_center": float(safe_stride_pred[row, 2]),
+          "landing_touchdown_label": int(predictions["landing_touchdown"][row]),
+          "touchdown_prob": float(predictions["touchdown_prob"][row]),
+          "landing_quality_label": float(predictions["landing_quality"][row]),
+          "landing_quality_pred": float(predictions["landing_quality_pred"][row]),
+          "collision_risk_label": float(predictions["collision_risk"][row]),
+          "collision_risk_pred": float(predictions["collision_risk_pred"][row]),
         }
       )
 
@@ -1513,6 +2143,7 @@ def run_train(cfg: TrainStairProbeConfig) -> dict[str, object]:
     split.train_indices,
     history_len=cfg.history_len,
     footprint_history_len=cfg.footprint_history_len,
+    sparse_event_memory_len=cfg.sparse_event_memory_len,
     input_mode=cfg.input_mode,
   )
   val_dataset = StairProbeTorchDataset(
@@ -1520,6 +2151,7 @@ def run_train(cfg: TrainStairProbeConfig) -> dict[str, object]:
     split.val_indices,
     history_len=cfg.history_len,
     footprint_history_len=cfg.footprint_history_len,
+    sparse_event_memory_len=cfg.sparse_event_memory_len,
     input_mode=cfg.input_mode,
   )
   train_loader = make_loader(
@@ -1541,17 +2173,30 @@ def run_train(cfg: TrainStairProbeConfig) -> dict[str, object]:
   model_latent_obs_dim = int(arrays.obs_history.shape[-1])
   footprint = arrays.privileged_footprint_history
   model_footprint_obs_dim = None if footprint is None else int(footprint.shape[-1])
+  sparse_events = arrays.sparse_foot_event_memory
+  model_sparse_event_obs_dim = (
+    None if sparse_events is None else int(sparse_events.shape[-1])
+  )
   model_latent_history_len = cfg.history_len
   model_footprint_history_len = (
-    None if cfg.input_mode == "latent_only" else cfg.footprint_history_len
+    cfg.footprint_history_len if cfg.input_mode in FOOTPRINT_INPUT_MODES else None
   )
-  if cfg.input_mode == "two_branch_fusion":
-    if model_footprint_obs_dim is None:
-      raise ValueError("two_branch_fusion requires privileged_footprint_history.")
+  model_sparse_event_history_len = (
+    cfg.sparse_event_memory_len if cfg.input_mode in SPARSE_EVENT_INPUT_MODES else None
+  )
+  if cfg.input_mode in TWO_BRANCH_INPUT_MODES:
+    if cfg.input_mode == "two_branch_fusion":
+      model_secondary_obs_dim = model_footprint_obs_dim
+      missing_message = "two_branch_fusion requires privileged_footprint_history."
+    else:
+      model_secondary_obs_dim = model_sparse_event_obs_dim
+      missing_message = "two_branch_sparse_event requires sparse_foot_event_memory."
+    if model_secondary_obs_dim is None:
+      raise ValueError(missing_message)
     model = make_probe_model(
       cfg,
       obs_dim=model_latent_obs_dim,
-      footprint_obs_dim=model_footprint_obs_dim,
+      footprint_obs_dim=model_secondary_obs_dim,
     ).to(device)
   else:
     model = make_probe_model(cfg, obs_dim=model_obs_dim).to(device)
@@ -1570,6 +2215,9 @@ def run_train(cfg: TrainStairProbeConfig) -> dict[str, object]:
     "depth_bin_macro_f1",
     "depth_3group_macro_f1",
     "depth_mae_m",
+    "safe_stride_center_mae_m",
+    "landing_quality_mae",
+    "touchdown_f1",
   )
   best_by_metric: dict[str, dict[str, float | int]] = {}
   best_epoch = -1
@@ -1583,6 +2231,7 @@ def run_train(cfg: TrainStairProbeConfig) -> dict[str, object]:
     f"model_obs_dim={model_obs_dim}",
     f"latent_obs_dim={model_latent_obs_dim}",
     f"footprint_obs_dim={model_footprint_obs_dim}",
+    f"sparse_event_obs_dim={model_sparse_event_obs_dim}",
     f"objective={cfg.objective}",
     f"selection_metric={selection_metric}",
     f"probe_latent_dim={cfg.probe_latent_dim}",
@@ -1617,6 +2266,8 @@ def run_train(cfg: TrainStairProbeConfig) -> dict[str, object]:
       f"depth_bin_macro_f1={val_metrics['depth_bin_macro_f1']:.4f}",
       f"depth_3group_macro_f1={val_metrics['depth_3group_macro_f1']:.4f}",
       f"depth_mae_m={val_metrics['depth_mae_m']:.4f}",
+      f"touchdown_f1={val_metrics['touchdown_f1']:.4f}",
+      f"safe_stride_center_mae_m={val_metrics['safe_stride_center_mae_m']:.4f}",
     )
     state_to_save: dict[str, torch.Tensor] | None = None
     for metric_name in tracked_metrics:
@@ -1638,8 +2289,10 @@ def run_train(cfg: TrainStairProbeConfig) -> dict[str, object]:
           "model_history_len": model_history_len,
           "model_latent_obs_dim": model_latent_obs_dim,
           "model_footprint_obs_dim": model_footprint_obs_dim,
+          "model_sparse_event_obs_dim": model_sparse_event_obs_dim,
           "model_latent_history_len": model_latent_history_len,
           "model_footprint_history_len": model_footprint_history_len,
+          "model_sparse_event_history_len": model_sparse_event_history_len,
           "epoch": epoch,
           "metrics": val_metrics,
           "selection_metric": metric_name,
@@ -1657,8 +2310,10 @@ def run_train(cfg: TrainStairProbeConfig) -> dict[str, object]:
             "model_history_len": model_history_len,
             "model_latent_obs_dim": model_latent_obs_dim,
             "model_footprint_obs_dim": model_footprint_obs_dim,
+            "model_sparse_event_obs_dim": model_sparse_event_obs_dim,
             "model_latent_history_len": model_latent_history_len,
             "model_footprint_history_len": model_footprint_history_len,
+            "model_sparse_event_history_len": model_sparse_event_history_len,
             "epoch": epoch,
             "metrics": val_metrics,
             "selection_metric": selection_metric,
@@ -1698,15 +2353,28 @@ def run_train(cfg: TrainStairProbeConfig) -> dict[str, object]:
     "model_footprint_obs_dim": (
       None if model_footprint_obs_dim is None else int(model_footprint_obs_dim)
     ),
+    "model_sparse_event_obs_dim": (
+      None if model_sparse_event_obs_dim is None else int(model_sparse_event_obs_dim)
+    ),
     "model_latent_history_len": int(model_latent_history_len),
     "model_footprint_history_len": (
       None if model_footprint_history_len is None else int(model_footprint_history_len)
+    ),
+    "model_sparse_event_history_len": (
+      None
+      if model_sparse_event_history_len is None
+      else int(model_sparse_event_history_len)
     ),
     "latent_history_shape": tuple(int(x) for x in arrays.obs_history.shape[1:]),
     "privileged_footprint_history_shape": (
       None
       if arrays.privileged_footprint_history is None
       else tuple(int(x) for x in arrays.privileged_footprint_history.shape[1:])
+    ),
+    "sparse_foot_event_memory_shape": (
+      None
+      if arrays.sparse_foot_event_memory is None
+      else tuple(int(x) for x in arrays.sparse_foot_event_memory.shape[1:])
     ),
     "train_samples": int(split.train_indices.shape[0]),
     "val_samples": int(split.val_indices.shape[0]),
@@ -1721,14 +2389,22 @@ def run_train(cfg: TrainStairProbeConfig) -> dict[str, object]:
       "footprint_obs_dim": (
         None if model_footprint_obs_dim is None else int(model_footprint_obs_dim)
       ),
+      "sparse_event_obs_dim": (
+        None if model_sparse_event_obs_dim is None else int(model_sparse_event_obs_dim)
+      ),
       "latent_history_len": int(model_latent_history_len),
       "footprint_history_len": (
         None
         if model_footprint_history_len is None
         else int(model_footprint_history_len)
       ),
+      "sparse_event_history_len": (
+        None
+        if model_sparse_event_history_len is None
+        else int(model_sparse_event_history_len)
+      ),
       "probe_latent_dim": cfg.probe_latent_dim,
-      "diagnostic_output_dim": 22,
+      "diagnostic_output_dim": DIAGNOSTIC_OUTPUT_DIM,
     },
     "best_epoch": best_epoch,
     "best_by_metric": best_by_metric,
@@ -1747,6 +2423,8 @@ def run_train(cfg: TrainStairProbeConfig) -> dict[str, object]:
     f"depth_bin_macro_f1={best_metrics['depth_bin_macro_f1']:.4f}",
     f"depth_3group_macro_f1={best_metrics['depth_3group_macro_f1']:.4f}",
     f"depth_mae_m={best_metrics['depth_mae_m']:.4f}",
+    f"touchdown_f1={best_metrics['touchdown_f1']:.4f}",
+    f"safe_stride_center_mae_m={best_metrics['safe_stride_center_mae_m']:.4f}",
   )
   return payload
 

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import Any, cast
+
 import numpy as np
 import torch
 from scripts.velocity_eval.export_stair_probe_dataset import (
@@ -8,14 +11,21 @@ from scripts.velocity_eval.export_stair_probe_dataset import (
   LEVEL_DELTA_SKIP_OR_UNCERTAIN,
   LEVEL_DELTA_UP_ONE,
   SAMPLE_TYPE_TO_ID,
+  STAIR_CURRENT_CONTACT_DURATION_KEY,
+  STAIR_CURRENT_GROUND_CONTACT_KEY,
+  TOE_RISER_NEW_HIT_KEY,
+  SparseFootEventMemory,
   StairProbeDatasetBuilder,
   StairProbeHistoryBuffer,
   StairProbeLabelBatch,
   StairProbeLevelState,
   forbidden_input_feature_names,
+  input_feature_slices,
   input_obs_dim,
+  load_g1_sparse_footprint_geometry,
   privileged_footprint_features_from_tensors,
   privileged_footprint_obs_dim,
+  sparse_foot_event_obs_dim,
 )
 
 
@@ -170,6 +180,14 @@ def test_transition_sample_takes_priority_over_partial_uncertain() -> None:
     stable_landing_label=torch.tensor([False]),
     partial_uncertain_label=torch.tensor([True]),
     sequence_id=torch.tensor([0]),
+    true_riser_height=torch.tensor([0.18]),
+    safe_landing_center=torch.tensor([0.30]),
+    minimum_safe_stride=torch.tensor([0.25]),
+    maximum_safe_stride=torch.tensor([0.35]),
+    safe_stride_valid_label=torch.tensor([True]),
+    landing_touchdown_label=torch.tensor([False]),
+    landing_quality_label=torch.tensor([0.0]),
+    collision_risk_label=torch.tensor([0.0]),
   )
 
   builder.collect(labels, frame_idx=1)
@@ -233,3 +251,131 @@ def test_builder_stores_privileged_footprint_history() -> None:
 
   assert arrays["privileged_footprint_history"].shape == (1, 3, footprint_dim)
   assert arrays["privileged_footprint_valid_mask"].tolist() == [[False, False, True]]
+
+
+def test_sparse_foot_event_memory_records_causal_touchdown() -> None:
+  memory = SparseFootEventMemory(num_envs=1, memory_len=3, device="cpu")
+  latent = torch.zeros(1, input_obs_dim())
+  slices = input_feature_slices()
+  latent[0, slices["left_toe_pos_body"]] = torch.tensor([0.2, 0.1, 0.3])
+  latent[0, slices["left_heel_pos_body"]] = torch.tensor([0.0, 0.1, 0.3])
+  latent[0, slices["left_toe_vel_body"]] = torch.tensor([0.4, 0.0, -0.2])
+  env: Any = SimpleNamespace(
+    num_envs=1,
+    device=torch.device("cpu"),
+    step_dt=0.02,
+    episode_length_buf=torch.tensor([0]),
+    root_pos_w=torch.zeros(1, 3),
+    root_quat_w=torch.tensor([[1.0, 0.0, 0.0, 0.0]]),
+    extras={
+      STAIR_CURRENT_GROUND_CONTACT_KEY: torch.tensor([[True, False]]),
+      STAIR_CURRENT_CONTACT_DURATION_KEY: torch.tensor([[0.02, 0.0]]),
+    },
+  )
+
+  memory.begin_step(None, 0.02)
+  memory.update_from_env_and_latent(cast(Any, env), latent)
+
+  assert not memory.valid_mask.any()
+
+  env.episode_length_buf += 1
+  env.extras[STAIR_CURRENT_GROUND_CONTACT_KEY] = torch.tensor([[False, False]])
+  memory.begin_step(None, 0.02)
+  memory.update_from_env_and_latent(cast(Any, env), latent)
+  env.episode_length_buf += 1
+  env.extras[STAIR_CURRENT_GROUND_CONTACT_KEY] = torch.tensor([[True, False]])
+  memory.begin_step(None, 0.02)
+  memory.update_from_env_and_latent(cast(Any, env), latent)
+
+  event = memory.memory[0, 0]
+  assert memory.valid_mask.tolist() == [[True, False, False]]
+  assert event[0].item() == 1.0
+  assert event[1].item() == 1.0
+  assert event[2].item() == 0.0
+  assert event[3].item() == 1.0
+  assert event[6].item() == 1.0
+  assert torch.isclose(event[7], torch.tensor(0.1))
+  assert torch.isclose(event[10], torch.tensor(0.2))
+  assert torch.isclose(event[12], torch.tensor(0.0))
+  assert torch.isclose(event[14], torch.tensor(0.037))
+  env.episode_length_buf += 1
+  env.root_pos_w[:, 0] = 0.05
+  memory.begin_step(None, 0.02)
+  memory.update_from_env_and_latent(cast(Any, env), latent)
+  assert torch.isclose(memory.memory[0, 0, 7], torch.tensor(0.05))
+  assert torch.isclose(memory.memory[0, 0, 10], torch.tensor(0.15))
+  assert torch.isclose(memory.memory[0, 0, 12], torch.tensor(-0.05))
+
+
+def test_sparse_foot_event_memory_records_toe_riser_hit() -> None:
+  memory = SparseFootEventMemory(num_envs=1, memory_len=2, device="cpu")
+  latent = torch.zeros(1, input_obs_dim())
+  slices = input_feature_slices()
+  latent[0, slices["right_toe_pos_body"]] = torch.tensor([0.4, -0.1, 0.2])
+  latent[0, slices["right_heel_pos_body"]] = torch.tensor([0.2, -0.1, 0.2])
+  latent[0, slices["right_toe_vel_body"]] = torch.tensor([0.1, 0.0, 0.3])
+  env: Any = SimpleNamespace(
+    num_envs=1,
+    device=torch.device("cpu"),
+    step_dt=0.02,
+    episode_length_buf=torch.tensor([0]),
+    root_pos_w=torch.zeros(1, 3),
+    root_quat_w=torch.tensor([[1.0, 0.0, 0.0, 0.0]]),
+    extras={
+      STAIR_CURRENT_GROUND_CONTACT_KEY: torch.tensor([[False, False]]),
+      STAIR_CURRENT_CONTACT_DURATION_KEY: torch.tensor([[0.0, 0.0]]),
+      TOE_RISER_NEW_HIT_KEY: torch.tensor([[False, True]]),
+    },
+  )
+
+  memory.begin_step(None, 0.02)
+  memory.update_from_env_and_latent(cast(Any, env), latent)
+
+  event = memory.memory[0, 0]
+  assert memory.valid_mask.tolist() == [[True, False]]
+  assert event[1].item() == 0.0
+  assert event[2].item() == 1.0
+  assert event[4].item() == 1.0
+  assert torch.isclose(event[7], torch.tensor(0.4))
+  assert torch.isclose(event[10], torch.tensor(0.4))
+  assert torch.isclose(event[12], torch.tensor(0.2))
+  assert torch.isclose(event[14], torch.tensor(0.037))
+
+
+def test_g1_sparse_footprint_geometry_uses_xml_collision_capsules() -> None:
+  geometry = load_g1_sparse_footprint_geometry()
+
+  assert geometry.rear_x == -0.064
+  assert geometry.front_x == 0.14200000000000002
+  assert geometry.half_width == 0.037
+  assert geometry.toe_anchor_x == 0.12
+  assert geometry.heel_anchor_x == -0.05
+
+
+def test_builder_stores_sparse_foot_event_memory() -> None:
+  obs_dim = input_obs_dim()
+  sparse_dim = sparse_foot_event_obs_dim()
+  builder = StairProbeDatasetBuilder(
+    num_envs=1,
+    history_len=2,
+    obs_dim=obs_dim,
+    sparse_event_dim=sparse_dim,
+    sparse_event_memory_len=3,
+    max_samples=8,
+    seed=42,
+    device="cpu",
+    flat_sample_period=1,
+  )
+  builder.push_observations(torch.ones(1, obs_dim), torch.tensor([True]))
+  memory = torch.zeros(1, 3, sparse_dim)
+  memory[0, 0, 0] = 1.0
+  valid = torch.tensor([[True, False, False]])
+  builder.set_sparse_foot_event_memory(memory, valid)
+  labels = _update_single_env(StairProbeLevelState(num_envs=1), layer=-1, active=False)
+
+  builder.collect(labels, frame_idx=1)
+  arrays = builder.as_arrays()
+
+  assert arrays["sparse_foot_event_memory"].shape == (1, 3, sparse_dim)
+  assert arrays["sparse_foot_event_valid_mask"].tolist() == [[True, False, False]]
+  assert arrays["sparse_foot_event_memory"][0, 0, 0] == 1.0

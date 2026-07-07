@@ -8,6 +8,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, cast
+from xml.etree import ElementTree as ET
 
 import numpy as np
 import torch
@@ -23,19 +24,30 @@ from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg
 from mjlab.tasks.velocity.mdp.stair_geometry import (
+  COLLISION_RISK_KEY,
+  LANDING_QUALITY_KEY,
+  LANDING_TOUCHDOWN_KEY,
+  MINIMUM_SAFE_STRIDE_KEY,
+  MINIMUM_SAFE_STRIDE_UPPER_KEY,
+  MINIMUM_SAFE_STRIDE_VALID_KEY,
+  SAFE_LANDING_CENTER_KEY,
   STAIR_CURRENT_CONTACT_DURATION_KEY,
   STAIR_CURRENT_GROUND_CONTACT_KEY,
   STAIR_CURRENT_STAIR_SUPPORT_KEY,
   STAIR_CURRENT_SUPPORT_FRACTION_KEY,
   STAIR_CURRENT_SUPPORT_LAYER_KEY,
   STAIR_PHASE_KEY,
+  STAIR_RISER_HEIGHT_LABEL_KEY,
   STAIR_SEQUENCE_ID_KEY,
   STAIR_SHAPE_LABEL_VALID_KEY,
   STAIR_TREAD_DEPTH_LABEL_KEY,
+  TOE_RISER_NEW_HIT_BY_FOOT_KEY,
+  TOE_RISER_NEW_HIT_KEY,
 )
 from mjlab.tasks.velocity.mdp.stair_sequence_logging import (
   stair_sequence_event_logger,
 )
+from mjlab.utils.lab_api.math import quat_apply, quat_apply_inverse, yaw_quat
 from mjlab.utils.lstm import reset_policy_state_from_step
 from mjlab.utils.torch import configure_torch_backends
 
@@ -125,6 +137,129 @@ PRIVILEGED_FOOTPRINT_FEATURE_GROUPS: tuple[tuple[str, int], ...] = (
 )
 """Simulation-only footprint anchor features for privileged Stage 2 diagnostics."""
 
+SPARSE_FOOT_EVENT_FEATURE_GROUPS: tuple[tuple[str, int], ...] = (
+  ("event_present", 1),
+  ("tread_touchdown_event", 1),
+  ("toe_riser_hit_event", 1),
+  ("left_foot", 1),
+  ("right_foot", 1),
+  ("age_norm", 1),
+  ("confidence", 1),
+  ("point_s_current_base_yaw", 1),
+  ("point_y_current_base_yaw", 1),
+  ("point_z_current_base_yaw", 1),
+  ("toe_s_current_base_yaw", 1),
+  ("toe_y_current_base_yaw", 1),
+  ("heel_s_current_base_yaw", 1),
+  ("heel_y_current_base_yaw", 1),
+  ("foot_half_width", 1),
+  ("gait_phase_sin", 1),
+  ("gait_phase_cos", 1),
+  ("foot_vx_body", 1),
+  ("foot_vz_body", 1),
+  ("contact_duration_norm", 1),
+  ("impact_strength_norm", 1),
+  ("previous_event_delta_s_current_base_yaw", 1),
+  ("previous_event_delta_z_current_base_yaw", 1),
+  ("same_foot_delta_s_current_base_yaw", 1),
+  ("same_foot_delta_z_current_base_yaw", 1),
+)
+"""Deployable-style sparse foot-event memory features for Stage 2C ablations."""
+
+SPARSE_EVENT_AGE_FEATURE_INDEX = 5
+
+
+@dataclass(frozen=True)
+class SparseFootprintGeometry:
+  """Footprint dimensions derived from the robot XML collision capsules."""
+
+  rear_x: float
+  front_x: float
+  half_width: float
+  toe_anchor_x: float
+  heel_anchor_x: float
+
+  @property
+  def touchdown_anchor_x(self) -> float:
+    """Return the local x used by the current touchdown anchor."""
+    return 0.5 * (self.toe_anchor_x + self.heel_anchor_x)
+
+
+def _parse_float_tuple(value: str) -> tuple[float, ...]:
+  return tuple(float(part) for part in value.split())
+
+
+def load_g1_sparse_footprint_geometry(
+  xml_path: Path | None = None,
+) -> SparseFootprintGeometry:
+  """Load approximate G1 sole dimensions from foot collision geoms in XML."""
+  if xml_path is None:
+    xml_path = (
+      Path(__file__).resolve().parents[2]
+      / "src"
+      / "mjlab"
+      / "asset_zoo"
+      / "robots"
+      / "unitree_g1"
+      / "xmls"
+      / "g1.xml"
+    )
+  root = ET.parse(xml_path).getroot()
+  default_radius = 0.0
+  for default in root.iter("default"):
+    if default.attrib.get("class") != "foot_capsule":
+      continue
+    geom = default.find("geom")
+    if geom is not None and "size" in geom.attrib:
+      default_radius = _parse_float_tuple(geom.attrib["size"])[0]
+      break
+
+  x_min = float("inf")
+  x_max = float("-inf")
+  y_min = float("inf")
+  y_max = float("-inf")
+  for geom in root.iter("geom"):
+    name = geom.attrib.get("name", "")
+    if not name.startswith(("left_foot", "right_foot")):
+      continue
+    if not name.endswith("_collision") or "fromto" not in geom.attrib:
+      continue
+    fromto = _parse_float_tuple(geom.attrib["fromto"])
+    if len(fromto) != 6:
+      raise ValueError(f"Expected 6-value fromto for {name}, got {fromto}.")
+    radius = (
+      _parse_float_tuple(geom.attrib["size"])[0]
+      if "size" in geom.attrib
+      else default_radius
+    )
+    xs = (fromto[0], fromto[3])
+    ys = (fromto[1], fromto[4])
+    x_min = min(x_min, min(xs) - radius)
+    x_max = max(x_max, max(xs) + radius)
+    y_min = min(y_min, min(ys) - radius)
+    y_max = max(y_max, max(ys) + radius)
+
+  site_x: dict[str, float] = {}
+  for site in root.iter("site"):
+    name = site.attrib.get("name", "")
+    if name in ("left_toe", "right_toe", "left_heel", "right_heel"):
+      pos = _parse_float_tuple(site.attrib["pos"])
+      site_x[name] = pos[0]
+
+  required_sites = ("left_toe", "right_toe", "left_heel", "right_heel")
+  if not all(name in site_x for name in required_sites):
+    missing = [name for name in required_sites if name not in site_x]
+    raise ValueError(f"Missing G1 foot sites in {xml_path}: {missing}.")
+  if not all(np.isfinite(value) for value in (x_min, x_max, y_min, y_max)):
+    raise ValueError(f"No G1 foot collision capsules found in {xml_path}.")
+  return SparseFootprintGeometry(
+    rear_x=x_min,
+    front_x=x_max,
+    half_width=max(abs(y_min), abs(y_max)),
+    toe_anchor_x=0.5 * (site_x["left_toe"] + site_x["right_toe"]),
+    heel_anchor_x=0.5 * (site_x["left_heel"] + site_x["right_heel"]),
+  )
+
 
 @dataclass(frozen=True)
 class ExportStairProbeDatasetConfig:
@@ -141,6 +276,12 @@ class ExportStairProbeDatasetConfig:
   history_len: int = 64
   include_privileged_footprint: bool = False
   privileged_footprint_history_len: int = 128
+  include_sparse_foot_events: bool = False
+  sparse_event_memory_len: int = 8
+  sparse_event_age_norm_s: float = 3.0
+  sparse_event_position_scale_m: float = 1.0
+  sparse_event_velocity_scale_mps: float = 2.0
+  sparse_event_gait_period: float = 0.6
   max_samples: int = 200_000
   expected_obs_dim: int = 91
   stable_support_fraction: float = 0.75
@@ -162,9 +303,17 @@ class StairProbeLabelBatch:
   relative_level_label: torch.Tensor
   level_transition_label: torch.Tensor
   true_tread_depth: torch.Tensor
+  true_riser_height: torch.Tensor
   depth_bin_label: torch.Tensor
   depth_3bin_label: torch.Tensor
   depth_valid_label: torch.Tensor
+  safe_landing_center: torch.Tensor
+  minimum_safe_stride: torch.Tensor
+  maximum_safe_stride: torch.Tensor
+  safe_stride_valid_label: torch.Tensor
+  landing_touchdown_label: torch.Tensor
+  landing_quality_label: torch.Tensor
+  collision_risk_label: torch.Tensor
   num_confirmed_layers: torch.Tensor
   stair_active_label: torch.Tensor
   full_landing_label: torch.Tensor
@@ -181,6 +330,21 @@ def input_obs_dim() -> int:
 def privileged_footprint_obs_dim() -> int:
   """Return the Stage 2 privileged footprint observation dimension."""
   return sum(width for _name, width in PRIVILEGED_FOOTPRINT_FEATURE_GROUPS)
+
+
+def sparse_foot_event_obs_dim() -> int:
+  """Return the Stage 2C sparse foot-event observation dimension."""
+  return sum(width for _name, width in SPARSE_FOOT_EVENT_FEATURE_GROUPS)
+
+
+def input_feature_slices() -> dict[str, slice]:
+  """Return fixed slices for named Stage 2A latent-observation groups."""
+  offset = 0
+  slices: dict[str, slice] = {}
+  for name, width in INPUT_FEATURE_GROUPS:
+    slices[name] = slice(offset, offset + width)
+    offset += width
+  return slices
 
 
 def forbidden_input_feature_names() -> tuple[str, ...]:
@@ -310,6 +474,14 @@ class StairProbeLevelState:
     support_fraction: torch.Tensor,
     contact_duration: torch.Tensor,
     true_tread_depth: torch.Tensor,
+    true_riser_height: torch.Tensor | None = None,
+    safe_landing_center: torch.Tensor | None = None,
+    minimum_safe_stride: torch.Tensor | None = None,
+    maximum_safe_stride: torch.Tensor | None = None,
+    safe_stride_valid: torch.Tensor | None = None,
+    landing_touchdown: torch.Tensor | None = None,
+    landing_quality: torch.Tensor | None = None,
+    collision_risk: torch.Tensor | None = None,
     shape_valid: torch.Tensor | None = None,
     reset_mask: torch.Tensor | None = None,
   ) -> StairProbeLabelBatch:
@@ -321,6 +493,30 @@ class StairProbeLevelState:
     support_fraction = support_fraction.to(self.device, dtype=torch.float32)
     contact_duration = contact_duration.to(self.device, dtype=torch.float32)
     true_tread_depth = true_tread_depth.to(self.device, dtype=torch.float32)
+    if true_riser_height is None:
+      true_riser_height = torch.zeros_like(true_tread_depth)
+    true_riser_height = true_riser_height.to(self.device, dtype=torch.float32)
+    if safe_landing_center is None:
+      safe_landing_center = torch.zeros_like(true_tread_depth)
+    safe_landing_center = safe_landing_center.to(self.device, dtype=torch.float32)
+    if minimum_safe_stride is None:
+      minimum_safe_stride = torch.zeros_like(true_tread_depth)
+    minimum_safe_stride = minimum_safe_stride.to(self.device, dtype=torch.float32)
+    if maximum_safe_stride is None:
+      maximum_safe_stride = minimum_safe_stride
+    maximum_safe_stride = maximum_safe_stride.to(self.device, dtype=torch.float32)
+    if safe_stride_valid is None:
+      safe_stride_valid = torch.zeros_like(stair_active)
+    safe_stride_valid = safe_stride_valid.to(self.device, dtype=torch.bool)
+    if landing_touchdown is None:
+      landing_touchdown = torch.zeros_like(stair_active)
+    landing_touchdown = landing_touchdown.to(self.device, dtype=torch.bool)
+    if landing_quality is None:
+      landing_quality = torch.zeros_like(true_tread_depth)
+    landing_quality = landing_quality.to(self.device, dtype=torch.float32)
+    if collision_risk is None:
+      collision_risk = torch.zeros_like(true_tread_depth)
+    collision_risk = collision_risk.to(self.device, dtype=torch.float32)
     if shape_valid is None:
       shape_valid = torch.isfinite(true_tread_depth) & (true_tread_depth > 0.0)
     else:
@@ -431,6 +627,11 @@ class StairProbeLevelState:
         true_tread_depth,
         torch.zeros_like(true_tread_depth),
       ),
+      true_riser_height=torch.where(
+        depth_valid,
+        true_riser_height,
+        torch.zeros_like(true_riser_height),
+      ),
       depth_bin_label=torch.where(
         depth_valid, depth_bin, torch.full_like(depth_bin, -1)
       ),
@@ -440,6 +641,29 @@ class StairProbeLevelState:
         torch.full_like(depth_3bin, -1),
       ),
       depth_valid_label=depth_valid.clone(),
+      safe_landing_center=torch.where(
+        safe_stride_valid,
+        safe_landing_center,
+        torch.zeros_like(safe_landing_center),
+      ),
+      minimum_safe_stride=torch.where(
+        safe_stride_valid,
+        minimum_safe_stride,
+        torch.zeros_like(minimum_safe_stride),
+      ),
+      maximum_safe_stride=torch.where(
+        safe_stride_valid,
+        maximum_safe_stride,
+        torch.zeros_like(maximum_safe_stride),
+      ),
+      safe_stride_valid_label=safe_stride_valid.clone(),
+      landing_touchdown_label=landing_touchdown.clone(),
+      landing_quality_label=torch.where(
+        landing_touchdown,
+        landing_quality.clamp(0.0, 1.0),
+        torch.zeros_like(landing_quality),
+      ),
+      collision_risk_label=collision_risk.clamp(0.0, 1.0),
       num_confirmed_layers=num_confirmed,
       stair_active_label=stair_active.clone(),
       full_landing_label=candidate_is_full & ~changed,
@@ -467,6 +691,8 @@ class StairProbeDatasetBuilder:
     device: torch.device | str,
     privileged_footprint_dim: int | None = None,
     privileged_footprint_history_len: int | None = None,
+    sparse_event_dim: int | None = None,
+    sparse_event_memory_len: int | None = None,
     flat_sample_period: int = 25,
     same_level_sample_period: int = 20,
     landing_sample_period: int = 8,
@@ -492,6 +718,26 @@ class StairProbeDatasetBuilder:
         obs_dim=privileged_footprint_dim,
         device=device,
       )
+    self._current_sparse_event_memory: torch.Tensor | None = None
+    self._current_sparse_event_valid_mask: torch.Tensor | None = None
+    if sparse_event_dim is not None:
+      if sparse_event_memory_len is None:
+        raise ValueError(
+          "sparse_event_memory_len is required when sparse events are enabled."
+        )
+      self._current_sparse_event_memory = torch.zeros(
+        num_envs,
+        sparse_event_memory_len,
+        sparse_event_dim,
+        dtype=torch.float32,
+        device=device,
+      )
+      self._current_sparse_event_valid_mask = torch.zeros(
+        num_envs,
+        sparse_event_memory_len,
+        dtype=torch.bool,
+        device=device,
+      )
     self.max_samples = int(max_samples)
     self.seed = int(seed)
     self.flat_sample_period = max(1, int(flat_sample_period))
@@ -505,9 +751,17 @@ class StairProbeDatasetBuilder:
       "relative_level_label": [],
       "level_transition_label": [],
       "true_tread_depth": [],
+      "true_riser_height": [],
       "depth_bin_label": [],
       "depth_3bin_label": [],
       "depth_valid_label": [],
+      "safe_landing_center": [],
+      "minimum_safe_stride": [],
+      "maximum_safe_stride": [],
+      "safe_stride_valid_label": [],
+      "landing_touchdown_label": [],
+      "landing_quality_label": [],
+      "collision_risk_label": [],
       "num_confirmed_layers": [],
       "stair_active_label": [],
       "sample_type": [],
@@ -519,6 +773,9 @@ class StairProbeDatasetBuilder:
     if self.privileged_footprint_history is not None:
       self._arrays["privileged_footprint_history"] = []
       self._arrays["privileged_footprint_valid_mask"] = []
+    if self._current_sparse_event_memory is not None:
+      self._arrays["sparse_foot_event_memory"] = []
+      self._arrays["sparse_foot_event_valid_mask"] = []
     self._sample_type_names: list[str] = []
 
   @property
@@ -550,6 +807,30 @@ class StairProbeDatasetBuilder:
     if self.privileged_footprint_history is None:
       raise RuntimeError("Privileged footprint history is not enabled.")
     self.privileged_footprint_history.push(obs, reset_mask)
+
+  def set_sparse_foot_event_memory(
+    self,
+    memory: torch.Tensor,
+    valid_mask: torch.Tensor,
+  ) -> None:
+    """Update the current causal sparse foot-event memory snapshot."""
+    current_memory = self._current_sparse_event_memory
+    current_mask = self._current_sparse_event_valid_mask
+    if current_memory is None or current_mask is None:
+      raise RuntimeError("Sparse foot-event memory is not enabled.")
+    if memory.shape != current_memory.shape:
+      raise ValueError(
+        f"Expected sparse event memory shape "
+        f"{tuple(current_memory.shape)}, got {tuple(memory.shape)}."
+      )
+    if valid_mask.shape != current_mask.shape:
+      raise ValueError(
+        f"Expected sparse event valid mask shape "
+        f"{tuple(current_mask.shape)}, "
+        f"got {tuple(valid_mask.shape)}."
+      )
+    current_memory.copy_(memory)
+    current_mask.copy_(valid_mask)
 
   def collect(self, labels: StairProbeLabelBatch, frame_idx: int) -> None:
     """Sample histories for one rollout frame."""
@@ -625,14 +906,34 @@ class StairProbeDatasetBuilder:
         .numpy()
         .astype(np.bool_)
       )
+    if self._current_sparse_event_memory is not None:
+      assert self._current_sparse_event_valid_mask is not None
+      self._arrays["sparse_foot_event_memory"].append(
+        self._current_sparse_event_memory[ids].detach().cpu().numpy().astype(np.float32)
+      )
+      self._arrays["sparse_foot_event_valid_mask"].append(
+        self._current_sparse_event_valid_mask[ids]
+        .detach()
+        .cpu()
+        .numpy()
+        .astype(np.bool_)
+      )
     scalar_fields = (
       "level_delta_label",
       "relative_level_label",
       "level_transition_label",
       "true_tread_depth",
+      "true_riser_height",
       "depth_bin_label",
       "depth_3bin_label",
       "depth_valid_label",
+      "safe_landing_center",
+      "minimum_safe_stride",
+      "maximum_safe_stride",
+      "safe_stride_valid_label",
+      "landing_touchdown_label",
+      "landing_quality_label",
+      "collision_risk_label",
       "num_confirmed_layers",
       "stair_active_label",
       "sequence_id",
@@ -675,6 +976,439 @@ def _tensor_extra(
   if isinstance(value, torch.Tensor):
     return value
   return torch.full((env.num_envs, *shape), fill_value, dtype=dtype, device=env.device)
+
+
+class SparseFootEventMemory:
+  """Causal memory of sparse foot events visible up to the current frame."""
+
+  def __init__(
+    self,
+    *,
+    num_envs: int,
+    memory_len: int,
+    device: torch.device | str,
+    age_norm_s: float = 2.0,
+    position_scale_m: float = 1.0,
+    velocity_scale_mps: float = 2.0,
+    gait_period: float = 0.6,
+    footprint_geometry: SparseFootprintGeometry | None = None,
+  ) -> None:
+    if memory_len <= 0:
+      raise ValueError("memory_len must be positive.")
+    self.num_envs = int(num_envs)
+    self.memory_len = int(memory_len)
+    self.device = torch.device(device)
+    self.age_norm_s = max(float(age_norm_s), 1.0e-6)
+    self.position_scale_m = max(float(position_scale_m), 1.0e-6)
+    self.velocity_scale_mps = max(float(velocity_scale_mps), 1.0e-6)
+    self.gait_period = max(float(gait_period), 1.0e-6)
+    self.footprint_geometry = (
+      load_g1_sparse_footprint_geometry()
+      if footprint_geometry is None
+      else footprint_geometry
+    )
+    self.memory = torch.zeros(
+      self.num_envs,
+      self.memory_len,
+      sparse_foot_event_obs_dim(),
+      dtype=torch.float32,
+      device=self.device,
+    )
+    self.valid_mask = torch.zeros(
+      self.num_envs,
+      self.memory_len,
+      dtype=torch.bool,
+      device=self.device,
+    )
+    self.event_pos_w = torch.zeros(
+      self.num_envs,
+      self.memory_len,
+      3,
+      dtype=torch.float32,
+      device=self.device,
+    )
+    self.event_toe_pos_w = torch.zeros_like(self.event_pos_w)
+    self.event_heel_pos_w = torch.zeros_like(self.event_pos_w)
+    self.previous_ground_contact = torch.zeros(
+      self.num_envs,
+      2,
+      dtype=torch.bool,
+      device=self.device,
+    )
+    self.previous_ground_contact_valid = torch.zeros(
+      self.num_envs,
+      dtype=torch.bool,
+      device=self.device,
+    )
+    self.last_event_pos_w = torch.zeros(
+      self.num_envs,
+      3,
+      dtype=torch.float32,
+      device=device,
+    )
+    self.last_event_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
+    self.last_foot_pos_w = torch.zeros(
+      self.num_envs,
+      2,
+      3,
+      dtype=torch.float32,
+      device=device,
+    )
+    self.last_foot_valid = torch.zeros(
+      self.num_envs, 2, dtype=torch.bool, device=device
+    )
+
+  def reset(self, env_ids: torch.Tensor | None = None) -> None:
+    """Clear memory and edge-detector state for selected environments."""
+    if env_ids is None:
+      env_ids = torch.arange(self.num_envs, device=self.device)
+    if env_ids.numel() == 0:
+      return
+    self.memory[env_ids] = 0.0
+    self.valid_mask[env_ids] = False
+    self.event_pos_w[env_ids] = 0.0
+    self.event_toe_pos_w[env_ids] = 0.0
+    self.event_heel_pos_w[env_ids] = 0.0
+    self.previous_ground_contact[env_ids] = False
+    self.previous_ground_contact_valid[env_ids] = False
+    self.last_event_pos_w[env_ids] = 0.0
+    self.last_event_valid[env_ids] = False
+    self.last_foot_pos_w[env_ids] = 0.0
+    self.last_foot_valid[env_ids] = False
+
+  def begin_step(self, reset_mask: torch.Tensor | None, step_dt: float) -> None:
+    """Age existing events and clear reset environments before new events arrive."""
+    if reset_mask is not None:
+      self.reset(reset_mask.nonzero(as_tuple=False).squeeze(-1))
+    age_delta = float(step_dt) / self.age_norm_s
+    self.memory[..., SPARSE_EVENT_AGE_FEATURE_INDEX] = torch.where(
+      self.valid_mask,
+      (self.memory[..., SPARSE_EVENT_AGE_FEATURE_INDEX] + age_delta).clamp(0.0, 1.0),
+      self.memory[..., SPARSE_EVENT_AGE_FEATURE_INDEX],
+    )
+    expired = self.valid_mask & (
+      self.memory[..., SPARSE_EVENT_AGE_FEATURE_INDEX] >= 1.0
+    )
+    if bool(expired.any().item()):
+      self.valid_mask[expired] = False
+      self.memory[expired] = 0.0
+      self.event_pos_w[expired] = 0.0
+      self.event_toe_pos_w[expired] = 0.0
+      self.event_heel_pos_w[expired] = 0.0
+      self._refresh_last_event_references()
+
+  def update_from_env_and_latent(
+    self,
+    env: ManagerBasedRlEnv,
+    latent_obs: torch.Tensor,
+  ) -> None:
+    """Append touchdown and toe-riser hit events detected on this frame."""
+    if latent_obs.shape != (self.num_envs, input_obs_dim()):
+      raise ValueError(
+        f"Expected latent obs shape {(self.num_envs, input_obs_dim())}, "
+        f"got {tuple(latent_obs.shape)}."
+      )
+    slices = input_feature_slices()
+    left_toe_pos = latent_obs[:, slices["left_toe_pos_body"]]
+    right_toe_pos = latent_obs[:, slices["right_toe_pos_body"]]
+    left_heel_pos = latent_obs[:, slices["left_heel_pos_body"]]
+    right_heel_pos = latent_obs[:, slices["right_heel_pos_body"]]
+    left_toe_vel = latent_obs[:, slices["left_toe_vel_body"]]
+    right_toe_vel = latent_obs[:, slices["right_toe_vel_body"]]
+    foot_points = torch.stack(
+      [
+        0.5 * (left_toe_pos + left_heel_pos),
+        0.5 * (right_toe_pos + right_heel_pos),
+      ],
+      dim=1,
+    )
+    toe_points = torch.stack([left_toe_pos, right_toe_pos], dim=1)
+    heel_points = torch.stack([left_heel_pos, right_heel_pos], dim=1)
+    foot_velocities = torch.stack([left_toe_vel, right_toe_vel], dim=1)
+    root_pos_w, root_quat_w = self._root_pose_from_env(env)
+    self._refresh_relative_event_features(root_pos_w, root_quat_w)
+
+    ground_contact = _tensor_extra(
+      env, STAIR_CURRENT_GROUND_CONTACT_KEY, (2,), torch.bool, False
+    )
+    contact_duration = _tensor_extra(
+      env, STAIR_CURRENT_CONTACT_DURATION_KEY, (2,), torch.float32, 0.0
+    )
+    toe_riser_hit_extra = env.extras.get(TOE_RISER_NEW_HIT_BY_FOOT_KEY)
+    if isinstance(toe_riser_hit_extra, torch.Tensor):
+      toe_riser_hit = toe_riser_hit_extra.bool()
+      if toe_riser_hit.ndim == 1:
+        toe_riser_hit = toe_riser_hit[:, None].expand(-1, 2)
+    else:
+      toe_riser_hit = _tensor_extra(
+        env, TOE_RISER_NEW_HIT_KEY, (2,), torch.bool, False
+      ).bool()
+      if toe_riser_hit.ndim == 1:
+        toe_riser_hit = toe_riser_hit[:, None].expand(-1, 2)
+
+    touchdown = (
+      ground_contact.bool()
+      & ~self.previous_ground_contact
+      & self.previous_ground_contact_valid[:, None]
+    )
+    phase = (
+      (env.episode_length_buf.to(dtype=torch.float32) * float(env.step_dt))
+      % self.gait_period
+    ) / self.gait_period
+    phase_sin = torch.sin(phase * torch.pi * 2.0)
+    phase_cos = torch.cos(phase * torch.pi * 2.0)
+
+    for foot_id in range(2):
+      self._push_event(
+        mask=touchdown[:, foot_id],
+        foot_id=foot_id,
+        event_type="tread_touchdown",
+        point=foot_points[:, foot_id],
+        toe_point=toe_points[:, foot_id],
+        heel_point=heel_points[:, foot_id],
+        velocity=foot_velocities[:, foot_id],
+        root_pos_w=root_pos_w,
+        root_quat_w=root_quat_w,
+        confidence=torch.ones(self.num_envs, dtype=torch.float32, device=self.device),
+        contact_duration=contact_duration[:, foot_id],
+        phase_sin=phase_sin,
+        phase_cos=phase_cos,
+      )
+      self._push_event(
+        mask=toe_riser_hit[:, foot_id].bool(),
+        foot_id=foot_id,
+        event_type="toe_riser_hit",
+        point=toe_points[:, foot_id],
+        toe_point=toe_points[:, foot_id],
+        heel_point=heel_points[:, foot_id],
+        velocity=foot_velocities[:, foot_id],
+        root_pos_w=root_pos_w,
+        root_quat_w=root_quat_w,
+        confidence=torch.ones(self.num_envs, dtype=torch.float32, device=self.device),
+        contact_duration=contact_duration[:, foot_id],
+        phase_sin=phase_sin,
+        phase_cos=phase_cos,
+      )
+
+    self.previous_ground_contact.copy_(ground_contact.bool())
+    self.previous_ground_contact_valid[:] = True
+
+  def _push_event(
+    self,
+    *,
+    mask: torch.Tensor,
+    foot_id: int,
+    event_type: str,
+    point: torch.Tensor,
+    toe_point: torch.Tensor,
+    heel_point: torch.Tensor,
+    velocity: torch.Tensor,
+    root_pos_w: torch.Tensor,
+    root_quat_w: torch.Tensor,
+    confidence: torch.Tensor,
+    contact_duration: torch.Tensor,
+    phase_sin: torch.Tensor,
+    phase_cos: torch.Tensor,
+  ) -> None:
+    ids = mask.nonzero(as_tuple=False).squeeze(-1)
+    if ids.numel() == 0:
+      return
+    feature = torch.zeros(
+      self.num_envs,
+      sparse_foot_event_obs_dim(),
+      dtype=torch.float32,
+      device=self.device,
+    )
+    point_w = root_pos_w + quat_apply(root_quat_w, point)
+    toe_pos_w = root_pos_w + quat_apply(root_quat_w, toe_point)
+    heel_pos_w = root_pos_w + quat_apply(root_quat_w, heel_point)
+    point_rel = self._world_to_current_base_yaw(point_w, root_pos_w, root_quat_w)
+    toe_rel = self._world_to_current_base_yaw(toe_pos_w, root_pos_w, root_quat_w)
+    heel_rel = self._world_to_current_base_yaw(heel_pos_w, root_pos_w, root_quat_w)
+    previous_event_rel = self._world_to_current_base_yaw(
+      self.last_event_pos_w,
+      root_pos_w,
+      root_quat_w,
+    )
+    previous_foot_rel = self._world_to_current_base_yaw(
+      self.last_foot_pos_w[:, foot_id],
+      root_pos_w,
+      root_quat_w,
+    )
+    point_s = point_rel[:, 0]
+    point_y = point_rel[:, 1]
+    point_z = point_rel[:, 2]
+    previous_delta_s = torch.where(
+      self.last_event_valid,
+      point_s - previous_event_rel[:, 0],
+      torch.zeros_like(point_s),
+    )
+    previous_delta_z = torch.where(
+      self.last_event_valid,
+      point_z - previous_event_rel[:, 2],
+      torch.zeros_like(point_z),
+    )
+    same_delta_s = torch.where(
+      self.last_foot_valid[:, foot_id],
+      point_s - previous_foot_rel[:, 0],
+      torch.zeros_like(point_s),
+    )
+    same_delta_z = torch.where(
+      self.last_foot_valid[:, foot_id],
+      point_z - previous_foot_rel[:, 2],
+      torch.zeros_like(point_z),
+    )
+    half_width = torch.full(
+      (self.num_envs,),
+      self.footprint_geometry.half_width / self.position_scale_m,
+      dtype=torch.float32,
+      device=self.device,
+    )
+    feature[:, 0] = 1.0
+    feature[:, 1] = 1.0 if event_type == "tread_touchdown" else 0.0
+    feature[:, 2] = 1.0 if event_type == "toe_riser_hit" else 0.0
+    feature[:, 3] = 1.0 if foot_id == 0 else 0.0
+    feature[:, 4] = 1.0 if foot_id == 1 else 0.0
+    feature[:, 5] = 0.0
+    feature[:, 6] = confidence.clamp(0.0, 1.0)
+    feature[:, 7] = point_s / self.position_scale_m
+    feature[:, 8] = point_y / self.position_scale_m
+    feature[:, 9] = point_z / self.position_scale_m
+    feature[:, 10] = toe_rel[:, 0] / self.position_scale_m
+    feature[:, 11] = toe_rel[:, 1] / self.position_scale_m
+    feature[:, 12] = heel_rel[:, 0] / self.position_scale_m
+    feature[:, 13] = heel_rel[:, 1] / self.position_scale_m
+    feature[:, 14] = half_width
+    feature[:, 15] = phase_sin
+    feature[:, 16] = phase_cos
+    feature[:, 17] = velocity[:, 0] / self.velocity_scale_mps
+    feature[:, 18] = velocity[:, 2] / self.velocity_scale_mps
+    feature[:, 19] = (contact_duration / self.age_norm_s).clamp(0.0, 1.0)
+    feature[:, 20] = (
+      torch.linalg.norm(velocity, dim=-1) / self.velocity_scale_mps
+    ).clamp(0.0, 1.0)
+    feature[:, 21] = previous_delta_s / self.position_scale_m
+    feature[:, 22] = previous_delta_z / self.position_scale_m
+    feature[:, 23] = same_delta_s / self.position_scale_m
+    feature[:, 24] = same_delta_z / self.position_scale_m
+
+    self.memory[ids, 1:].copy_(self.memory[ids, :-1].clone())
+    self.valid_mask[ids, 1:].copy_(self.valid_mask[ids, :-1].clone())
+    self.event_pos_w[ids, 1:].copy_(self.event_pos_w[ids, :-1].clone())
+    self.event_toe_pos_w[ids, 1:].copy_(self.event_toe_pos_w[ids, :-1].clone())
+    self.event_heel_pos_w[ids, 1:].copy_(self.event_heel_pos_w[ids, :-1].clone())
+    self.memory[ids, 0] = feature[ids]
+    self.valid_mask[ids, 0] = True
+    self.event_pos_w[ids, 0] = point_w[ids]
+    self.event_toe_pos_w[ids, 0] = toe_pos_w[ids]
+    self.event_heel_pos_w[ids, 0] = heel_pos_w[ids]
+    self.last_event_pos_w[ids] = point_w[ids]
+    self.last_event_valid[ids] = True
+    self.last_foot_pos_w[ids, foot_id] = point_w[ids]
+    self.last_foot_valid[ids, foot_id] = True
+
+  def _refresh_relative_event_features(
+    self,
+    root_pos_w: torch.Tensor,
+    root_quat_w: torch.Tensor,
+  ) -> None:
+    """Re-project stored world event points into the current base-yaw frame."""
+    if not bool(self.valid_mask.any().item()):
+      return
+    root_pos = root_pos_w[:, None, :].expand(-1, self.memory_len, -1)
+    root_quat = root_quat_w[:, None, :].expand(-1, self.memory_len, -1)
+    rel = self._world_to_current_base_yaw(self.event_pos_w, root_pos, root_quat)
+    toe_rel = self._world_to_current_base_yaw(
+      self.event_toe_pos_w,
+      root_pos,
+      root_quat,
+    )
+    heel_rel = self._world_to_current_base_yaw(
+      self.event_heel_pos_w,
+      root_pos,
+      root_quat,
+    )
+    rel_scaled = rel / self.position_scale_m
+    self.memory[..., 7:10] = torch.where(
+      self.valid_mask[..., None],
+      rel_scaled,
+      torch.zeros_like(rel_scaled),
+    )
+    toe_heel_scaled = torch.cat(
+      (
+        toe_rel[..., 0:2] / self.position_scale_m,
+        heel_rel[..., 0:2] / self.position_scale_m,
+      ),
+      dim=-1,
+    )
+    self.memory[..., 10:14] = torch.where(
+      self.valid_mask[..., None],
+      toe_heel_scaled,
+      torch.zeros_like(toe_heel_scaled),
+    )
+
+  def _refresh_last_event_references(self) -> None:
+    """Refresh delta-reference events after age-based invalidation."""
+    slot0_valid = self.valid_mask[:, 0]
+    self.last_event_valid.copy_(slot0_valid)
+    self.last_event_pos_w.copy_(
+      torch.where(
+        slot0_valid[:, None],
+        self.event_pos_w[:, 0],
+        torch.zeros_like(self.last_event_pos_w),
+      )
+    )
+    env_ids = torch.arange(self.num_envs, device=self.device)
+    for foot_id, feature_index in enumerate((3, 4)):
+      foot_valid = self.valid_mask & (self.memory[..., feature_index] > 0.5)
+      has_foot = foot_valid.any(dim=1)
+      first_idx = foot_valid.to(dtype=torch.int64).argmax(dim=1)
+      selected = self.event_pos_w[env_ids, first_idx]
+      self.last_foot_valid[:, foot_id].copy_(has_foot)
+      self.last_foot_pos_w[:, foot_id].copy_(
+        torch.where(
+          has_foot[:, None],
+          selected,
+          torch.zeros_like(selected),
+        )
+      )
+
+  def _root_pose_from_env(
+    self,
+    env: ManagerBasedRlEnv,
+  ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return root pose in world coordinates, with a test-friendly fallback."""
+    scene = getattr(env, "scene", None)
+    if scene is not None:
+      try:
+        robot = scene["robot"]
+        return (
+          robot.data.root_link_pos_w.to(self.device, dtype=torch.float32),
+          robot.data.root_link_quat_w.to(self.device, dtype=torch.float32),
+        )
+      except (KeyError, AttributeError, TypeError):
+        pass
+    root_pos = getattr(env, "root_pos_w", None)
+    root_quat = getattr(env, "root_quat_w", None)
+    if isinstance(root_pos, torch.Tensor) and isinstance(root_quat, torch.Tensor):
+      return (
+        root_pos.to(self.device, dtype=torch.float32),
+        root_quat.to(self.device, dtype=torch.float32),
+      )
+    pos = torch.zeros(self.num_envs, 3, dtype=torch.float32, device=self.device)
+    quat = torch.zeros(self.num_envs, 4, dtype=torch.float32, device=self.device)
+    quat[:, 0] = 1.0
+    return pos, quat
+
+  @staticmethod
+  def _world_to_current_base_yaw(
+    point_w: torch.Tensor,
+    root_pos_w: torch.Tensor,
+    root_quat_w: torch.Tensor,
+  ) -> torch.Tensor:
+    quat_shape = root_quat_w.shape
+    root_yaw = yaw_quat(root_quat_w.reshape(-1, 4)).reshape(quat_shape)
+    return quat_apply_inverse(root_yaw, point_w - root_pos_w)
 
 
 def privileged_footprint_features_from_tensors(
@@ -808,6 +1542,22 @@ def label_batch_from_env(
     env, STAIR_CURRENT_CONTACT_DURATION_KEY, (2,), torch.float32, 0.0
   )
   true_depth = _tensor_extra(env, STAIR_TREAD_DEPTH_LABEL_KEY, (), torch.float32, 0.0)
+  true_height = _tensor_extra(env, STAIR_RISER_HEIGHT_LABEL_KEY, (), torch.float32, 0.0)
+  safe_landing_center = _tensor_extra(
+    env, SAFE_LANDING_CENTER_KEY, (), torch.float32, 0.0
+  )
+  minimum_safe_stride = _tensor_extra(
+    env, MINIMUM_SAFE_STRIDE_KEY, (), torch.float32, 0.0
+  )
+  maximum_safe_stride = _tensor_extra(
+    env, MINIMUM_SAFE_STRIDE_UPPER_KEY, (), torch.float32, 0.0
+  )
+  safe_stride_valid = _tensor_extra(
+    env, MINIMUM_SAFE_STRIDE_VALID_KEY, (), torch.bool, False
+  )
+  landing_touchdown = _tensor_extra(env, LANDING_TOUCHDOWN_KEY, (), torch.bool, False)
+  landing_quality = _tensor_extra(env, LANDING_QUALITY_KEY, (), torch.float32, 0.0)
+  collision_risk = _tensor_extra(env, COLLISION_RISK_KEY, (), torch.float32, 0.0)
   shape_valid = _tensor_extra(env, STAIR_SHAPE_LABEL_VALID_KEY, (), torch.bool, False)
   return state.update(
     stair_active=phase > 0,
@@ -817,6 +1567,14 @@ def label_batch_from_env(
     support_fraction=support_fraction,
     contact_duration=contact_duration,
     true_tread_depth=true_depth,
+    true_riser_height=true_height,
+    safe_landing_center=safe_landing_center,
+    minimum_safe_stride=minimum_safe_stride,
+    maximum_safe_stride=maximum_safe_stride,
+    safe_stride_valid=safe_stride_valid,
+    landing_touchdown=landing_touchdown,
+    landing_quality=landing_quality,
+    collision_risk=collision_risk,
     shape_valid=shape_valid,
     reset_mask=reset_mask,
   )
@@ -834,6 +1592,10 @@ def write_sample_metadata(output_dir: Path, arrays: dict[str, np.ndarray]) -> No
     "depth_bin",
     "depth_3bin",
     "depth_valid",
+    "safe_stride_valid",
+    "landing_touchdown",
+    "landing_quality",
+    "collision_risk",
     "stair_active",
     "sequence_id",
     "env_id",
@@ -855,6 +1617,10 @@ def write_sample_metadata(output_dir: Path, arrays: dict[str, np.ndarray]) -> No
           "depth_bin": int(arrays["depth_bin_label"][index]),
           "depth_3bin": int(arrays["depth_3bin_label"][index]),
           "depth_valid": int(bool(arrays["depth_valid_label"][index])),
+          "safe_stride_valid": int(bool(arrays["safe_stride_valid_label"][index])),
+          "landing_touchdown": int(bool(arrays["landing_touchdown_label"][index])),
+          "landing_quality": float(arrays["landing_quality_label"][index]),
+          "collision_risk": float(arrays["collision_risk_label"][index]),
           "stair_active": int(bool(arrays["stair_active_label"][index])),
           "sequence_id": int(arrays["sequence_id"][index]),
           "env_id": int(arrays["env_id"][index]),
@@ -906,6 +1672,30 @@ def build_label_audit(
   rows.append(("transition_sample_count", str(int(transition.sum()))))
   flat_false = int((flat & transition).sum())
   rows.append(("flat_false_transition_labels", str(flat_false)))
+  rows.append(
+    (
+      "safe_stride_valid_count",
+      str(int(arrays["safe_stride_valid_label"].astype(bool).sum())),
+    )
+  )
+  rows.append(
+    (
+      "landing_touchdown_count",
+      str(int(arrays["landing_touchdown_label"].astype(bool).sum())),
+    )
+  )
+  rows.append(
+    (
+      "landing_quality_mean",
+      f"{float(arrays['landing_quality_label'].mean()):.6g}",
+    )
+  )
+  rows.append(
+    (
+      "collision_risk_mean",
+      f"{float(arrays['collision_risk_label'].mean()):.6g}",
+    )
+  )
   transition_sequence_ids = sequence_ids[transition & (sequence_ids >= 0)]
   if transition_sequence_ids.size:
     unique, counts = np.unique(transition_sequence_ids, return_counts=True)
@@ -969,6 +1759,27 @@ def build_label_audit(
       )
   else:
     rows.append(("privileged_footprint_history_present", "0"))
+  if "sparse_foot_event_memory" in arrays:
+    memory = arrays["sparse_foot_event_memory"]
+    valid = arrays.get("sparse_foot_event_valid_mask")
+    rows.append(("sparse_foot_event_memory_present", "1"))
+    rows.append(("sparse_foot_event_dim", str(int(memory.shape[-1]))))
+    rows.append(("sparse_foot_event_memory_len", str(int(memory.shape[1]))))
+    rows.append(
+      (
+        "sparse_foot_event_nonzero_fraction",
+        f"{float(np.count_nonzero(memory) / max(memory.size, 1)):.6g}",
+      )
+    )
+    if valid is not None:
+      rows.append(
+        (
+          "sparse_foot_event_valid_fraction",
+          f"{float(valid.astype(bool).mean()):.6g}",
+        )
+      )
+  else:
+    rows.append(("sparse_foot_event_memory_present", "0"))
   return rows
 
 
@@ -1007,6 +1818,7 @@ def write_dataset_config(
     "latent_obs_source": "observations['latent'] / stair_latent_obs",
     "include_gait_phase": False,
     "include_privileged_footprint": cfg.include_privileged_footprint,
+    "include_sparse_foot_events": cfg.include_sparse_foot_events,
     "input_feature_groups": [
       {"name": name, "width": width} for name, width in INPUT_FEATURE_GROUPS
     ],
@@ -1023,6 +1835,19 @@ def write_dataset_config(
       for name, width in PRIVILEGED_FOOTPRINT_FEATURE_GROUPS
     ],
     "privileged_footprint_is_deployable": False,
+    "sparse_foot_event_source": (
+      "causal foot touchdown/toe-riser events from current and previous frames"
+      if cfg.include_sparse_foot_events
+      else None
+    ),
+    "sparse_foot_event_memory_len": (
+      cfg.sparse_event_memory_len if cfg.include_sparse_foot_events else 0
+    ),
+    "sparse_foot_event_feature_groups": [
+      {"name": name, "width": width} for name, width in SPARSE_FOOT_EVENT_FEATURE_GROUPS
+    ],
+    "sparse_foot_event_is_deployable_style": True,
+    "sparse_foot_event_causality": "current and past events only; no future events",
     "forbidden_input_fields": list(FORBIDDEN_INPUT_FIELDS),
     "forbidden_input_fields_present": list(forbidden_input_feature_names()),
     "level_delta_labels": {
@@ -1066,6 +1891,8 @@ def run_export(task_id: str, cfg: ExportStairProbeDatasetConfig) -> Path:
     raise ValueError("history_len must be positive.")
   if cfg.include_privileged_footprint and cfg.privileged_footprint_history_len <= 0:
     raise ValueError("privileged_footprint_history_len must be positive.")
+  if cfg.include_sparse_foot_events and cfg.sparse_event_memory_len <= 0:
+    raise ValueError("sparse_event_memory_len must be positive.")
   if cfg.expected_obs_dim != input_obs_dim():
     raise ValueError(
       f"expected_obs_dim={cfg.expected_obs_dim} does not match the Stage 2A "
@@ -1096,6 +1923,7 @@ def run_export(task_id: str, cfg: ExportStairProbeDatasetConfig) -> Path:
     f"steps={cfg.steps}",
     f"history_len={cfg.history_len}",
     f"privileged_footprint={cfg.include_privileged_footprint}",
+    f"sparse_foot_events={cfg.include_sparse_foot_events}",
     f"device={device}",
     f"output={output_dir}",
   )
@@ -1115,6 +1943,12 @@ def run_export(task_id: str, cfg: ExportStairProbeDatasetConfig) -> Path:
     privileged_footprint_history_len=(
       cfg.privileged_footprint_history_len if cfg.include_privileged_footprint else None
     ),
+    sparse_event_dim=(
+      sparse_foot_event_obs_dim() if cfg.include_sparse_foot_events else None
+    ),
+    sparse_event_memory_len=(
+      cfg.sparse_event_memory_len if cfg.include_sparse_foot_events else None
+    ),
     flat_sample_period=cfg.flat_sample_period,
     same_level_sample_period=cfg.same_level_sample_period,
     landing_sample_period=cfg.landing_sample_period,
@@ -1127,6 +1961,19 @@ def run_export(task_id: str, cfg: ExportStairProbeDatasetConfig) -> Path:
     partial_support_fraction=cfg.partial_support_fraction,
     stable_contact_time=cfg.stable_contact_time,
     device=device,
+  )
+  sparse_event_memory = (
+    SparseFootEventMemory(
+      num_envs=cfg.num_envs,
+      memory_len=cfg.sparse_event_memory_len,
+      device=device,
+      age_norm_s=cfg.sparse_event_age_norm_s,
+      position_scale_m=cfg.sparse_event_position_scale_m,
+      velocity_scale_mps=cfg.sparse_event_velocity_scale_mps,
+      gait_period=cfg.sparse_event_gait_period,
+    )
+    if cfg.include_sparse_foot_events
+    else None
   )
   try:
     policy, _runner = load_inference_policy(
@@ -1152,6 +1999,12 @@ def run_export(task_id: str, cfg: ExportStairProbeDatasetConfig) -> Path:
         device=device,
       )
       builder.push_privileged_footprint(zero_footprint, reset_all)
+    if sparse_event_memory is not None:
+      sparse_event_memory.reset()
+      builder.set_sparse_foot_event_memory(
+        sparse_event_memory.memory,
+        sparse_event_memory.valid_mask,
+      )
 
     progress = tqdm(
       range(cfg.steps),
@@ -1172,6 +2025,13 @@ def run_export(task_id: str, cfg: ExportStairProbeDatasetConfig) -> Path:
       if cfg.include_privileged_footprint:
         footprint = privileged_footprint_features_from_env(raw_env)
         builder.push_privileged_footprint(footprint, reset_mask)
+      if sparse_event_memory is not None:
+        sparse_event_memory.begin_step(reset_mask, float(raw_env.step_dt))
+        sparse_event_memory.update_from_env_and_latent(raw_env, latent)
+        builder.set_sparse_foot_event_memory(
+          sparse_event_memory.memory,
+          sparse_event_memory.valid_mask,
+        )
       labels = label_batch_from_env(raw_env, label_state, reset_mask)
       builder.collect(labels, rollout_step + 1)
       if builder.is_full:
