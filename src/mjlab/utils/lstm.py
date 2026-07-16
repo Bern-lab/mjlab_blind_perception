@@ -172,6 +172,8 @@ def get_recurrent_policy_metadata(policy: Any) -> dict[str, list | str | float]:
           "future_safe_landing_quality",
           "stair_shape",
           "safe_stride",
+          "safe_stride_interval",
+          "safe_stride_confidence",
         ],
         "policy_recurrent_state_names": ["h", "c", "z", "gate_state"],
         "policy_latent_obs_dim": str(getattr(policy, "latent_obs_dim", "")),

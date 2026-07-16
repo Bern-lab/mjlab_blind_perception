@@ -136,6 +136,8 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """Huber transition point for safe-stride labels, in meters."""
   safe_stride_width_loss_coef: float = 1.0
   """Weight for independently normalized SafeStride width regression."""
+  safe_stride_confidence_loss_coef: float = 0.30
+  """Weight for SafeStride interval-confidence BCE inside the SafeStride loss."""
   safe_stride_min: float = 0.10
   """Minimum decoded safe stride, in meters."""
   safe_stride_max: float = 0.55
@@ -145,7 +147,9 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   dynamic_safe_stride_enabled: bool = False
   """Decode SafeStride from current recurrent state, geometry memory, and gait phase."""
   safe_stride_phase_dim: int = 0
-  """Trailing deployable latent-observation channels containing gait phase."""
+  """Number of deployable latent-observation gait-phase channels."""
+  safe_stride_phase_start: int = -1
+  """Start index for gait phase, or -1 to use the trailing channels."""
   shadow_semantic_enabled: bool = False
   """Record a fixed-position semantic16 shadow vector without actor feedback."""
   geometry_probe_input: Literal["none", "shape", "hidden", "combined"] = "none"

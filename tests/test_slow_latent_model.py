@@ -36,6 +36,7 @@ def _make_model(
   *,
   structured_safe_stride_enabled: bool = False,
   dynamic_safe_stride_enabled: bool = False,
+  safe_stride_phase_start: int = -1,
   shadow_semantic_enabled: bool = False,
   geometry_probe_input: str = "none",
 ) -> LSTMSlowLatentMLPModel:
@@ -65,6 +66,7 @@ def _make_model(
     structured_safe_stride_enabled=structured_safe_stride_enabled,
     dynamic_safe_stride_enabled=dynamic_safe_stride_enabled,
     safe_stride_phase_dim=2 if dynamic_safe_stride_enabled else 0,
+    safe_stride_phase_start=safe_stride_phase_start,
     shadow_semantic_enabled=shadow_semantic_enabled,
     geometry_probe_input=geometry_probe_input,
   )
@@ -94,6 +96,7 @@ def test_slow_latent_actor_forward_updates_state_and_aux_outputs() -> None:
   assert aux["future_safe_landing_quality_logit"].shape == (4, 1)
   assert aux["stair_shape"].shape == (4, 2)
   assert aux["safe_stride"].shape == (4, 1)
+  assert aux["safe_stride_confidence_logit"].shape == (4, 1)
   assert "safe_stride_interval" not in aux
   assert torch.all(
     (0.23 <= aux["stair_shape"][..., 0]) & (aux["stair_shape"][..., 0] <= 0.37)
@@ -110,6 +113,7 @@ def test_slow_latent_actor_forward_updates_state_and_aux_outputs() -> None:
   assert diagnostics["future_quality"].shape == (4, 1)
   assert diagnostics["stair_shape"].shape == (4, 2)
   assert diagnostics["safe_stride"].shape == (4, 1)
+  assert diagnostics["safe_stride_confidence"].shape == (4, 1)
   assert "safe_stride_interval" not in diagnostics
   assert diagnostics["z_norm"].shape == (4, 1)
   assert diagnostics["gate_mode"].shape == (4, 1)
@@ -342,6 +346,23 @@ def test_dynamic_safe_stride_head_strictly_loads_legacy_input_weights() -> None:
   assert actions.shape == (4, 3)
 
 
+def test_dynamic_safe_stride_uses_configured_phase_slice() -> None:
+  model = _make_model(
+    structured_safe_stride_enabled=True,
+    dynamic_safe_stride_enabled=True,
+    safe_stride_phase_start=3,
+  )
+  shape_memory = torch.randn(2, model.shape_latent_dim)
+  h_t = torch.randn(2, model.latent_hidden_dim)
+  latent_obs = torch.zeros(2, model.latent_obs_dim)
+  latent_obs[:, 3:5] = torch.tensor([[0.25, 0.75], [0.5, -0.5]])
+  latent_obs[:, -2:] = torch.tensor([[9.0, 9.0], [8.0, 8.0]])
+
+  features = model._safe_stride_features(shape_memory, h_t, latent_obs)
+
+  torch.testing.assert_close(features[:, -2:], latent_obs[:, 3:5])
+
+
 def test_dynamic_safe_stride_width_is_independent_of_predicted_lower() -> None:
   model = _make_model(
     structured_safe_stride_enabled=True,
@@ -404,10 +425,20 @@ def test_safe_stride_probe_only_freezes_policy_and_action_distribution() -> None
   assert all(
     not parameter.requires_grad
     for name, parameter in actor.named_parameters()
-    if not name.startswith(("safe_stride_head.", "safe_stride_width_head."))
+    if not name.startswith(
+      (
+        "safe_stride_head.",
+        "safe_stride_width_head.",
+        "safe_stride_confidence_head.",
+      )
+    )
   )
   assert all(
     parameter.requires_grad for parameter in actor.safe_stride_head.parameters()
+  )
+  assert all(
+    parameter.requires_grad
+    for parameter in actor.safe_stride_confidence_head.parameters()
   )
   assert actor.safe_stride_width_head is not None
   assert all(
@@ -943,6 +974,8 @@ def test_onnx_wrapper_exposes_gated_slow_latent_state() -> None:
     "future_safe_landing_quality",
     "stair_shape",
     "safe_stride",
+    "safe_stride_interval",
+    "safe_stride_confidence",
   ]
 
   outputs = onnx_model(*onnx_model.get_dummy_inputs())
@@ -955,9 +988,12 @@ def test_onnx_wrapper_exposes_gated_slow_latent_state() -> None:
   assert outputs[8].shape == (1, 1)
   assert outputs[9].shape == (1, 2)
   assert outputs[10].shape == (1, 1)
+  assert outputs[11].shape == (1, 2)
+  assert outputs[12].shape == (1, 1)
   assert torch.all((0.23 <= outputs[9][..., 0]) & (outputs[9][..., 0] <= 0.37))
   assert torch.all((0.088 <= outputs[9][..., 1]) & (outputs[9][..., 1] <= 0.25))
   assert torch.all((0.08 <= outputs[10]) & (outputs[10] <= 0.45))
+  assert torch.all((0.0 <= outputs[12]) & (outputs[12] <= 1.0))
 
 
 def test_slow_latent_export_metadata() -> None:
@@ -988,9 +1024,11 @@ def test_slow_latent_export_metadata() -> None:
   ]
   output_names = metadata["policy_onnx_output_names"]
   assert isinstance(output_names, list)
-  assert output_names[-2:] == [
+  assert output_names[-4:] == [
     "stair_shape",
     "safe_stride",
+    "safe_stride_interval",
+    "safe_stride_confidence",
   ]
 
 

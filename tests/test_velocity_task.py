@@ -3,6 +3,7 @@
 from typing import cast
 
 import pytest
+import torch
 
 import mjlab.tasks  # noqa: F401
 from mjlab.asset_zoo.robots import G1_ACTION_SCALE, GO1_ACTION_SCALE
@@ -41,6 +42,7 @@ from mjlab.tasks.velocity.mdp import (
   UniformVelocityCommandCfg,
   stair_aware_feet_gait,
   stair_sequence_event_logger,
+  target_tread_midline_shaping,
 )
 from mjlab.tasks.velocity.mdp.teacher_target_heading_command import (
   TeacherTargetHeadingVelocityCommandCfg,
@@ -357,6 +359,14 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert velocity_stages[1]["lin_vel_x"] == (0.4, 1.0)
   assert "latent" in env_cfg.observations
   assert "stair_latent" in env_cfg.observations["latent"].terms
+  assert "foot_event_memory" in env_cfg.observations["latent"].terms
+  assert (
+    env_cfg.observations["latent"].terms["stair_latent"].params["include_gait_phase"]
+    is True
+  )
+  assert (
+    env_cfg.observations["latent"].terms["foot_event_memory"].params["memory_len"] == 6
+  )
   assert "latent_labels" in env_cfg.observations
   assert tuple(env_cfg.observations["latent_labels"].terms) == (
     "toe_riser_event",
@@ -414,8 +424,8 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert toe_reward_params["ground_contact_sensor_name"] == "feet_ground_contact"
   shank_reward = env_cfg.rewards["shank_front_edge_clearance_penalty"]
   shank_params = shank_reward.params
-  assert shank_reward.weight == -2.0
-  assert shank_params["clearance_margin"] == 0.05
+  assert shank_reward.weight == -3.0
+  assert shank_params["clearance_margin"] == 0.06
   assert shank_params["min_riser_height"] == 0.04
   assert shank_params["direction_cos_threshold"] == 0.85
   assert shank_params["lateral_margin"] == 0.05
@@ -429,23 +439,28 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert shank_params["asset_cfg"].preserve_order is True
   skip_reward = env_cfg.rewards["stair_skip_layer_penalty"]
   assert skip_reward.weight == -1.0
+  midline_reward = env_cfg.rewards["target_tread_midline_shaping"]
+  assert midline_reward.func is target_tread_midline_shaping
+  assert midline_reward.weight == 0.4
+  assert midline_reward.params["height_clearance"] == 0.02
+  assert midline_reward.params["sigma_fraction"] == 0.60
+  assert midline_reward.params["min_sigma"] == 0.20
+  assert midline_reward.params["edge_margin"] == 0.08
+  assert midline_reward.params["progress_scale"] == 0.30
+  assert midline_reward.params["center_scale"] == 0.70
+  assert midline_reward.params["edge_scale"] == 0.12
+  assert midline_reward.params["max_progress_step"] == 0.20
+  assert midline_reward.params["heading_cos"] == 0.70
+  assert midline_reward.params["asset_cfg"].site_names == (
+    "left_foot",
+    "right_foot",
+  )
   algorithm_cfg = cast(RslRlPpoTeacherKLAlgorithmCfg, rl_cfg.algorithm)
   assert algorithm_cfg.teacher_kl_cfg.log_kl_when_lambda_zero is False
   foot_gait = env_cfg.rewards["foot_gait"]
   assert foot_gait.func is stair_aware_feet_gait
   assert foot_gait.params["heading_cos"] == 0.70
-  landing_reward = env_cfg.rewards["stair_tread_landing_reward"]
-  assert landing_reward.weight == 0.5
-  assert landing_reward.params["landing_lead"] == 0.04
-  assert landing_reward.params["heading_cos"] == 0.70
-  assert landing_reward.params["min_landing_layer"] == 3
-  assert landing_reward.params["lip_edge_radius"] == 0.07
-  assert landing_reward.params["lip_margin"] == 0.01
-  assert landing_reward.params["foot_body_cfg"].body_names == (
-    "left_ankle_roll_link",
-    "right_ankle_roll_link",
-  )
-  assert landing_reward.params["support_deficit_scale"] == 0.40
+  assert "stair_tread_landing_reward" not in env_cfg.rewards
   latent_labels = env_cfg.observations["latent_labels"]
   assert latent_labels.terms["geometry_probe_validation"].params == {
     "validation_fraction": 0.2
@@ -488,14 +503,28 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert actor_cfg.aux_future_collision_risk_coef == 0.03
   assert actor_cfg.aux_future_safe_landing_quality_coef == 0.03
   assert actor_cfg.future_horizon == 20
-  assert actor_cfg.aux_stair_shape_coef == 0.0
+  assert actor_cfg.aux_stair_shape_coef == 0.03
   assert actor_cfg.aux_safe_stride_coef == 0.03
-  assert actor_cfg.structured_safe_stride_enabled is False
+  assert actor_cfg.structured_safe_stride_enabled is True
+  assert actor_cfg.dynamic_safe_stride_enabled is True
+  assert actor_cfg.safe_stride_phase_dim == 2
+  assert actor_cfg.safe_stride_phase_start == 91
   assert actor_cfg.stair_shape_huber_delta == 0.05
   assert actor_cfg.safe_stride_huber_delta == 0.05
   assert actor_cfg.safe_stride_width_loss_coef == 1.0
+  assert actor_cfg.safe_stride_confidence_loss_coef == 0.30
   assert actor_cfg.safe_stride_min == 0.10
   assert actor_cfg.safe_stride_max == 0.55
+
+
+def test_target_tread_midline_center_score_is_dense_and_centered() -> None:
+  errors = torch.tensor([0.0, 0.20, 0.40])
+  widths = torch.full_like(errors, 0.20)
+
+  scores = target_tread_midline_shaping._center_score(errors, widths)
+
+  assert scores[0].item() == pytest.approx(1.0)
+  assert scores[0] > scores[1] > scores[2] > 0.0
 
 
 def test_semantic_v2_shadow_runner_trains_heads_without_resuming_optimizer() -> None:
@@ -510,7 +539,7 @@ def test_semantic_v2_shadow_runner_trains_heads_without_resuming_optimizer() -> 
   assert cfg.bootstrap_checkpoint_path is None
   assert actor_cfg.shadow_semantic_enabled is True
   assert actor_cfg.structured_safe_stride_enabled is True
-  assert actor_cfg.aux_stair_shape_coef == 0.0
+  assert actor_cfg.aux_stair_shape_coef == 0.03
   assert actor_cfg.aux_safe_stride_coef == 0.03
   assert actor_cfg.latent_dim == 16
   assert actor_cfg.state_latent_dim == 8
@@ -532,6 +561,7 @@ def test_semantic_v2_probe_freezes_policy_and_uses_dynamic_stride_input() -> Non
   assert actor_cfg.structured_safe_stride_enabled is True
   assert actor_cfg.dynamic_safe_stride_enabled is True
   assert actor_cfg.safe_stride_phase_dim == 2
+  assert actor_cfg.safe_stride_phase_start == 91
   assert actor_cfg.aux_safe_stride_coef == 1.0
   assert actor_cfg.safe_stride_width_loss_coef == 1.0
   assert actor_cfg.aux_event_coef == 0.0
@@ -774,6 +804,8 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
   assert actor_cfg.safe_stride_max == 0.42
   assert actor_cfg.shadow_semantic_enabled is True
   assert actor_cfg.structured_safe_stride_enabled is True
+  assert actor_cfg.dynamic_safe_stride_enabled is True
+  assert actor_cfg.safe_stride_phase_start == 91
 
 
 def test_step_danger_explicit_param_interfaces_drive_configs() -> None:

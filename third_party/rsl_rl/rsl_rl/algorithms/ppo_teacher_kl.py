@@ -127,11 +127,24 @@ class PPOTeacherKL(PPO):
             if safe_stride_width_head is not None:
                 for parameter in safe_stride_width_head.parameters():
                     parameter.requires_grad_(True)
+            safe_stride_confidence_head = getattr(
+                self.actor,
+                "safe_stride_confidence_head",
+                None,
+            )
+            if safe_stride_confidence_head is not None:
+                for parameter in safe_stride_confidence_head.parameters():
+                    parameter.requires_grad_(True)
             probe_parameters = safe_stride_head.parameters()
             if safe_stride_width_head is not None:
                 probe_parameters = chain(
                     probe_parameters,
                     safe_stride_width_head.parameters(),
+                )
+            if safe_stride_confidence_head is not None:
+                probe_parameters = chain(
+                    probe_parameters,
+                    safe_stride_confidence_head.parameters(),
                 )
             self.optimizer = torch.optim.Adam(
                 probe_parameters,
@@ -164,7 +177,11 @@ class PPOTeacherKL(PPO):
         """Snapshot every actor/critic tensor outside the isolated decoder."""
         frozen: dict[str, torch.Tensor] = {}
         for name, value in self.actor.state_dict().items():
-            if not name.startswith(("safe_stride_head.", "safe_stride_width_head.")):
+            if not name.startswith((
+                "safe_stride_head.",
+                "safe_stride_width_head.",
+                "safe_stride_confidence_head.",
+            )):
                 frozen[f"actor.{name}"] = value.detach().cpu().clone()
         for name, value in self.critic.state_dict().items():
             frozen[f"critic.{name}"] = value.detach().cpu().clone()
@@ -684,6 +701,27 @@ class PPOTeacherKL(PPO):
         width_loss = (width_error * width_weight).sum() / width_weight.sum().clamp_min(1.0)
         total_loss = lower_loss + width_loss_coef * width_loss
         return total_loss, lower_loss, width_loss
+
+    @staticmethod
+    def _compute_safe_stride_confidence_loss(
+        logits: torch.Tensor,
+        target: torch.Tensor,
+        importance: torch.Tensor,
+    ) -> torch.Tensor:
+        """Balanced BCE for whether the decoded SafeStride interval is usable."""
+        target = target.clamp(0.0, 1.0)
+        error = functional.binary_cross_entropy_with_logits(
+            logits,
+            target,
+            reduction="none",
+        )
+        positive = target > 0.5
+        negative = ~positive
+        positive_weight = positive.to(error.dtype) * importance.clamp_min(1.0)
+        negative_weight = negative.to(error.dtype)
+        positive_loss = (error * positive_weight).sum() / positive_weight.sum().clamp_min(1.0)
+        negative_loss = (error * negative_weight).sum() / negative_weight.sum().clamp_min(1.0)
+        return 0.5 * (positive_loss + negative_loss)
 
     @staticmethod
     def _compute_normalized_stair_shape_loss(
@@ -1843,10 +1881,12 @@ class PPOTeacherKL(PPO):
             safe_stride_delta = float(getattr(self.actor, "safe_stride_huber_delta", 0.05))
             safe_stride_predictions = aux_outputs["safe_stride"]
             safe_stride_interval_predictions = aux_outputs.get("safe_stride_interval")
+            safe_stride_confidence_logit = aux_outputs.get("safe_stride_confidence_logit")
             safe_stride_target_center = 0.5 * (safe_stride_labels + safe_stride_upper)
             interval_valid = safe_stride_valid * safe_stride_interval_valid
             lower_loss_raw = safe_stride_predictions.new_zeros(())
             width_loss_raw = safe_stride_predictions.new_zeros(())
+            confidence_loss_raw = safe_stride_predictions.new_zeros(())
             width_loss_coef = 1.0
             if safe_stride_interval_predictions is not None:
                 width_loss_coef = float(getattr(self.actor, "safe_stride_width_loss_coef", 1.0))
@@ -1876,6 +1916,19 @@ class PPOTeacherKL(PPO):
                 predicted_upper = safe_stride_predictions
                 safe_stride_target_center = safe_stride_labels
                 center_valid = safe_stride_valid
+            if safe_stride_confidence_logit is not None:
+                confidence_target = (
+                    interval_valid if safe_stride_interval_predictions is not None else safe_stride_valid
+                )
+                confidence_loss_raw = self._compute_safe_stride_confidence_loss(
+                    safe_stride_confidence_logit,
+                    confidence_target,
+                    safe_stride_importance,
+                )
+                confidence_loss_coef = float(getattr(self.actor, "safe_stride_confidence_loss_coef", 0.0))
+                safe_stride_loss_raw = safe_stride_loss_raw + confidence_loss_coef * confidence_loss_raw
+            else:
+                confidence_loss_coef = 0.0
             safe_stride_mae, safe_stride_huber = self._compute_stair_shape_component_errors(
                 safe_stride_predictions,
                 safe_stride_target_center,
@@ -1921,6 +1974,46 @@ class PPOTeacherKL(PPO):
                 logs["slow_latent_safe_stride_lower_huber"] = self._distributed_mean_scalar(lower_loss_raw).item()
                 logs["slow_latent_safe_stride_width_huber"] = self._distributed_mean_scalar(width_loss_raw).item()
                 logs["slow_latent_safe_stride_width_loss_coef"] = width_loss_coef
+            if safe_stride_confidence_logit is not None:
+                confidence_prob = torch.sigmoid(safe_stride_confidence_logit)
+                confidence_target = (
+                    interval_valid if safe_stride_interval_predictions is not None else safe_stride_valid
+                )
+                confidence_positive = confidence_target > 0.5
+                confidence_negative = ~confidence_positive
+                positive_count = confidence_positive.to(center_valid.dtype).sum().clamp_min(1.0)
+                negative_count = confidence_negative.to(center_valid.dtype).sum().clamp_min(1.0)
+                confidence_pred_positive = confidence_prob > 0.5
+                confidence_true_positive = confidence_pred_positive & confidence_positive
+                confidence_false_positive = confidence_pred_positive & confidence_negative
+                confidence_false_negative = (~confidence_pred_positive) & confidence_positive
+                logs["slow_latent_safe_stride_confidence_bce"] = self._distributed_mean_scalar(
+                    confidence_loss_raw
+                ).item()
+                logs["slow_latent_safe_stride_confidence_loss_coef"] = confidence_loss_coef
+                logs["slow_latent_safe_stride_confidence_mean"] = self._distributed_mean_scalar(
+                    confidence_prob.mean()
+                ).item()
+                logs["slow_latent_safe_stride_confidence_valid_mean"] = self._distributed_mean_scalar(
+                    (confidence_prob * confidence_positive.to(confidence_prob.dtype)).sum() / positive_count
+                ).item()
+                logs["slow_latent_safe_stride_confidence_invalid_mean"] = self._distributed_mean_scalar(
+                    (confidence_prob * confidence_negative.to(confidence_prob.dtype)).sum() / negative_count
+                ).item()
+                logs["slow_latent_safe_stride_confidence_precision"] = self._distributed_mean_scalar(
+                    confidence_true_positive.to(center_valid.dtype).sum()
+                    / (
+                        confidence_true_positive.to(center_valid.dtype).sum()
+                        + confidence_false_positive.to(center_valid.dtype).sum()
+                    ).clamp_min(1.0)
+                ).item()
+                logs["slow_latent_safe_stride_confidence_recall"] = self._distributed_mean_scalar(
+                    confidence_true_positive.to(center_valid.dtype).sum()
+                    / (
+                        confidence_true_positive.to(center_valid.dtype).sum()
+                        + confidence_false_negative.to(center_valid.dtype).sum()
+                    ).clamp_min(1.0)
+                ).item()
             logs["slow_latent_safe_stride_valid_ratio"] = self._distributed_mean_scalar(safe_stride_valid.mean()).item()
             logs["slow_latent_safe_stride_interval_valid_ratio"] = self._distributed_mean_scalar(
                 interval_valid.sum() / safe_stride_valid.sum().clamp_min(1.0)
@@ -2112,6 +2205,10 @@ class PPOTeacherKL(PPO):
         safe_stride = diagnostics.get("safe_stride")
         if safe_stride is not None and safe_stride.numel() > 0:
             add_mean("slow_latent_safe_stride_pred_mean", safe_stride[..., 0])
+        add_mean(
+            "slow_latent_safe_stride_confidence_pred_mean",
+            diagnostics.get("safe_stride_confidence"),
+        )
         safe_stride_interval = diagnostics.get("safe_stride_interval")
         if safe_stride_interval is not None and safe_stride_interval.shape[-1] == 2:
             add_mean(
@@ -2145,7 +2242,7 @@ class PPOTeacherKL(PPO):
                 "safe_stride_center_norm",
                 "safe_stride_width_norm",
                 "clearance_height_norm",
-                "stride_correction_norm",
+                "safe_stride_confidence",
             )
             for index, name in enumerate(semantic_names):
                 add_mean(
@@ -2389,6 +2486,16 @@ class PPOTeacherKL(PPO):
                     probe_parameters,
                     safe_stride_width_head.parameters(),
                 )
+            safe_stride_confidence_head = getattr(
+                self.actor,
+                "safe_stride_confidence_head",
+                None,
+            )
+            if safe_stride_confidence_head is not None:
+                probe_parameters = chain(
+                    probe_parameters,
+                    safe_stride_confidence_head.parameters(),
+                )
             torch.nn.utils.clip_grad_norm_(
                 probe_parameters,
                 self.max_grad_norm,
@@ -2568,6 +2675,13 @@ class PPOTeacherKL(PPO):
             )
             if safe_stride_width_head is not None:
                 safe_stride_width_head.train()
+            safe_stride_confidence_head = getattr(
+                self.actor,
+                "safe_stride_confidence_head",
+                None,
+            )
+            if safe_stride_confidence_head is not None:
+                safe_stride_confidence_head.train()
             self._freeze_teacher()
             return
         if self.geometry_probe_only:

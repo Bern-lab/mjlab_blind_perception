@@ -78,10 +78,10 @@ class G1SlowLatentRewardParams:
   )
   pose_std_walking: dict[str, float] = field(
     default_factory=lambda: {
-      r".*hip_pitch.*": 0.4,
-      r".*hip_roll.*": 0.15,
-      r".*hip_yaw.*": 0.15,
-      r".*knee.*": 0.45,
+      r".*hip_pitch.*": 0.50,
+      r".*hip_roll.*": 0.18,
+      r".*hip_yaw.*": 0.18,
+      r".*knee.*": 0.35,
       r".*ankle_pitch.*": 0.20,
       r".*ankle_roll.*": 0.1,
       r".*waist_yaw.*": 0.2,
@@ -96,10 +96,10 @@ class G1SlowLatentRewardParams:
   )
   pose_std_running: dict[str, float] = field(
     default_factory=lambda: {
-      r".*hip_pitch.*": 0.5,
-      r".*hip_roll.*": 0.2,
-      r".*hip_yaw.*": 0.2,
-      r".*knee.*": 0.6,
+      r".*hip_pitch.*": 0.65,
+      r".*hip_roll.*": 0.25,
+      r".*hip_yaw.*": 0.25,
+      r".*knee.*": 0.45,
       r".*ankle_pitch.*": 0.35,
       r".*ankle_roll.*": 0.15,
       r".*waist_yaw.*": 0.3,
@@ -198,9 +198,21 @@ class G1SlowLatentRewardParams:
   toe_stair_command_threshold: float = 0.05
   stair_skip_layer_weight: float = -1.0
 
+  # Target-foot dense shaping toward the expected tread-depth midline.  This
+  # only activates once the swing foot is above the target tread height.
+  target_tread_midline_weight: float = 0.4
+  target_tread_midline_height_clearance: float = 0.02
+  target_tread_midline_sigma_fraction: float = 0.60
+  target_tread_midline_min_sigma: float = 0.20
+  target_tread_midline_edge_margin: float = 0.08
+  target_tread_midline_progress_scale: float = 0.30
+  target_tread_midline_center_scale: float = 0.70
+  target_tread_midline_edge_scale: float = 0.12
+  target_tread_midline_max_progress_step: float = 0.20
+
   # Per-leg shank collision-capsule clearance from the next semantic stair edge.
-  shank_edge_weight: float = -2.0
-  shank_edge_clearance_margin: float = 0.05
+  shank_edge_weight: float = -3.0
+  shank_edge_clearance_margin: float = 0.06
   shank_edge_min_riser_height: float = 0.04
   shank_edge_direction_cos_threshold: float = 0.85
   shank_edge_lateral_margin: float = 0.05
@@ -208,7 +220,9 @@ class G1SlowLatentRewardParams:
   shank_capsule_end_local: tuple[float, float, float] = (0.01, 0.0, -0.15)
   shank_capsule_radius: float = 0.045
 
-  # Following-step privileged-geometry landing shaping.
+  # Disabled following-step privileged landing shaping.  The lip-volume term
+  # already carries the edge/partial-foot signal, while this touchdown-only
+  # reward was too sparse to help the current SlowLatent run.
   stair_tread_landing_weight: float = 0.5
   stair_tread_landing_lead: float = 0.04
   stair_tread_landing_sigma_fraction: float = 0.15
@@ -266,14 +280,22 @@ class G1SlowLatentEnvParams:
   """Observation group consumed by the slow-latent encoder."""
   latent_obs_term_name: str = "stair_latent"
   """Observation term name for stair-focused latent encoder features."""
+  foot_event_memory_term_name: str = "foot_event_memory"
+  """Observation term name for footprint/toe-mark event memory features."""
+  enable_foot_event_memory_obs: bool = True
+  """Append deployable-shaped footprint/toe-mark memory to latent obs."""
+  foot_event_memory_length: int = 6
+  """Number of recent footprint and toe-mark slots kept per env."""
+  foot_event_memory_age_norm_s: float = 1.5
+  """Age horizon after which event-memory slots are invalidated."""
   label_group_name: str = "latent_labels"
   """Observation group used by auxiliary slow-latent losses during training."""
   enable_latent_labels: bool = True
   """Enable simulation-only labels for event/stair auxiliary losses."""
   enable_latent_obs_corruption: bool = False
   """Apply observation corruption to latent encoder inputs."""
-  include_gait_phase_in_latent: bool = False
-  """Append the deployable gait phase for dynamic Semantic-v2 decoding."""
+  include_gait_phase_in_latent: bool = True
+  """Append the deployable gait phase after the base 91 stair-latent channels."""
   target_command: G1SlowLatentTargetCommandParams = field(
     default_factory=G1SlowLatentTargetCommandParams
   )
@@ -385,34 +407,22 @@ def configure_g1_step_danger_rewards(
     func=mdp.stair_skip_layer_penalty,
     weight=params.stair_skip_layer_weight,
   )
-  cfg.rewards["stair_tread_landing_reward"] = RewardTermCfg(
-    func=mdp.stair_tread_landing_reward,
-    weight=params.stair_tread_landing_weight,
+  cfg.rewards["target_tread_midline_shaping"] = RewardTermCfg(
+    func=mdp.target_tread_midline_shaping,
+    weight=params.target_tread_midline_weight,
     params={
       "ground_contact_sensor_name": "feet_ground_contact",
-      "toe_contact_sensor_name": TOE_TERRAIN_CONTACT_SENSOR,
-      "landing_lead": params.stair_tread_landing_lead,
-      "sigma_fraction": params.stair_tread_landing_sigma_fraction,
-      "min_sigma": params.stair_tread_landing_min_sigma,
-      "back_margin": params.stair_tread_landing_back_margin,
-      "front_margin": params.stair_tread_landing_front_margin,
-      "lateral_margin": params.stair_tread_landing_lateral_margin,
-      "height_tolerance": params.stair_tread_landing_height_tolerance,
-      "support_deficit_scale": params.stair_tread_landing_support_deficit_scale,
-      "vertical_normal_z_max": params.toe_contact_vertical_normal_z_max,
-      "min_terrain_level": params.min_terrain_level,
-      "min_landing_layer": params.stair_tread_landing_min_layer,
-      "lip_edge_radius": params.foot_lip_edge_radius,
-      "lip_margin": params.stair_tread_landing_lip_margin,
-      "lip_edge_height_band": params.foot_lip_edge_height_band,
-      "slab_depth": params.toe_slab_depth,
-      "slab_u_margin": params.toe_slab_u_margin,
-      "slab_v_margin": params.toe_slab_v_margin,
-      "toe_x_min": params.toe_x_min,
-      "surface_tol": params.surface_tol,
+      "height_clearance": params.target_tread_midline_height_clearance,
+      "sigma_fraction": params.target_tread_midline_sigma_fraction,
+      "min_sigma": params.target_tread_midline_min_sigma,
+      "edge_margin": params.target_tread_midline_edge_margin,
+      "progress_scale": params.target_tread_midline_progress_scale,
+      "center_scale": params.target_tread_midline_center_scale,
+      "edge_scale": params.target_tread_midline_edge_scale,
+      "max_progress_step": params.target_tread_midline_max_progress_step,
       "heading_cos": params.toe_stair_heading_cos,
+      "min_terrain_level": params.min_terrain_level,
       "asset_cfg": SceneEntityCfg("robot", site_names=("left_foot", "right_foot")),
-      "foot_body_cfg": foot_asset_cfg(),
     },
   )
 
@@ -674,20 +684,34 @@ def _configure_slow_latent_rewards(
 def _configure_latent_observations(
   cfg: ManagerBasedRlEnvCfg,
   params: G1SlowLatentEnvParams,
+  play: bool = False,
 ) -> None:
+  latent_terms = {
+    params.latent_obs_term_name: ObservationTermCfg(
+      func=mdp.stair_latent_obs,
+      params={
+        "toe_contact_sensor_name": TOE_TERRAIN_CONTACT_SENSOR,
+        "asset_cfg": g1_foot_body_cfg(),
+        "include_gait_phase": params.include_gait_phase_in_latent,
+        "gait_period": params.rewards.foot_gait_period,
+        "command_name": "twist",
+      },
+    ),
+  }
+  if params.enable_foot_event_memory_obs:
+    latent_terms[params.foot_event_memory_term_name] = ObservationTermCfg(
+      func=mdp.FootEventMemoryObs,
+      params={
+        "memory_len": params.foot_event_memory_length,
+        "age_norm_s": params.foot_event_memory_age_norm_s,
+        "stance_age_norm_s": params.foot_event_memory_age_norm_s,
+        "gait_period": params.rewards.foot_gait_period,
+        "command_name": "twist",
+        "noise_enabled": not play,
+      },
+    )
   cfg.observations[params.latent_group_name] = ObservationGroupCfg(
-    terms={
-      params.latent_obs_term_name: ObservationTermCfg(
-        func=mdp.stair_latent_obs,
-        params={
-          "toe_contact_sensor_name": TOE_TERRAIN_CONTACT_SENSOR,
-          "asset_cfg": g1_foot_body_cfg(),
-          "include_gait_phase": params.include_gait_phase_in_latent,
-          "gait_period": params.rewards.foot_gait_period,
-          "command_name": "twist",
-        },
-      ),
-    },
+    terms=latent_terms,
     concatenate_terms=True,
     enable_corruption=params.enable_latent_obs_corruption,
     history_length=0,
@@ -784,7 +808,7 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_env_cfg(
     )
   _configure_target_command(cfg, params.target_command, play)
   _configure_slow_latent_rewards(cfg, params.rewards)
-  _configure_latent_observations(cfg, params)
+  _configure_latent_observations(cfg, params, play=play)
   if play:
     _configure_slow_latent_play_visualization(
       cfg, params.play_visualization, params.rewards

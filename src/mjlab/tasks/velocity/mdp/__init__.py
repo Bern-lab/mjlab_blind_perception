@@ -19,4 +19,5 @@ toe_step_riser_approach_penalty: Any = (
 )
 stair_aware_feet_gait = _temporal_stair_rewards.stair_aware_feet_gait
 stair_skip_layer_penalty = _temporal_stair_rewards.stair_skip_layer_penalty
+target_tread_midline_shaping = _temporal_stair_rewards.target_tread_midline_shaping
 stair_tread_landing_reward = _temporal_stair_rewards.stair_tread_landing_reward

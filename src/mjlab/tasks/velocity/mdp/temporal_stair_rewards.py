@@ -2814,6 +2814,214 @@ def stair_skip_layer_penalty(env) -> torch.Tensor:
   return penalty
 
 
+class target_tread_midline_shaping:
+  """Shape the current swing foot toward the expected tread-depth midline."""
+
+  def __init__(self, cfg: RewardTermCfg, env) -> None:
+    del cfg
+    self._prev_phi = torch.zeros(env.num_envs, device=env.device)
+    self._prev_valid = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+    self._prev_sequence_id = torch.full(
+      (env.num_envs,), -1, device=env.device, dtype=torch.long
+    )
+    self._prev_layer = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
+    self._prev_target_foot = torch.full(
+      (env.num_envs,), -1, device=env.device, dtype=torch.long
+    )
+
+  def reset(self, env_ids: torch.Tensor) -> None:
+    self._prev_phi[env_ids] = 0.0
+    self._prev_valid[env_ids] = False
+    self._prev_sequence_id[env_ids] = -1
+    self._prev_layer[env_ids] = 0
+    self._prev_target_foot[env_ids] = -1
+
+  @staticmethod
+  def _center_score(error: torch.Tensor, width: torch.Tensor) -> torch.Tensor:
+    scaled_error = error.abs() / width.clamp_min(1.0e-6)
+    return 1.0 / (1.0 + scaled_error.square())
+
+  def __call__(
+    self,
+    env,
+    ground_contact_sensor_name: str,
+    height_clearance: float = 0.02,
+    sigma_fraction: float = 0.60,
+    min_sigma: float = 0.20,
+    edge_margin: float = 0.08,
+    progress_scale: float = 0.30,
+    center_scale: float = 0.70,
+    edge_scale: float = 0.12,
+    max_progress_step: float = 0.20,
+    heading_cos: float = 0.70,
+    min_terrain_level: int = 3,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FOOT_SITE_CFG,
+  ) -> torch.Tensor:
+    boundaries, valid_boundaries = _current_step_boundaries(env)
+    if boundaries is None or valid_boundaries is None:
+      return torch.zeros(env.num_envs, device=env.device)
+    boundary_sequence_ids, boundary_layers = _current_step_boundary_metadata(env)
+    if boundary_sequence_ids is None or boundary_layers is None:
+      return torch.zeros(env.num_envs, device=env.device)
+
+    expected_layer = env.extras.get(STAIR_EXPECTED_LAYER_KEY)
+    sequence_id = env.extras.get(STAIR_SEQUENCE_ID_KEY)
+    target_foot = env.extras.get(STAIR_TARGET_FOOT_KEY)
+    stair_phase = env.extras.get(STAIR_PHASE_KEY)
+    ascent_dir = env.extras.get(STAIR_ASCENT_DIR_KEY)
+    if (
+      not isinstance(expected_layer, torch.Tensor)
+      or not isinstance(sequence_id, torch.Tensor)
+      or not isinstance(target_foot, torch.Tensor)
+      or not isinstance(stair_phase, torch.Tensor)
+      or not isinstance(ascent_dir, torch.Tensor)
+    ):
+      return torch.zeros(env.num_envs, device=env.device)
+
+    asset: Entity = env.scene[asset_cfg.name]
+    foot_pos_w = asset.data.site_pos_w[:, asset_cfg.site_ids, :]
+    num_envs, num_feet = foot_pos_w.shape[:2]
+    if num_feet != 2:
+      raise RuntimeError("target_tread_midline_shaping requires two foot sites.")
+
+    ground_sensor = env.scene[ground_contact_sensor_name]
+    assert isinstance(ground_sensor, ContactSensor), (
+      "target_tread_midline_shaping requires a ground ContactSensor."
+    )
+    contact_time = ground_sensor.data.current_contact_time
+    if contact_time is None:
+      contact = ground_sensor.compute_first_contact(dt=env.step_dt)
+    else:
+      if contact_time.shape[-1] != num_feet:
+        if contact_time.shape[-1] % num_feet != 0:
+          raise RuntimeError(
+            "target_tread_midline_shaping requires one contact channel per foot."
+          )
+        contact_time = contact_time.view(num_envs, num_feet, -1).max(dim=-1).values
+      contact = contact_time > 0.0
+
+    target_foot_valid = (target_foot >= 0) & (target_foot < num_feet)
+    target_foot_safe = target_foot.clamp(0, num_feet - 1)
+    env_ids = torch.arange(num_envs, device=env.device)
+    target_foot_pos = foot_pos_w[env_ids, target_foot_safe]
+    target_swing = target_foot_valid & ~contact[env_ids, target_foot_safe]
+
+    target_boundary = (
+      valid_boundaries
+      & (boundary_sequence_ids == sequence_id[:, None])
+      & (boundary_layers == expected_layer[:, None])
+    )
+    has_target_boundary = torch.any(target_boundary, dim=-1)
+    target_boundary_idx = torch.argmax(target_boundary.long(), dim=-1)
+    target_boundary_data = boundaries[env_ids, target_boundary_idx]
+
+    tread_depth, _riser_height, shape_valid = cached_stair_shape(
+      env, boundaries, valid_boundaries
+    )
+    target_height = target_boundary_data[:, 10]
+    height_gate = target_foot_pos[:, 2] >= target_height + height_clearance
+    heading_gate = (
+      toe_step_riser_slab_penalty._base_heading_cos(
+        asset.data.root_link_quat_w,
+        ascent_dir,
+      )
+      >= heading_cos
+    )
+    active = (
+      (stair_phase >= 1)
+      & (expected_layer > 0)
+      & target_swing
+      & has_target_boundary
+      & shape_valid
+      & height_gate
+      & heading_gate
+      & _terrain_level_active(env, min_terrain_level)
+    )
+
+    normal_to_low = toe_step_riser_slab_penalty._normalize_xy(
+      target_boundary_data[:, 6:8]
+    )
+    p0_xy = target_boundary_data[:, 0:2]
+    foot_s = torch.sum((target_foot_pos[:, :2] - p0_xy) * -normal_to_low, dim=-1)
+    target_s = 0.5 * tread_depth
+    sigma = torch.clamp(sigma_fraction * tread_depth, min=min_sigma)
+    center_error = foot_s - target_s
+    center_score = self._center_score(center_error, sigma)
+
+    inside_target_tread = (foot_s >= 0.0) & (foot_s <= tread_depth)
+    edge_clearance = torch.minimum(foot_s, tread_depth - foot_s)
+    edge_error = torch.relu(edge_margin - edge_clearance) / max(edge_margin, 1.0e-6)
+    edge_penalty = torch.clamp(edge_error, max=1.0).square()
+    edge_penalty = torch.where(
+      inside_target_tread,
+      edge_penalty,
+      torch.zeros_like(edge_penalty),
+    )
+
+    phi = center_score
+    same_target = (
+      self._prev_valid
+      & (self._prev_sequence_id == sequence_id)
+      & (self._prev_layer == expected_layer)
+      & (self._prev_target_foot == target_foot)
+    )
+    progress = torch.where(
+      active & same_target,
+      phi - self._prev_phi,
+      torch.zeros_like(phi),
+    )
+    progress = torch.clamp(progress, min=-max_progress_step, max=max_progress_step)
+    reward = (
+      progress_scale * progress
+      + center_scale * center_score
+      - edge_scale * edge_penalty
+    )
+    reward = torch.where(active, reward, torch.zeros_like(reward))
+
+    self._prev_phi.copy_(torch.where(active, phi, torch.zeros_like(phi)))
+    self._prev_valid.copy_(active)
+    self._prev_sequence_id.copy_(
+      torch.where(active, sequence_id, torch.full_like(sequence_id, -1))
+    )
+    self._prev_layer.copy_(
+      torch.where(active, expected_layer, torch.zeros_like(expected_layer))
+    )
+    self._prev_target_foot.copy_(
+      torch.where(active, target_foot, torch.full_like(target_foot, -1))
+    )
+
+    active_count = active.float().sum().clamp_min(1.0)
+    candidate = (
+      (stair_phase >= 1)
+      & (expected_layer > 0)
+      & target_swing
+      & has_target_boundary
+      & shape_valid
+    )
+    candidate_count = candidate.float().sum().clamp_min(1.0)
+    log = env.extras["log"]
+    log["Metrics/target_tread_midline_active_ratio"] = active.float().mean()
+    log["Metrics/target_tread_midline_height_gate_ratio"] = (
+      candidate & height_gate
+    ).float().sum() / candidate_count
+    log["Metrics/target_tread_midline_error_abs_mean"] = (
+      center_error.abs() * active.float()
+    ).sum() / active_count
+    log["Metrics/target_tread_midline_center_score_mean"] = (
+      center_score * active.float()
+    ).sum() / active_count
+    log["Metrics/target_tread_midline_edge_penalty_mean"] = (
+      edge_penalty * active.float()
+    ).sum() / active_count
+    log["Metrics/target_tread_midline_progress_mean"] = (
+      progress * active.float()
+    ).sum() / active_count
+    log["Metrics/target_tread_midline_reward_mean"] = (
+      reward * active.float()
+    ).sum() / active_count
+    return reward
+
+
 class stair_aware_feet_gait:
   """Relax gait phase during heading-aligned stair entry and following."""
 

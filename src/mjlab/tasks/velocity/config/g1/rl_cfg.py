@@ -96,7 +96,7 @@ class G1SlowLatentPolicyModelParams:
   """Huber loss weight for continuous future collision risk."""
   aux_future_safe_landing_quality_coef: float = 0.03
   """Huber loss weight for continuous next-touchdown quality."""
-  aux_stair_shape_coef: float = 0.0
+  aux_stair_shape_coef: float = 0.03
   """Huber loss weight for privileged stair geometry prediction."""
   aux_safe_stride_coef: float = 0.03
   """Huber loss weight for the Event-to-layer2 minimum safe stride."""
@@ -106,16 +106,20 @@ class G1SlowLatentPolicyModelParams:
   """Huber transition point for safe-stride prediction, in meters."""
   safe_stride_width_loss_coef: float = 1.0
   """Weight for independently normalized SafeStride width regression."""
+  safe_stride_confidence_loss_coef: float = 0.30
+  """Weight for SafeStride interval-confidence BCE inside the SafeStride loss."""
   safe_stride_min: float = 0.10
   """Minimum decoded safe-stride estimate, in meters."""
   safe_stride_max: float = 0.55
   """Maximum decoded safe-stride estimate, in meters."""
-  structured_safe_stride_enabled: bool = False
+  structured_safe_stride_enabled: bool = True
   """Use the ordered lower-plus-width SafeStride head."""
-  dynamic_safe_stride_enabled: bool = False
+  dynamic_safe_stride_enabled: bool = True
   """Use current recurrent state and gait phase for per-step SafeStride."""
-  safe_stride_phase_dim: int = 0
-  """Number of trailing latent-observation gait-phase channels."""
+  safe_stride_phase_dim: int = 2
+  """Number of latent-observation gait-phase channels."""
+  safe_stride_phase_start: int = 91
+  """Start index for gait phase, or -1 to use trailing channels."""
   shadow_semantic_enabled: bool = False
   """Record semantic16 diagnostics without changing actor conditioning."""
   future_risk_weight_scale: float = 2.0
@@ -209,16 +213,18 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
   aux_stair_pos_weight: float = 3.0,
   aux_future_collision_risk_coef: float = 0.03,
   aux_future_safe_landing_quality_coef: float = 0.03,
-  aux_stair_shape_coef: float = 0.0,
+  aux_stair_shape_coef: float = 0.03,
   aux_safe_stride_coef: float = 0.03,
   stair_shape_huber_delta: float = 0.05,
   safe_stride_huber_delta: float = 0.05,
   safe_stride_width_loss_coef: float = 1.0,
+  safe_stride_confidence_loss_coef: float = 0.30,
   safe_stride_min: float = 0.10,
   safe_stride_max: float = 0.55,
-  structured_safe_stride_enabled: bool = False,
-  dynamic_safe_stride_enabled: bool = False,
-  safe_stride_phase_dim: int = 0,
+  structured_safe_stride_enabled: bool = True,
+  dynamic_safe_stride_enabled: bool = True,
+  safe_stride_phase_dim: int = 2,
+  safe_stride_phase_start: int = 91,
   shadow_semantic_enabled: bool = False,
   future_risk_weight_scale: float = 2.0,
   future_quality_weight_scale: float = 2.0,
@@ -266,11 +272,13 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
     stair_shape_huber_delta=stair_shape_huber_delta,
     safe_stride_huber_delta=safe_stride_huber_delta,
     safe_stride_width_loss_coef=safe_stride_width_loss_coef,
+    safe_stride_confidence_loss_coef=safe_stride_confidence_loss_coef,
     safe_stride_min=safe_stride_min,
     safe_stride_max=safe_stride_max,
     structured_safe_stride_enabled=structured_safe_stride_enabled,
     dynamic_safe_stride_enabled=dynamic_safe_stride_enabled,
     safe_stride_phase_dim=safe_stride_phase_dim,
+    safe_stride_phase_start=safe_stride_phase_start,
     shadow_semantic_enabled=shadow_semantic_enabled,
     future_risk_weight_scale=future_risk_weight_scale,
     future_quality_weight_scale=future_quality_weight_scale,
@@ -444,16 +452,18 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
   aux_stair_pos_weight: float = 3.0,
   aux_future_collision_risk_coef: float = 0.03,
   aux_future_safe_landing_quality_coef: float = 0.03,
-  aux_stair_shape_coef: float = 0.0,
+  aux_stair_shape_coef: float = 0.03,
   aux_safe_stride_coef: float = 0.03,
   stair_shape_huber_delta: float = 0.05,
   safe_stride_huber_delta: float = 0.05,
   safe_stride_width_loss_coef: float = 1.0,
+  safe_stride_confidence_loss_coef: float = 0.30,
   safe_stride_min: float = 0.10,
   safe_stride_max: float = 0.55,
-  structured_safe_stride_enabled: bool = False,
-  dynamic_safe_stride_enabled: bool = False,
-  safe_stride_phase_dim: int = 0,
+  structured_safe_stride_enabled: bool = True,
+  dynamic_safe_stride_enabled: bool = True,
+  safe_stride_phase_dim: int = 2,
+  safe_stride_phase_start: int = 91,
   shadow_semantic_enabled: bool = False,
   future_risk_weight_scale: float = 2.0,
   future_quality_weight_scale: float = 2.0,
@@ -516,11 +526,13 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
     stair_shape_huber_delta = model_params.stair_shape_huber_delta
     safe_stride_huber_delta = model_params.safe_stride_huber_delta
     safe_stride_width_loss_coef = model_params.safe_stride_width_loss_coef
+    safe_stride_confidence_loss_coef = model_params.safe_stride_confidence_loss_coef
     safe_stride_min = model_params.safe_stride_min
     safe_stride_max = model_params.safe_stride_max
     structured_safe_stride_enabled = model_params.structured_safe_stride_enabled
     dynamic_safe_stride_enabled = model_params.dynamic_safe_stride_enabled
     safe_stride_phase_dim = model_params.safe_stride_phase_dim
+    safe_stride_phase_start = model_params.safe_stride_phase_start
     shadow_semantic_enabled = model_params.shadow_semantic_enabled
     future_risk_weight_scale = model_params.future_risk_weight_scale
     future_quality_weight_scale = model_params.future_quality_weight_scale
@@ -568,11 +580,13 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
     stair_shape_huber_delta=stair_shape_huber_delta,
     safe_stride_huber_delta=safe_stride_huber_delta,
     safe_stride_width_loss_coef=safe_stride_width_loss_coef,
+    safe_stride_confidence_loss_coef=safe_stride_confidence_loss_coef,
     safe_stride_min=safe_stride_min,
     safe_stride_max=safe_stride_max,
     structured_safe_stride_enabled=structured_safe_stride_enabled,
     dynamic_safe_stride_enabled=dynamic_safe_stride_enabled,
     safe_stride_phase_dim=safe_stride_phase_dim,
+    safe_stride_phase_start=safe_stride_phase_start,
     shadow_semantic_enabled=shadow_semantic_enabled,
     future_risk_weight_scale=future_risk_weight_scale,
     future_quality_weight_scale=future_quality_weight_scale,
@@ -604,7 +618,7 @@ def unitree_g1_blind_rough_target_navigation_semantic_v2_shadow_runner_cfg() -> 
   actor_cfg = cast(RslRlGatedStairLatentModelCfg, cfg.actor)
   actor_cfg.shadow_semantic_enabled = True
   actor_cfg.structured_safe_stride_enabled = True
-  actor_cfg.aux_stair_shape_coef = 0.0
+  actor_cfg.aux_stair_shape_coef = 0.03
   cfg.experiment_name = "g1_blind_rough_target_navigation_semantic_v2_shadow_teacherkl"
   cfg.load_optimizer_on_resume = False
   cfg.load_iteration_on_resume = False
@@ -624,6 +638,7 @@ def unitree_g1_blind_rough_target_navigation_semantic_v2_probe_runner_cfg() -> (
   actor_cfg.structured_safe_stride_enabled = True
   actor_cfg.dynamic_safe_stride_enabled = True
   actor_cfg.safe_stride_phase_dim = 2
+  actor_cfg.safe_stride_phase_start = 91
   actor_cfg.aux_event_coef = 0.0
   actor_cfg.aux_stair_coef = 0.0
   actor_cfg.aux_future_collision_risk_coef = 0.0

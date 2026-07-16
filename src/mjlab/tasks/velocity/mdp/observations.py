@@ -7,7 +7,7 @@ import torch
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import CameraSensor, ContactSensor
 from mjlab.sensor.terrain_height_sensor import TerrainHeightSensor
-from mjlab.utils.lab_api.math import quat_apply, quat_apply_inverse
+from mjlab.utils.lab_api.math import quat_apply, quat_apply_inverse, yaw_quat
 
 from .stair_geometry import (
   COLLISION_RISK_KEY,
@@ -23,6 +23,8 @@ from .stair_geometry import (
   STAIR_ADJACENT_PAIR_EVENT_KEY,
   STAIR_ADJACENT_PAIR_HEIGHT_KEY,
   STAIR_ADJACENT_PAIR_VALID_KEY,
+  STAIR_CURRENT_CONTACT_DURATION_KEY,
+  STAIR_CURRENT_GROUND_CONTACT_KEY,
   STAIR_DEPTH_CONFIRMATION_AGE_KEY,
   STAIR_DEPTH_CONFIRMATION_EVENT_KEY,
   STAIR_DEPTH_LABEL_VALID_KEY,
@@ -32,6 +34,8 @@ from .stair_geometry import (
   STAIR_RISER_HEIGHT_LABEL_KEY,
   STAIR_SHAPE_LABEL_VALID_KEY,
   STAIR_TREAD_DEPTH_LABEL_KEY,
+  TOE_RISER_NEW_HIT_BY_FOOT_KEY,
+  TOE_RISER_NEW_HIT_KEY,
 )
 
 if TYPE_CHECKING:
@@ -793,6 +797,807 @@ def stair_latent_obs_dim(include_gait_phase: bool = False) -> int:
     + 1  # command_lin_x
   )  # = 9 + 12 + 6 + 3 + 6 + 6 + 48 + 1 = 91
   return base_dim + (2 if include_gait_phase else 0)
+
+
+FOOT_EVENT_MEMORY_LEN = 6
+FOOTPRINT_SLOT_DIM = 17
+TOE_MARK_SLOT_DIM = 16
+FOOT_EVENT_MEMORY_OBS_DIM = (
+  FOOT_EVENT_MEMORY_LEN * FOOTPRINT_SLOT_DIM + FOOT_EVENT_MEMORY_LEN * TOE_MARK_SLOT_DIM
+)
+
+
+def foot_event_memory_obs_dim(memory_len: int = FOOT_EVENT_MEMORY_LEN) -> int:
+  """Return flattened deployable footprint/toe-mark memory dimension."""
+  return int(memory_len) * (FOOTPRINT_SLOT_DIM + TOE_MARK_SLOT_DIM)
+
+
+def _tensor_extra(
+  env: ManagerBasedRlEnv,
+  key: str,
+  shape: tuple[int, ...],
+  dtype: torch.dtype,
+  fill_value: float | int | bool,
+) -> torch.Tensor:
+  value = env.extras.get(key)
+  if isinstance(value, torch.Tensor):
+    return value.to(device=env.device, dtype=dtype)
+  return torch.full((env.num_envs, *shape), fill_value, dtype=dtype, device=env.device)
+
+
+def _per_foot_toe_hit(env: ManagerBasedRlEnv) -> torch.Tensor:
+  value = env.extras.get(TOE_RISER_NEW_HIT_BY_FOOT_KEY)
+  if isinstance(value, torch.Tensor):
+    toe_hit = value.to(device=env.device, dtype=torch.bool)
+  else:
+    toe_hit = _tensor_extra(env, TOE_RISER_NEW_HIT_KEY, (2,), torch.bool, False)
+  if toe_hit.ndim == 1:
+    toe_hit = toe_hit[:, None].expand(-1, 2)
+  return toe_hit[:, :2].bool()
+
+
+def _root_pose_from_env(env: ManagerBasedRlEnv) -> tuple[torch.Tensor, torch.Tensor]:
+  robot = env.scene["robot"]
+  return (
+    robot.data.root_link_pos_w.to(device=env.device, dtype=torch.float32),
+    robot.data.root_link_quat_w.to(device=env.device, dtype=torch.float32),
+  )
+
+
+def _world_to_current_base_yaw(
+  point_w: torch.Tensor,
+  root_pos_w: torch.Tensor,
+  root_quat_w: torch.Tensor,
+) -> torch.Tensor:
+  quat_shape = root_quat_w.shape
+  root_yaw = yaw_quat(root_quat_w.reshape(-1, 4)).reshape(quat_shape)
+  return quat_apply_inverse(root_yaw, point_w - root_pos_w)
+
+
+class FootEventMemoryObs:
+  """Causal deployable-shaped memory of recent footprints and toe-riser hits.
+
+  The training term uses oracle contact/toe-hit extras to synthesize detector-like
+  events, but the returned features are restricted to deployable information:
+  event source/confidence/age, FK-derived event positions, contact probabilities,
+  and gait phase. Footprints are stance-latched so one stance can create at most
+  one footprint slot.
+  """
+
+  def __init__(self, cfg: Any, env: ManagerBasedRlEnv) -> None:
+    params = cfg.params
+    self.num_envs = int(env.num_envs)
+    self.device = torch.device(env.device)
+    self.memory_len = int(params.get("memory_len", FOOT_EVENT_MEMORY_LEN))
+    if self.memory_len <= 0:
+      raise ValueError("memory_len must be positive.")
+    self.age_norm_s = max(float(params.get("age_norm_s", 1.5)), 1.0e-6)
+    self.stance_age_norm_s = max(
+      float(params.get("stance_age_norm_s", self.age_norm_s)),
+      1.0e-6,
+    )
+    self.gait_period = max(float(params.get("gait_period", 0.6)), 1.0e-6)
+    self.command_name = str(params.get("command_name", "twist"))
+    self.noise_enabled = bool(params.get("noise_enabled", True))
+
+    self.contact_true_prob_range = tuple(
+      params.get("contact_true_prob_range", (0.75, 1.0))
+    )
+    self.contact_false_prob_range = tuple(
+      params.get("contact_false_prob_range", (0.0, 0.15))
+    )
+    self.touchdown_miss_prob = float(params.get("touchdown_miss_prob", 0.18))
+    self.touchdown_false_positive_prob = float(
+      params.get("touchdown_false_positive_prob", 0.002)
+    )
+    self.touchdown_confidence_range = tuple(
+      params.get("touchdown_confidence_range", (0.70, 1.0))
+    )
+    self.predicted_fill_confidence_range = tuple(
+      params.get("predicted_fill_confidence_range", (0.20, 0.50))
+    )
+    self.footprint_false_positive_confidence_range = tuple(
+      params.get("footprint_false_positive_confidence_range", (0.20, 0.50))
+    )
+    self.touchdown_prob_range = tuple(params.get("touchdown_prob_range", (0.70, 1.0)))
+    self.predicted_fill_touchdown_prob_range = tuple(
+      params.get("predicted_fill_touchdown_prob_range", (0.20, 0.50))
+    )
+    self.footprint_false_positive_prob_range = tuple(
+      params.get("footprint_false_positive_prob_range", (0.55, 0.90))
+    )
+    self.footprint_xy_noise_range_m = tuple(
+      params.get("footprint_xy_noise_range_m", (0.01, 0.03))
+    )
+    self.footprint_z_noise_range_m = tuple(
+      params.get("footprint_z_noise_range_m", (0.005, 0.02))
+    )
+
+    self.toe_miss_prob = float(params.get("toe_miss_prob", 0.22))
+    self.toe_false_positive_prob = float(params.get("toe_false_positive_prob", 0.006))
+    self.toe_confidence_range = tuple(params.get("toe_confidence_range", (0.30, 0.75)))
+    self.toe_false_positive_confidence_range = tuple(
+      params.get("toe_false_positive_confidence_range", (0.20, 0.55))
+    )
+    self.toe_hit_prob_range = tuple(params.get("toe_hit_prob_range", (0.55, 0.90)))
+    self.toe_false_positive_prob_range = tuple(
+      params.get("toe_false_positive_prob_range", (0.45, 0.80))
+    )
+    self.toe_xy_noise_range_m = tuple(params.get("toe_xy_noise_range_m", (0.01, 0.03)))
+    self.toe_z_noise_range_m = tuple(params.get("toe_z_noise_range_m", (0.005, 0.02)))
+
+    self.release_contact_prob_threshold = float(
+      params.get("release_contact_prob_threshold", 0.20)
+    )
+    self.release_confirm_frames = max(
+      int(params.get("release_confirm_frames", 2)),
+      1,
+    )
+    self.early_contact_time_s = max(
+      float(params.get("early_contact_time_s", 0.08)), 0.0
+    )
+    self.predicted_fill_enabled = bool(params.get("predicted_fill_enabled", True))
+
+    self.footprints = torch.zeros(
+      self.num_envs,
+      self.memory_len,
+      FOOTPRINT_SLOT_DIM,
+      dtype=torch.float32,
+      device=self.device,
+    )
+    self.toe_marks = torch.zeros(
+      self.num_envs,
+      self.memory_len,
+      TOE_MARK_SLOT_DIM,
+      dtype=torch.float32,
+      device=self.device,
+    )
+    self.footprint_valid = torch.zeros(
+      self.num_envs,
+      self.memory_len,
+      dtype=torch.bool,
+      device=self.device,
+    )
+    self.toe_valid = torch.zeros_like(self.footprint_valid)
+    self.footprint_pos_w = torch.zeros(self.num_envs, self.memory_len, 3).to(
+      self.device
+    )
+    self.toe_pos_w = torch.zeros_like(self.footprint_pos_w)
+
+    self.prev_ground_contact = torch.zeros(
+      self.num_envs,
+      2,
+      dtype=torch.bool,
+      device=self.device,
+    )
+    self.prev_ground_contact_valid = torch.zeros(
+      self.num_envs,
+      dtype=torch.bool,
+      device=self.device,
+    )
+    self.foot_in_stance = torch.zeros_like(self.prev_ground_contact)
+    self.release_count = torch.zeros(
+      self.num_envs,
+      2,
+      dtype=torch.long,
+      device=self.device,
+    )
+    self.stance_age_s = torch.zeros(
+      self.num_envs,
+      2,
+      dtype=torch.float32,
+      device=self.device,
+    )
+    self.active_footprint_slot = torch.full(
+      (self.num_envs, 2),
+      -1,
+      dtype=torch.long,
+      device=self.device,
+    )
+
+  def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+    ids = self._env_ids(env_ids)
+    if ids.numel() == 0:
+      return
+    self.footprints[ids] = 0.0
+    self.toe_marks[ids] = 0.0
+    self.footprint_valid[ids] = False
+    self.toe_valid[ids] = False
+    self.footprint_pos_w[ids] = 0.0
+    self.toe_pos_w[ids] = 0.0
+    self.prev_ground_contact[ids] = False
+    self.prev_ground_contact_valid[ids] = False
+    self.foot_in_stance[ids] = False
+    self.release_count[ids] = 0
+    self.stance_age_s[ids] = 0.0
+    self.active_footprint_slot[ids] = -1
+
+  def __call__(self, env: ManagerBasedRlEnv, **_: Any) -> torch.Tensor:
+    root_pos_w, root_quat_w = _root_pose_from_env(env)
+    self._age_and_refresh(float(env.step_dt), root_pos_w, root_quat_w)
+
+    ground_contact = _tensor_extra(
+      env,
+      STAIR_CURRENT_GROUND_CONTACT_KEY,
+      (2,),
+      torch.bool,
+      False,
+    )[:, :2].bool()
+    contact_duration = _tensor_extra(
+      env,
+      STAIR_CURRENT_CONTACT_DURATION_KEY,
+      (2,),
+      torch.float32,
+      0.0,
+    )[:, :2]
+    contact_prob = self._contact_prob(ground_contact)
+    self._update_stance_latches(contact_prob, ground_contact, env.step_dt)
+
+    foot_pos_body, toe_pos_body = self._foot_and_toe_points(env)
+    phase_now = phase(env, self.gait_period, self.command_name)
+    true_touchdown = (
+      ground_contact
+      & ~self.prev_ground_contact
+      & self.prev_ground_contact_valid[:, None]
+    )
+    toe_hit = _per_foot_toe_hit(env)
+
+    for foot_id in range(2):
+      allowed = ~self.foot_in_stance[:, foot_id]
+      touchdown_mask = true_touchdown[:, foot_id] & allowed
+      missed = touchdown_mask & self._bernoulli(self.touchdown_miss_prob)
+      confirmed = touchdown_mask & ~missed
+      predicted = missed & self.predicted_fill_enabled
+      false_positive = (
+        allowed & ~touchdown_mask & self._bernoulli(self.touchdown_false_positive_prob)
+      )
+      footprint_mask = confirmed | predicted | false_positive
+      confirmed_touchdown_prob = self._uniform_like(
+        confirmed,
+        self.touchdown_prob_range,
+        default=1.0,
+      )
+      predicted_touchdown_prob = self._uniform_like(
+        predicted,
+        self.predicted_fill_touchdown_prob_range,
+        default=0.35,
+      )
+      false_positive_touchdown_prob = self._uniform_like(
+        false_positive,
+        self.footprint_false_positive_prob_range,
+        default=0.7,
+      )
+      confirmed_confidence = self._uniform_like(
+        confirmed,
+        self.touchdown_confidence_range,
+        default=1.0,
+      )
+      predicted_confidence = self._uniform_like(
+        predicted,
+        self.predicted_fill_confidence_range,
+        default=0.35,
+      )
+      false_positive_confidence = self._uniform_like(
+        false_positive,
+        self.footprint_false_positive_confidence_range,
+        default=0.35,
+      )
+      self._push_footprint(
+        mask=footprint_mask,
+        foot_id=foot_id,
+        point_body=foot_pos_body[:, foot_id],
+        root_pos_w=root_pos_w,
+        root_quat_w=root_quat_w,
+        phase_now=phase_now,
+        contact_prob=contact_prob[:, foot_id],
+        touchdown_prob=torch.where(
+          confirmed,
+          confirmed_touchdown_prob,
+          torch.where(
+            predicted,
+            predicted_touchdown_prob,
+            false_positive_touchdown_prob,
+          ),
+        ),
+        confidence=torch.where(
+          confirmed,
+          confirmed_confidence,
+          torch.where(
+            predicted,
+            predicted_confidence,
+            false_positive_confidence,
+          ),
+        ),
+        source_predicted_fill=predicted,
+      )
+
+      new_oracle_stance = touchdown_mask & ~footprint_mask
+      self.foot_in_stance[:, foot_id] = (
+        self.foot_in_stance[:, foot_id] | new_oracle_stance
+      )
+      self.stance_age_s[:, foot_id] = torch.where(
+        new_oracle_stance,
+        torch.zeros_like(self.stance_age_s[:, foot_id]),
+        self.stance_age_s[:, foot_id],
+      )
+
+      real_toe = toe_hit[:, foot_id] & ~self._bernoulli(self.toe_miss_prob)
+      toe_false_positive = self._bernoulli(self.toe_false_positive_prob)
+      false_toe = toe_false_positive & ~real_toe
+      toe_mark_mask = real_toe | false_toe
+      real_toe_prob = self._uniform_like(real_toe, self.toe_hit_prob_range, default=0.7)
+      false_toe_prob = self._uniform_like(
+        false_toe,
+        self.toe_false_positive_prob_range,
+        default=0.6,
+      )
+      real_toe_confidence = self._uniform_like(
+        real_toe,
+        self.toe_confidence_range,
+        default=0.5,
+      )
+      false_toe_confidence = self._uniform_like(
+        false_toe,
+        self.toe_false_positive_confidence_range,
+        default=0.35,
+      )
+      self._push_toe_mark(
+        mask=toe_mark_mask,
+        foot_id=foot_id,
+        point_body=toe_pos_body[:, foot_id],
+        root_pos_w=root_pos_w,
+        root_quat_w=root_quat_w,
+        phase_now=phase_now,
+        contact_prob=contact_prob[:, foot_id],
+        toe_prob=torch.where(false_toe, false_toe_prob, real_toe_prob),
+        confidence=torch.where(
+          false_toe,
+          false_toe_confidence,
+          real_toe_confidence,
+        ),
+        swing_or_early_contact=(
+          ~ground_contact[:, foot_id]
+          | (contact_duration[:, foot_id] <= self.early_contact_time_s)
+        ),
+        false_positive=false_toe,
+      )
+
+    unlatched_contact = ground_contact & ~self.foot_in_stance
+    self.foot_in_stance |= ground_contact
+    self.stance_age_s = torch.where(
+      unlatched_contact,
+      torch.zeros_like(self.stance_age_s),
+      self.stance_age_s,
+    )
+    self.prev_ground_contact.copy_(ground_contact)
+    self.prev_ground_contact_valid[:] = True
+    self._refresh_relative_positions(root_pos_w, root_quat_w)
+    return torch.cat(
+      [
+        self.footprints.reshape(self.num_envs, -1),
+        self.toe_marks.reshape(self.num_envs, -1),
+      ],
+      dim=-1,
+    )
+
+  def _env_ids(self, env_ids: torch.Tensor | slice | None) -> torch.Tensor:
+    all_ids = torch.arange(self.num_envs, device=self.device)
+    if env_ids is None:
+      return all_ids
+    if isinstance(env_ids, slice):
+      return all_ids[env_ids]
+    return env_ids.to(device=self.device, dtype=torch.long)
+
+  def _age_and_refresh(
+    self,
+    step_dt: float,
+    root_pos_w: torch.Tensor,
+    root_quat_w: torch.Tensor,
+  ) -> None:
+    footprint_age_delta = step_dt / self.age_norm_s
+    toe_age_delta = step_dt / self.age_norm_s
+    self.footprints[..., 6] = torch.where(
+      self.footprint_valid,
+      (self.footprints[..., 6] + footprint_age_delta).clamp(0.0, 1.0),
+      self.footprints[..., 6],
+    )
+    self.toe_marks[..., 5] = torch.where(
+      self.toe_valid,
+      (self.toe_marks[..., 5] + toe_age_delta).clamp(0.0, 1.0),
+      self.toe_marks[..., 5],
+    )
+    self._expire_old_slots()
+    self._refresh_relative_positions(root_pos_w, root_quat_w)
+
+  def _expire_old_slots(self) -> None:
+    expired_foot = self.footprint_valid & (self.footprints[..., 6] >= 1.0)
+    self.footprints = torch.where(
+      expired_foot[..., None],
+      torch.zeros_like(self.footprints),
+      self.footprints,
+    )
+    self.footprint_pos_w = torch.where(
+      expired_foot[..., None],
+      torch.zeros_like(self.footprint_pos_w),
+      self.footprint_pos_w,
+    )
+    self.footprint_valid = self.footprint_valid & ~expired_foot
+    self._clear_expired_active_slots()
+
+    expired_toe = self.toe_valid & (self.toe_marks[..., 5] >= 1.0)
+    self.toe_marks = torch.where(
+      expired_toe[..., None],
+      torch.zeros_like(self.toe_marks),
+      self.toe_marks,
+    )
+    self.toe_pos_w = torch.where(
+      expired_toe[..., None],
+      torch.zeros_like(self.toe_pos_w),
+      self.toe_pos_w,
+    )
+    self.toe_valid = self.toe_valid & ~expired_toe
+
+  def _clear_expired_active_slots(self) -> None:
+    slot = self.active_footprint_slot.clamp(0, self.memory_len - 1)
+    valid_at_slot = torch.gather(self.footprint_valid, dim=1, index=slot)
+    active_and_valid = (self.active_footprint_slot >= 0) & valid_at_slot
+    self.active_footprint_slot = torch.where(
+      active_and_valid,
+      self.active_footprint_slot,
+      torch.full_like(self.active_footprint_slot, -1),
+    )
+
+  def _refresh_relative_positions(
+    self,
+    root_pos_w: torch.Tensor,
+    root_quat_w: torch.Tensor,
+  ) -> None:
+    root_pos = root_pos_w[:, None, :].expand(-1, self.memory_len, -1)
+    root_quat = root_quat_w[:, None, :].expand(-1, self.memory_len, -1)
+    footprint_rel = _world_to_current_base_yaw(
+      self.footprint_pos_w,
+      root_pos,
+      root_quat,
+    )
+    toe_rel = _world_to_current_base_yaw(self.toe_pos_w, root_pos, root_quat)
+    self.footprints[..., 7:10] = torch.where(
+      self.footprint_valid[..., None],
+      footprint_rel,
+      torch.zeros_like(footprint_rel),
+    )
+    self.footprints[..., 10] = torch.where(
+      self.footprint_valid,
+      footprint_rel[..., 0],
+      torch.zeros_like(footprint_rel[..., 0]),
+    )
+    self.footprints[..., 11] = torch.where(
+      self.footprint_valid,
+      footprint_rel[..., 1],
+      torch.zeros_like(footprint_rel[..., 1]),
+    )
+    self.toe_marks[..., 6:9] = torch.where(
+      self.toe_valid[..., None],
+      toe_rel,
+      torch.zeros_like(toe_rel),
+    )
+    self.toe_marks[..., 9] = torch.where(
+      self.toe_valid,
+      toe_rel[..., 0],
+      torch.zeros_like(toe_rel[..., 0]),
+    )
+    self.toe_marks[..., 10] = torch.where(
+      self.toe_valid,
+      toe_rel[..., 1],
+      torch.zeros_like(toe_rel[..., 1]),
+    )
+
+  def _update_stance_latches(
+    self,
+    contact_prob: torch.Tensor,
+    ground_contact: torch.Tensor,
+    step_dt: float,
+  ) -> None:
+    released_prob = contact_prob < self.release_contact_prob_threshold
+    self.release_count = torch.where(
+      released_prob,
+      self.release_count + 1,
+      torch.zeros_like(self.release_count),
+    )
+    release = self.foot_in_stance & (self.release_count >= self.release_confirm_frames)
+    self.foot_in_stance = torch.where(
+      release,
+      torch.zeros_like(self.foot_in_stance),
+      self.foot_in_stance,
+    )
+    self.active_footprint_slot = torch.where(
+      release,
+      torch.full_like(self.active_footprint_slot, -1),
+      self.active_footprint_slot,
+    )
+
+    del ground_contact
+    self.stance_age_s = torch.where(
+      self.foot_in_stance,
+      self.stance_age_s + float(step_dt),
+      self.stance_age_s,
+    )
+    slot_ids = torch.arange(self.memory_len, device=self.device).view(1, -1, 1)
+    active_slots = self.active_footprint_slot[:, None, :]
+    active = (active_slots >= 0) & self.foot_in_stance[:, None, :]
+    slot_match = active & (slot_ids == active_slots)
+    stance_age = (self.stance_age_s / self.stance_age_norm_s).clamp(0.0, 1.0)
+    stance_age_by_slot = (slot_match.float() * stance_age[:, None, :]).amax(dim=-1)
+    self.footprints[..., 16] = torch.where(
+      slot_match.any(dim=-1),
+      stance_age_by_slot,
+      self.footprints[..., 16],
+    )
+
+  def _foot_and_toe_points(
+    self,
+    env: ManagerBasedRlEnv,
+  ) -> tuple[torch.Tensor, torch.Tensor]:
+    left_toe, right_toe, left_heel, right_heel = _body_frame_foot_positions(env)
+    foot_points = torch.stack(
+      [
+        0.5 * (left_toe + left_heel),
+        0.5 * (right_toe + right_heel),
+      ],
+      dim=1,
+    )
+    toe_points = torch.stack([left_toe, right_toe], dim=1)
+    return foot_points, toe_points
+
+  def _push_footprint(
+    self,
+    *,
+    mask: torch.Tensor,
+    foot_id: int,
+    point_body: torch.Tensor,
+    root_pos_w: torch.Tensor,
+    root_quat_w: torch.Tensor,
+    phase_now: torch.Tensor,
+    contact_prob: torch.Tensor,
+    touchdown_prob: torch.Tensor,
+    confidence: torch.Tensor,
+    source_predicted_fill: bool | torch.Tensor,
+  ) -> None:
+    mask = mask.bool()
+    point_body = point_body + self._position_noise(
+      point_body.shape,
+      self.footprint_xy_noise_range_m,
+      self.footprint_z_noise_range_m,
+    )
+    point_w = root_pos_w + quat_apply(root_quat_w, point_body)
+    point_rel = _world_to_current_base_yaw(point_w, root_pos_w, root_quat_w)
+    self._shift_footprints(mask)
+
+    feature = torch.zeros(
+      self.num_envs,
+      FOOTPRINT_SLOT_DIM,
+      dtype=torch.float32,
+      device=self.device,
+    )
+    feature[:, 0] = 1.0
+    feature[:, 1] = 1.0 if foot_id == 0 else 0.0
+    feature[:, 2] = 1.0 if foot_id == 1 else 0.0
+    if isinstance(source_predicted_fill, torch.Tensor):
+      predicted_source = source_predicted_fill.to(device=self.device).float()
+    else:
+      predicted_source = torch.full(
+        (self.num_envs,),
+        1.0 if source_predicted_fill else 0.0,
+        dtype=torch.float32,
+        device=self.device,
+      )
+    feature[:, 3] = 1.0 - predicted_source
+    feature[:, 4] = predicted_source
+    feature[:, 5] = confidence.clamp(0.0, 1.0)
+    feature[:, 6] = 0.0
+    feature[:, 7:10] = point_rel
+    feature[:, 10] = point_rel[:, 0]
+    feature[:, 11] = point_rel[:, 1]
+    feature[:, 12:14] = phase_now
+    feature[:, 14] = contact_prob.clamp(0.0, 1.0)
+    feature[:, 15] = touchdown_prob.clamp(0.0, 1.0)
+    feature[:, 16] = 0.0
+
+    self.footprints[:, 0] = torch.where(
+      mask[:, None],
+      feature,
+      self.footprints[:, 0],
+    )
+    self.footprint_valid[:, 0] = self.footprint_valid[:, 0] | mask
+    self.footprint_pos_w[:, 0] = torch.where(
+      mask[:, None],
+      point_w,
+      self.footprint_pos_w[:, 0],
+    )
+    self.foot_in_stance[:, foot_id] = self.foot_in_stance[:, foot_id] | mask
+    self.release_count[:, foot_id] = torch.where(
+      mask,
+      torch.zeros_like(self.release_count[:, foot_id]),
+      self.release_count[:, foot_id],
+    )
+    self.stance_age_s[:, foot_id] = torch.where(
+      mask,
+      torch.zeros_like(self.stance_age_s[:, foot_id]),
+      self.stance_age_s[:, foot_id],
+    )
+    self.active_footprint_slot[:, foot_id] = torch.where(
+      mask,
+      torch.zeros_like(self.active_footprint_slot[:, foot_id]),
+      self.active_footprint_slot[:, foot_id],
+    )
+
+  def _push_toe_mark(
+    self,
+    *,
+    mask: torch.Tensor,
+    foot_id: int,
+    point_body: torch.Tensor,
+    root_pos_w: torch.Tensor,
+    root_quat_w: torch.Tensor,
+    phase_now: torch.Tensor,
+    contact_prob: torch.Tensor,
+    toe_prob: torch.Tensor,
+    confidence: torch.Tensor,
+    swing_or_early_contact: torch.Tensor,
+    false_positive: bool | torch.Tensor,
+  ) -> None:
+    del false_positive
+    mask = mask.bool()
+    point_body = point_body + self._position_noise(
+      point_body.shape,
+      self.toe_xy_noise_range_m,
+      self.toe_z_noise_range_m,
+    )
+    point_w = root_pos_w + quat_apply(root_quat_w, point_body)
+    point_rel = _world_to_current_base_yaw(point_w, root_pos_w, root_quat_w)
+    self._shift_toe_marks(mask)
+
+    feature = torch.zeros(
+      self.num_envs,
+      TOE_MARK_SLOT_DIM,
+      dtype=torch.float32,
+      device=self.device,
+    )
+    feature[:, 0] = 1.0
+    feature[:, 1] = 1.0 if foot_id == 0 else 0.0
+    feature[:, 2] = 1.0 if foot_id == 1 else 0.0
+    feature[:, 3] = 1.0
+    feature[:, 4] = confidence.clamp(0.0, 1.0)
+    feature[:, 5] = 0.0
+    feature[:, 6:9] = point_rel
+    feature[:, 9] = point_rel[:, 0]
+    feature[:, 10] = point_rel[:, 1]
+    feature[:, 11:13] = phase_now
+    feature[:, 13] = toe_prob.clamp(0.0, 1.0)
+    feature[:, 14] = contact_prob.clamp(0.0, 1.0)
+    feature[:, 15] = swing_or_early_contact.float()
+
+    self.toe_marks[:, 0] = torch.where(
+      mask[:, None],
+      feature,
+      self.toe_marks[:, 0],
+    )
+    self.toe_valid[:, 0] = self.toe_valid[:, 0] | mask
+    self.toe_pos_w[:, 0] = torch.where(
+      mask[:, None],
+      point_w,
+      self.toe_pos_w[:, 0],
+    )
+
+  def _shift_footprints(self, mask: torch.Tensor) -> None:
+    shifted_footprints = torch.cat(
+      [self.footprints[:, :1], self.footprints[:, :-1]], dim=1
+    )
+    shifted_valid = torch.cat(
+      [self.footprint_valid[:, :1], self.footprint_valid[:, :-1]],
+      dim=1,
+    )
+    shifted_pos = torch.cat(
+      [self.footprint_pos_w[:, :1], self.footprint_pos_w[:, :-1]],
+      dim=1,
+    )
+    self.footprints = torch.where(
+      mask[:, None, None], shifted_footprints, self.footprints
+    )
+    self.footprint_valid = torch.where(
+      mask[:, None], shifted_valid, self.footprint_valid
+    )
+    self.footprint_pos_w = torch.where(
+      mask[:, None, None], shifted_pos, self.footprint_pos_w
+    )
+
+    active = self.active_footprint_slot
+    active = torch.where(active >= 0, active + 1, active)
+    active = torch.where(
+      active < self.memory_len,
+      active,
+      torch.full_like(active, -1),
+    )
+    self.active_footprint_slot = torch.where(
+      mask[:, None],
+      active,
+      self.active_footprint_slot,
+    )
+
+  def _shift_toe_marks(self, mask: torch.Tensor) -> None:
+    shifted_marks = torch.cat([self.toe_marks[:, :1], self.toe_marks[:, :-1]], dim=1)
+    shifted_valid = torch.cat([self.toe_valid[:, :1], self.toe_valid[:, :-1]], dim=1)
+    shifted_pos = torch.cat([self.toe_pos_w[:, :1], self.toe_pos_w[:, :-1]], dim=1)
+    self.toe_marks = torch.where(mask[:, None, None], shifted_marks, self.toe_marks)
+    self.toe_valid = torch.where(mask[:, None], shifted_valid, self.toe_valid)
+    self.toe_pos_w = torch.where(mask[:, None, None], shifted_pos, self.toe_pos_w)
+
+  def _contact_prob(self, ground_contact: torch.Tensor) -> torch.Tensor:
+    true_prob = self._uniform(
+      ground_contact.shape,
+      self.contact_true_prob_range,
+      default=1.0,
+    )
+    false_prob = self._uniform(
+      ground_contact.shape,
+      self.contact_false_prob_range,
+      default=0.0,
+    )
+    return torch.where(ground_contact, true_prob, false_prob)
+
+  def _bernoulli(self, probability: float) -> torch.Tensor:
+    if not self.noise_enabled or probability <= 0.0:
+      return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+    if probability >= 1.0:
+      return torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+    return torch.rand(self.num_envs, device=self.device) < probability
+
+  def _uniform_like(
+    self,
+    reference: torch.Tensor,
+    value_range: tuple[float, float],
+    default: float,
+  ) -> torch.Tensor:
+    return self._uniform(reference.shape, value_range, default=default)
+
+  def _uniform(
+    self,
+    shape: torch.Size | tuple[int, ...],
+    value_range: tuple[float, float],
+    default: float,
+  ) -> torch.Tensor:
+    if not self.noise_enabled:
+      return torch.full(shape, default, dtype=torch.float32, device=self.device)
+    low, high = float(value_range[0]), float(value_range[1])
+    if high <= low:
+      return torch.full(shape, low, dtype=torch.float32, device=self.device)
+    return (
+      torch.rand(shape, dtype=torch.float32, device=self.device) * (high - low) + low
+    )
+
+  def _position_noise(
+    self,
+    shape: torch.Size,
+    xy_range: tuple[float, float],
+    z_range: tuple[float, float],
+  ) -> torch.Tensor:
+    if not self.noise_enabled:
+      return torch.zeros(shape, dtype=torch.float32, device=self.device)
+    xy_mag = self._uniform(shape[:-1], xy_range, default=0.0)
+    z_mag = self._uniform(shape[:-1], z_range, default=0.0)
+    sign_xy = torch.where(
+      torch.rand((*shape[:-1], 2), device=self.device) < 0.5,
+      -1.0,
+      1.0,
+    )
+    sign_z = torch.where(
+      torch.rand(shape[:-1], device=self.device) < 0.5,
+      -1.0,
+      1.0,
+    )
+    noise = torch.zeros(shape, dtype=torch.float32, device=self.device)
+    noise[..., 0:2] = sign_xy * xy_mag[..., None]
+    noise[..., 2] = sign_z * z_mag
+    return noise
 
 
 def reset_stair_latent_cache(
