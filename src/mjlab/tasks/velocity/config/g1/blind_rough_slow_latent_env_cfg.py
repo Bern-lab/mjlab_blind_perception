@@ -152,7 +152,9 @@ class G1SlowLatentRewardParams:
   target_progress_min_distance: float = 0.05
   target_reached_bonus_weight: float = 0.4
 
-  # Step-boundary danger-zone rewards.
+  # Step-boundary danger-zone rewards.  The SlowLatent task no longer
+  # registers the foot lip-volume penalty; keep the knobs for checkpoint/config
+  # compatibility while relying on target-tread midline shaping for placement.
   foot_lip_weight: float = -3.2
   foot_lip_edge_radius: float = 0.07
   foot_lip_edge_height_band: float = 0.06
@@ -199,16 +201,22 @@ class G1SlowLatentRewardParams:
   stair_skip_layer_weight: float = -1.0
 
   # Target-foot dense shaping toward the expected tread-depth midline.  This
-  # only activates once the swing foot is above the target tread height.
-  target_tread_midline_weight: float = 0.4
+  # activates after the swing foot clears the target tread, and remains active
+  # briefly after touchdown so early stance still receives a full-support signal.
+  target_tread_midline_weight: float = 1.2
   target_tread_midline_height_clearance: float = 0.02
   target_tread_midline_sigma_fraction: float = 0.60
-  target_tread_midline_min_sigma: float = 0.20
-  target_tread_midline_edge_margin: float = 0.08
-  target_tread_midline_progress_scale: float = 0.30
-  target_tread_midline_center_scale: float = 0.70
-  target_tread_midline_edge_scale: float = 0.12
+  target_tread_midline_min_sigma: float = 0.18
+  target_tread_midline_edge_margin: float = 0.10
+  target_tread_midline_progress_scale: float = 0.10
+  target_tread_midline_center_scale: float = 0.80
+  target_tread_midline_support_scale: float = 0.85
+  target_tread_midline_edge_scale: float = 0.55
+  target_tread_midline_sole_margin: float = 0.020
+  target_tread_midline_support_sigma: float = 0.04
   target_tread_midline_max_progress_step: float = 0.20
+  target_tread_midline_early_stance_time: float = 0.25
+  target_tread_midline_stance_height_tolerance: float = 0.08
 
   # Per-leg shank collision-capsule clearance from the next semantic stair edge.
   shank_edge_weight: float = -3.0
@@ -220,8 +228,8 @@ class G1SlowLatentRewardParams:
   shank_capsule_end_local: tuple[float, float, float] = (0.01, 0.0, -0.15)
   shank_capsule_radius: float = 0.045
 
-  # Disabled following-step privileged landing shaping.  The lip-volume term
-  # already carries the edge/partial-foot signal, while this touchdown-only
+  # Disabled following-step privileged landing shaping.  The centerline shaping
+  # now carries the partial-foot/full-support signal, while this touchdown-only
   # reward was too sparse to help the current SlowLatent run.
   stair_tread_landing_weight: float = 0.5
   stair_tread_landing_lead: float = 0.04
@@ -284,6 +292,10 @@ class G1SlowLatentEnvParams:
   """Observation term name for footprint/toe-mark event memory features."""
   enable_foot_event_memory_obs: bool = True
   """Append deployable-shaped footprint/toe-mark memory to latent obs."""
+  include_foot_event_summary_obs: bool = True
+  """Append deterministic footprint/toe-mark geometry belief summary."""
+  include_raw_foot_event_memory_obs: bool = False
+  """Expose raw footprint/toe-mark slots, not just the compact summary."""
   foot_event_memory_length: int = 6
   """Number of recent footprint and toe-mark slots kept per env."""
   foot_event_memory_age_norm_s: float = 1.5
@@ -332,20 +344,10 @@ def configure_g1_step_danger_rewards(
       preserve_order=True,
     )
 
-  cfg.rewards["foot_step_lip_volume_penalty"] = RewardTermCfg(
-    func=mdp.foot_step_lip_volume_penalty,
-    weight=params.foot_lip_weight,
-    params={
-      "edge_radius": params.foot_lip_edge_radius,
-      "edge_height_band": params.foot_lip_edge_height_band,
-      "support_speed_floor": params.foot_lip_support_speed_floor,
-      "ignore_boundary_layers": params.foot_lip_ignore_boundary_layers,
-      "nearest_boundaries": params.nearest_boundaries,
-      "contact_sensor_name": "feet_ground_contact",
-      "min_terrain_level": params.min_terrain_level,
-      "asset_cfg": foot_asset_cfg(),
-    },
-  )
+  # The base target-navigation config installs this penalty.  Remove it rather
+  # than setting weight=0 so RewardManager never samples or calls the term.
+  cfg.rewards.pop("foot_step_lip_volume_penalty", None)
+
   cfg.rewards["toe_step_riser_slab_penalty"] = RewardTermCfg(
     func=mdp.toe_step_riser_slab_penalty,
     weight=params.toe_slab_weight,
@@ -418,8 +420,13 @@ def configure_g1_step_danger_rewards(
       "edge_margin": params.target_tread_midline_edge_margin,
       "progress_scale": params.target_tread_midline_progress_scale,
       "center_scale": params.target_tread_midline_center_scale,
+      "support_scale": params.target_tread_midline_support_scale,
       "edge_scale": params.target_tread_midline_edge_scale,
+      "sole_margin": params.target_tread_midline_sole_margin,
+      "support_sigma": params.target_tread_midline_support_sigma,
       "max_progress_step": params.target_tread_midline_max_progress_step,
+      "early_stance_time": params.target_tread_midline_early_stance_time,
+      "stance_height_tolerance": (params.target_tread_midline_stance_height_tolerance),
       "heading_cos": params.toe_stair_heading_cos,
       "min_terrain_level": params.min_terrain_level,
       "asset_cfg": SceneEntityCfg("robot", site_names=("left_foot", "right_foot")),
@@ -703,11 +710,19 @@ def _configure_latent_observations(
       func=mdp.FootEventMemoryObs,
       params={
         "memory_len": params.foot_event_memory_length,
+        "include_summary": params.include_foot_event_summary_obs,
+        "include_raw_memory": params.include_raw_foot_event_memory_obs,
         "age_norm_s": params.foot_event_memory_age_norm_s,
         "stance_age_norm_s": params.foot_event_memory_age_norm_s,
         "gait_period": params.rewards.foot_gait_period,
         "command_name": "twist",
         "noise_enabled": not play,
+        "ratchet_height_threshold_m": 0.025,
+        "ratchet_flat_height_threshold_m": 0.02,
+        "ratchet_probe_increment_m": 0.025,
+        "ratchet_min_stride_m": params.rewards.toe_stair_min_safe_stride,
+        "ratchet_max_stride_m": params.rewards.toe_stair_max_safe_stride,
+        "ratchet_reset_flat_pairs": 4,
       },
     )
   cfg.observations[params.latent_group_name] = ObservationGroupCfg(

@@ -6,6 +6,7 @@ import copy
 import csv
 import json
 import random
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,7 @@ from scripts.velocity_eval.train_foot_event_detector import (
   metric_is_higher_better,
   sweep_deployment_event_thresholds,
 )
+from torch import nn
 from tqdm.auto import tqdm
 
 from mjlab.envs import ManagerBasedRlEnv
@@ -82,6 +84,9 @@ class OnlineFootEventDetectorConfig:
   min_val_samples: int = 4096
   learning_rate: float = 1.0e-3
   weight_decay: float = 1.0e-4
+  init_detector_checkpoint: str | None = None
+  toe_only_finetune: bool = False
+  toe_riser_only_model: bool = False
   frame_hidden_dim: int = 128
   recurrent_hidden_dim: int = 64
   head_hidden_dim: int = 32
@@ -91,9 +96,15 @@ class OnlineFootEventDetectorConfig:
   pos_weight_max: float = 100.0
   toe_hit_pos_weight: float | None = 150.0
   toe_positive_fraction: float = 0.125
-  touchdown_positive_fraction: float = 0.25
-  stair_hard_negative_fraction: float = 0.25
-  false_positive_hard_negative_fraction: float = 0.125
+  toe_soft_positive_fraction: float = 0.05
+  touchdown_positive_fraction: float = 0.20
+  touchdown_soft_positive_fraction: float = 0.125
+  stair_hard_negative_fraction: float = 0.20
+  false_positive_hard_negative_fraction: float = 0.075
+  false_negative_hard_positive_fraction: float = 0.125
+  false_negative_toe_hard_positive_fraction: float = 0.05
+  toe_soft_positive_threshold: float = 0.3
+  touchdown_soft_positive_threshold: float = 0.3
   soft_touchdown_radius: int = 1
   soft_toe_hit_radius: int = 2
   soft_event_radius1_value: float = 0.7
@@ -102,23 +113,42 @@ class OnlineFootEventDetectorConfig:
   tversky_loss_weight: float = 0.5
   focal_gamma_pos: float = 0.0
   focal_gamma_neg: float = 4.0
-  tversky_alpha: float = 0.5
-  tversky_beta: float = 0.5
+  tversky_alpha: float = 0.3
+  tversky_beta: float = 0.7
   mine_false_positive_hard_negatives: bool = True
+  mine_false_negative_hard_positives: bool = True
+  mine_false_negative_toe_hard_positives: bool = True
   hard_negative_mining_threshold: float = 0.5
+  hard_positive_mining_threshold: float = 0.5
+  hard_toe_positive_mining_threshold: float = 0.5
   hard_negative_mining_window_frames: int = 8
   hard_negative_mining_max_peaks: int = 4096
+  hard_positive_mining_window_frames: int = 3
+  hard_positive_mining_max_peaks: int = 4096
+  hard_toe_positive_mining_window_frames: int = 4
+  hard_toe_positive_mining_max_peaks: int = 4096
   touchdown_contact_threshold: float = 0.7
   touchdown_contact_release_threshold: float = 0.35
   touchdown_cooldown_frames: int = 8
   toe_hit_cooldown_frames: int = 8
+  touchdown_recall_precision_floor: float = 0.85
+  toe_hit_recall_precision_floor: float = 0.35
+  selection_min_stair_touchdown_events: int = 100
   sweep_threshold_min: float = 0.1
   sweep_threshold_max: float = 0.99
   sweep_threshold_steps: int = 19
-  selection_metric: str = "deploy_event_macro_f1"
+  selection_metric: str = "footprint_deploy_score"
+  baseline_metrics_file: str | None = None
+  baseline_touchdown_recall_tolerance: float = 0.01
+  baseline_stair_touchdown_recall_tolerance: float = 0.015
+  baseline_flat_touchdown_f1_tolerance: float = 0.01
+  baseline_toe_metric: str = "toe_riser_high_recall_macro_f1"
+  baseline_toe_metric_min_improvement: float = 0.0
   max_updates: int | None = 5000
   early_stop_patience_evals: int = 8
   early_stop_min_delta: float = 1.0e-4
+  save_eval_checkpoints: bool = True
+  save_last_checkpoint: bool = True
   export_onnx: bool = True
   progress: bool = True
 
@@ -170,6 +200,16 @@ class OnlineFootEventReplayBuffer:
     )
     self.stair_hard_negative = torch.empty(capacity, dtype=torch.bool, device=device)
     self.false_positive_hard_negative = torch.empty(
+      capacity,
+      dtype=torch.bool,
+      device=device,
+    )
+    self.false_negative_hard_positive = torch.empty(
+      capacity,
+      dtype=torch.bool,
+      device=device,
+    )
+    self.false_negative_toe_hard_positive = torch.empty(
       capacity,
       dtype=torch.bool,
       device=device,
@@ -297,6 +337,8 @@ class OnlineFootEventReplayBuffer:
     event_negative = labels[:, 2:6].amax(dim=1) <= 0.5
     self.stair_hard_negative[slc].copy_(stair_support.any(dim=1) & event_negative)
     self.false_positive_hard_negative[slc] = False
+    self.false_negative_hard_positive[slc] = False
+    self.false_negative_toe_hard_positive[slc] = False
 
   def _soft_value(self, distance: int) -> torch.Tensor:
     if distance < self._soft_values.numel():
@@ -359,33 +401,93 @@ class OnlineFootEventReplayBuffer:
     *,
     generator: torch.Generator,
     toe_positive_fraction: float,
+    toe_soft_positive_fraction: float,
     touchdown_positive_fraction: float,
+    touchdown_soft_positive_fraction: float,
     stair_hard_negative_fraction: float,
     false_positive_hard_negative_fraction: float,
+    false_negative_hard_positive_fraction: float,
+    false_negative_toe_hard_positive_fraction: float,
+    toe_soft_positive_threshold: float,
+    touchdown_soft_positive_threshold: float,
   ) -> tuple[torch.Tensor, torch.Tensor]:
     if self._size <= 0:
       raise RuntimeError("Cannot sample from an empty buffer.")
     toe_count = int(round(batch_size * toe_positive_fraction))
+    toe_soft_count = int(round(batch_size * toe_soft_positive_fraction))
     touchdown_count = int(round(batch_size * touchdown_positive_fraction))
+    touchdown_soft_count = int(round(batch_size * touchdown_soft_positive_fraction))
     stair_hard_count = int(round(batch_size * stair_hard_negative_fraction))
     false_positive_count = int(
       round(batch_size * false_positive_hard_negative_fraction)
     )
-    reserved = toe_count + touchdown_count + stair_hard_count + false_positive_count
+    false_negative_count = int(
+      round(batch_size * false_negative_hard_positive_fraction)
+    )
+    false_negative_toe_count = int(
+      round(batch_size * false_negative_toe_hard_positive_fraction)
+    )
+    reserved = (
+      toe_count
+      + toe_soft_count
+      + touchdown_count
+      + touchdown_soft_count
+      + stair_hard_count
+      + false_positive_count
+      + false_negative_count
+      + false_negative_toe_count
+    )
     if reserved > batch_size:
       scale = batch_size / max(float(reserved), 1.0)
       toe_count = int(round(toe_count * scale))
+      toe_soft_count = int(round(toe_soft_count * scale))
       touchdown_count = int(round(touchdown_count * scale))
+      touchdown_soft_count = int(round(touchdown_soft_count * scale))
       stair_hard_count = int(round(stair_hard_count * scale))
       false_positive_count = int(round(false_positive_count * scale))
-      reserved = toe_count + touchdown_count + stair_hard_count + false_positive_count
+      false_negative_count = int(round(false_negative_count * scale))
+      false_negative_toe_count = int(round(false_negative_toe_count * scale))
+      reserved = (
+        toe_count
+        + toe_soft_count
+        + touchdown_count
+        + touchdown_soft_count
+        + stair_hard_count
+        + false_positive_count
+        + false_negative_count
+        + false_negative_toe_count
+      )
     random_count = batch_size - reserved
+    hard_touchdown = self.labels[: self._size, 2:4].amax(dim=1) > 0.5
+    soft_touchdown = (
+      self.train_labels[: self._size, 2:4].amax(dim=1)
+      >= float(touchdown_soft_positive_threshold)
+    ) & ~hard_touchdown
+    hard_toe = self.labels[: self._size, 4:6].amax(dim=1) > 0.5
+    soft_toe = (
+      self.train_labels[: self._size, 4:6].amax(dim=1)
+      >= float(toe_soft_positive_threshold)
+    ) & ~hard_toe
     chunks = [
       self._sample_mask(
-        self.labels[: self._size, 2:4].amax(dim=1) > 0.5, touchdown_count, generator
+        hard_touchdown,
+        touchdown_count,
+        generator,
       ),
       self._sample_mask(
-        self.labels[: self._size, 4:6].amax(dim=1) > 0.5, toe_count, generator
+        soft_touchdown,
+        touchdown_soft_count,
+        generator,
+      ),
+      self._sample_mask(
+        hard_toe,
+        toe_count,
+        generator,
+      ),
+      self._sample_mask(
+        soft_toe,
+        toe_soft_count,
+        generator,
       ),
       self._sample_mask(
         self.stair_hard_negative[: self._size],
@@ -395,6 +497,16 @@ class OnlineFootEventReplayBuffer:
       self._sample_mask(
         self.false_positive_hard_negative[: self._size],
         false_positive_count,
+        generator,
+      ),
+      self._sample_mask(
+        self.false_negative_hard_positive[: self._size],
+        false_negative_count,
+        generator,
+      ),
+      self._sample_mask(
+        self.false_negative_toe_hard_positive[: self._size],
+        false_negative_toe_count,
         generator,
       ),
       self._sample_random(random_count, generator=generator),
@@ -459,6 +571,12 @@ class OnlineFootEventReplayBuffer:
       "false_positive_hard_negative": (
         self.false_positive_hard_negative[:size].detach().cpu().numpy()
       ),
+      "false_negative_hard_positive": (
+        self.false_negative_hard_positive[:size].detach().cpu().numpy()
+      ),
+      "false_negative_toe_hard_positive": (
+        self.false_negative_toe_hard_positive[:size].detach().cpu().numpy()
+      ),
     }
 
   def mark_false_positive_hard_negatives(self, mask: np.ndarray) -> int:
@@ -471,6 +589,30 @@ class OnlineFootEventReplayBuffer:
     before = int(self.false_positive_hard_negative[: self._size].sum().item())
     self.false_positive_hard_negative[: self._size] |= mask_tensor
     after = int(self.false_positive_hard_negative[: self._size].sum().item())
+    return after - before
+
+  def mark_false_negative_hard_positives(self, mask: np.ndarray) -> int:
+    """Mark missed touchdown windows that should be replayed as hard positives."""
+    if mask.shape != (self._size,):
+      raise ValueError(
+        f"Expected false-negative mask shape {(self._size,)}, got {mask.shape}."
+      )
+    mask_tensor = torch.as_tensor(mask, dtype=torch.bool, device=self.device)
+    before = int(self.false_negative_hard_positive[: self._size].sum().item())
+    self.false_negative_hard_positive[: self._size] |= mask_tensor
+    after = int(self.false_negative_hard_positive[: self._size].sum().item())
+    return after - before
+
+  def mark_false_negative_toe_hard_positives(self, mask: np.ndarray) -> int:
+    """Mark missed toe-hit windows that should be replayed as hard positives."""
+    if mask.shape != (self._size,):
+      raise ValueError(
+        f"Expected false-negative toe mask shape {(self._size,)}, got {mask.shape}."
+      )
+    mask_tensor = torch.as_tensor(mask, dtype=torch.bool, device=self.device)
+    before = int(self.false_negative_toe_hard_positive[: self._size].sum().item())
+    self.false_negative_toe_hard_positive[: self._size] |= mask_tensor
+    after = int(self.false_negative_toe_hard_positive[: self._size].sum().item())
     return after - before
 
   def label_audit_rows(self, prefix: str) -> list[tuple[str, str]]:
@@ -489,10 +631,43 @@ class OnlineFootEventReplayBuffer:
     false_positive_hard = int(
       self.false_positive_hard_negative[: self._size].sum().item()
     )
+    false_negative_hard = int(
+      self.false_negative_hard_positive[: self._size].sum().item()
+    )
+    false_negative_toe_hard = int(
+      self.false_negative_toe_hard_positive[: self._size].sum().item()
+    )
+    soft_touchdown = int(
+      (
+        (self.train_labels[: self._size, 2:4].amax(dim=1) > 0.0)
+        & (labels[:, 2:4].amax(dim=1) <= 0.5)
+      )
+      .sum()
+      .item()
+    )
+    soft_toe = int(
+      (
+        (self.train_labels[: self._size, 4:6].amax(dim=1) > 0.0)
+        & (labels[:, 4:6].amax(dim=1) <= 0.5)
+      )
+      .sum()
+      .item()
+    )
     rows.append((f"{prefix}_stair_hard_negative_count", str(stair_hard)))
     rows.append(
       (f"{prefix}_false_positive_hard_negative_count", str(false_positive_hard))
     )
+    rows.append(
+      (f"{prefix}_false_negative_hard_positive_count", str(false_negative_hard))
+    )
+    rows.append(
+      (
+        f"{prefix}_false_negative_toe_hard_positive_count",
+        str(false_negative_toe_hard),
+      )
+    )
+    rows.append((f"{prefix}_soft_touchdown_neighbor_count", str(soft_touchdown)))
+    rows.append((f"{prefix}_soft_toe_neighbor_count", str(soft_toe)))
     return rows
 
 
@@ -585,6 +760,98 @@ def _tversky_loss_from_logits(
   return (1.0 - score).mean()
 
 
+def _detector_output_layer(model: FootEventDetectorGRU) -> nn.Linear:
+  output_layer = model.head[-1]
+  if not isinstance(output_layer, nn.Linear):
+    raise TypeError(
+      "Expected FootEventDetectorGRU.head[-1] to be nn.Linear for toe-only "
+      f"finetune, got {type(output_layer).__name__}."
+    )
+  if output_layer.out_features < 6:
+    raise ValueError("Toe-only finetune requires detector outputs for indices 4 and 5.")
+  return output_layer
+
+
+def _configure_toe_only_finetune(model: FootEventDetectorGRU) -> None:
+  """Freeze the detector except the final left/right toe-riser output rows."""
+  for parameter in model.parameters():
+    parameter.requires_grad_(False)
+
+  output_layer = _detector_output_layer(model)
+  output_layer.weight.requires_grad_(True)
+  weight_mask = torch.zeros_like(output_layer.weight)
+  weight_mask[4:6] = 1.0
+  output_layer.weight.register_hook(
+    lambda grad: grad * weight_mask.to(device=grad.device, dtype=grad.dtype)
+  )
+
+  if output_layer.bias is not None:
+    output_layer.bias.requires_grad_(True)
+    bias_mask = torch.zeros_like(output_layer.bias)
+    bias_mask[4:6] = 1.0
+    output_layer.bias.register_hook(
+      lambda grad: grad * bias_mask.to(device=grad.device, dtype=grad.dtype)
+    )
+
+
+def _configure_toe_riser_only_model(
+  model: FootEventDetectorGRU,
+  *,
+  dummy_logit: float = -20.0,
+) -> None:
+  """Train a toe-riser expert while keeping the standard 6-logit output layout."""
+  for parameter in model.parameters():
+    parameter.requires_grad_(True)
+
+  output_layer = _detector_output_layer(model)
+  with torch.no_grad():
+    output_layer.weight[:4].zero_()
+    if output_layer.bias is not None:
+      output_layer.bias[:4].fill_(float(dummy_logit))
+
+  weight_mask = torch.ones_like(output_layer.weight)
+  weight_mask[:4] = 0.0
+  output_layer.weight.register_hook(
+    lambda grad: grad * weight_mask.to(device=grad.device, dtype=grad.dtype)
+  )
+
+  if output_layer.bias is not None:
+    bias_mask = torch.ones_like(output_layer.bias)
+    bias_mask[:4] = 0.0
+    output_layer.bias.register_hook(
+      lambda grad: grad * bias_mask.to(device=grad.device, dtype=grad.dtype)
+    )
+
+
+def _load_detector_checkpoint(
+  model: FootEventDetectorGRU,
+  checkpoint_path: str | Path,
+  *,
+  device: torch.device,
+) -> None:
+  path = Path(checkpoint_path).expanduser()
+  state_obj = torch.load(path, map_location=device)
+  if (
+    isinstance(state_obj, dict)
+    and "model_state_dict" in state_obj
+    and isinstance(state_obj["model_state_dict"], dict)
+  ):
+    state_dict = state_obj["model_state_dict"]
+  elif (
+    isinstance(state_obj, dict)
+    and "state_dict" in state_obj
+    and isinstance(state_obj["state_dict"], dict)
+  ):
+    state_dict = state_obj["state_dict"]
+  elif isinstance(state_obj, dict):
+    state_dict = state_obj
+  else:
+    raise TypeError(
+      f"Unsupported detector checkpoint payload type {type(state_obj).__name__}."
+    )
+  model.load_state_dict(state_dict)
+
+
 def _training_loss(
   *,
   logits: torch.Tensor,
@@ -596,14 +863,23 @@ def _training_loss(
   focal_gamma_neg: float,
   tversky_alpha: float,
   tversky_beta: float,
+  train_label_indices: tuple[int, ...] | None = None,
 ) -> torch.Tensor:
+  if train_label_indices is not None:
+    label_indices = list(train_label_indices)
+    logits = logits[:, label_indices]
+    labels = labels[:, label_indices]
+    pos_weight = pos_weight[label_indices]
+    event_logits = logits
+    event_labels = labels
+  else:
+    event_logits = logits[:, 2:6]
+    event_labels = labels[:, 2:6]
   bce = F.binary_cross_entropy_with_logits(
     logits,
     labels,
     pos_weight=pos_weight,
   )
-  event_logits = logits[:, 2:6]
-  event_labels = labels[:, 2:6]
   focal = _asymmetric_focal_loss_with_logits(
     event_logits,
     event_labels,
@@ -690,13 +966,33 @@ def _deployment_event_metrics(
   touchdown_contact_release_threshold: float,
   touchdown_cooldown_frames: int,
   toe_hit_cooldown_frames: int,
+  touchdown_recall_precision_floor: float,
+  toe_hit_recall_precision_floor: float,
+  selection_min_stair_touchdown_events: int,
   event_tolerance_frames: int,
 ) -> dict[str, float]:
   """Add deploy-style threshold sweep metrics for footstep and toe-hit events."""
   metrics: dict[str, float] = {}
   touchdown_f1: list[float] = []
+  touchdown_high_recall_precision: list[float] = []
+  touchdown_high_recall_recall: list[float] = []
+  touchdown_high_recall_f1: list[float] = []
+  touchdown_contact_fallback_precision: list[float] = []
+  touchdown_contact_fallback_recall: list[float] = []
+  touchdown_contact_fallback_f1: list[float] = []
+  flat_touchdown_f1: list[float] = []
+  flat_touchdown_high_recall_precision: list[float] = []
+  flat_touchdown_high_recall_recall: list[float] = []
+  flat_touchdown_high_recall_f1: list[float] = []
   stair_touchdown_f1: list[float] = []
+  stair_touchdown_high_recall_precision: list[float] = []
+  stair_touchdown_high_recall_recall: list[float] = []
+  stair_touchdown_high_recall_f1: list[float] = []
+  stair_touchdown_true_count = 0.0
   toe_f1: list[float] = []
+  toe_high_recall_precision: list[float] = []
+  toe_high_recall_recall: list[float] = []
+  toe_high_recall_f1: list[float] = []
   for foot_id, side in enumerate(("left", "right")):
     touchdown_index = 2 + foot_id
     toe_hit_index = 4 + foot_id
@@ -713,10 +1009,71 @@ def _deployment_event_metrics(
       contact_prob_index=foot_id,
       contact_threshold=touchdown_contact_threshold,
       contact_release_threshold=touchdown_contact_release_threshold,
+      recall_precision_floor=touchdown_recall_precision_floor,
     )
     for key, value in touchdown_stats.items():
       metrics[f"{side}_touchdown_deploy_{key}"] = float(value)
     touchdown_f1.append(float(touchdown_stats["best_event_f1"]))
+    touchdown_high_recall_precision.append(
+      float(touchdown_stats["high_recall_event_precision"])
+    )
+    touchdown_high_recall_recall.append(
+      float(touchdown_stats["high_recall_event_recall"])
+    )
+    touchdown_high_recall_f1.append(float(touchdown_stats["high_recall_event_f1"]))
+
+    fallback_stats = sweep_deployment_event_thresholds(
+      labels=labels,
+      probabilities=probabilities,
+      episode_id=episode_id,
+      frame_idx=frame_idx,
+      event_label_index=touchdown_index,
+      thresholds=thresholds,
+      tolerance_frames=event_tolerance_frames,
+      cooldown_frames=touchdown_cooldown_frames,
+      contact_label_index=foot_id,
+      contact_prob_index=foot_id,
+      contact_threshold=touchdown_contact_threshold,
+      contact_release_threshold=touchdown_contact_release_threshold,
+      contact_rising_fallback=True,
+      recall_precision_floor=touchdown_recall_precision_floor,
+    )
+    for key, value in fallback_stats.items():
+      metrics[f"{side}_touchdown_contact_fallback_deploy_{key}"] = float(value)
+    touchdown_contact_fallback_precision.append(
+      float(fallback_stats["high_recall_event_precision"])
+    )
+    touchdown_contact_fallback_recall.append(
+      float(fallback_stats["high_recall_event_recall"])
+    )
+    touchdown_contact_fallback_f1.append(float(fallback_stats["high_recall_event_f1"]))
+
+    flat_stats = sweep_deployment_event_thresholds(
+      labels=labels,
+      probabilities=probabilities,
+      episode_id=episode_id,
+      frame_idx=frame_idx,
+      event_label_index=touchdown_index,
+      thresholds=thresholds,
+      tolerance_frames=event_tolerance_frames,
+      cooldown_frames=touchdown_cooldown_frames,
+      contact_label_index=foot_id,
+      contact_prob_index=foot_id,
+      contact_threshold=touchdown_contact_threshold,
+      contact_release_threshold=touchdown_contact_release_threshold,
+      valid_mask=~stair_support[:, foot_id].astype(np.bool_),
+      recall_precision_floor=touchdown_recall_precision_floor,
+    )
+    for key, value in flat_stats.items():
+      metrics[f"{side}_touchdown_flat_deploy_{key}"] = float(value)
+    flat_touchdown_f1.append(float(flat_stats["best_event_f1"]))
+    flat_touchdown_high_recall_precision.append(
+      float(flat_stats["high_recall_event_precision"])
+    )
+    flat_touchdown_high_recall_recall.append(
+      float(flat_stats["high_recall_event_recall"])
+    )
+    flat_touchdown_high_recall_f1.append(float(flat_stats["high_recall_event_f1"]))
 
     stair_stats = sweep_deployment_event_thresholds(
       labels=labels,
@@ -732,10 +1089,19 @@ def _deployment_event_metrics(
       contact_threshold=touchdown_contact_threshold,
       contact_release_threshold=touchdown_contact_release_threshold,
       valid_mask=stair_support[:, foot_id].astype(np.bool_),
+      recall_precision_floor=touchdown_recall_precision_floor,
     )
     for key, value in stair_stats.items():
       metrics[f"{side}_touchdown_stair_deploy_{key}"] = float(value)
     stair_touchdown_f1.append(float(stair_stats["best_event_f1"]))
+    stair_touchdown_high_recall_precision.append(
+      float(stair_stats["high_recall_event_precision"])
+    )
+    stair_touchdown_high_recall_recall.append(
+      float(stair_stats["high_recall_event_recall"])
+    )
+    stair_touchdown_high_recall_f1.append(float(stair_stats["high_recall_event_f1"]))
+    stair_touchdown_true_count += float(stair_stats["best_true_event_count"])
 
     toe_stats = sweep_deployment_event_thresholds(
       labels=labels,
@@ -746,15 +1112,112 @@ def _deployment_event_metrics(
       thresholds=thresholds,
       tolerance_frames=event_tolerance_frames,
       cooldown_frames=toe_hit_cooldown_frames,
+      recall_precision_floor=toe_hit_recall_precision_floor,
     )
     for key, value in toe_stats.items():
       metrics[f"{side}_toe_riser_hit_deploy_{key}"] = float(value)
     toe_f1.append(float(toe_stats["best_event_f1"]))
+    toe_high_recall_precision.append(float(toe_stats["high_recall_event_precision"]))
+    toe_high_recall_recall.append(float(toe_stats["high_recall_event_recall"]))
+    toe_high_recall_f1.append(float(toe_stats["high_recall_event_f1"]))
 
   metrics["touchdown_deploy_macro_f1"] = float(np.mean(touchdown_f1))
+  metrics["touchdown_high_recall_macro_precision"] = float(
+    np.mean(touchdown_high_recall_precision)
+  )
+  metrics["touchdown_high_recall_macro_recall"] = float(
+    np.mean(touchdown_high_recall_recall)
+  )
+  metrics["touchdown_high_recall_macro_f1"] = float(np.mean(touchdown_high_recall_f1))
+  metrics["touchdown_contact_fallback_macro_precision"] = float(
+    np.mean(touchdown_contact_fallback_precision)
+  )
+  metrics["touchdown_contact_fallback_macro_recall"] = float(
+    np.mean(touchdown_contact_fallback_recall)
+  )
+  metrics["touchdown_contact_fallback_macro_f1"] = float(
+    np.mean(touchdown_contact_fallback_f1)
+  )
+  metrics["touchdown_flat_deploy_macro_f1"] = float(np.mean(flat_touchdown_f1))
+  metrics["touchdown_flat_high_recall_macro_precision"] = float(
+    np.mean(flat_touchdown_high_recall_precision)
+  )
+  metrics["touchdown_flat_high_recall_macro_recall"] = float(
+    np.mean(flat_touchdown_high_recall_recall)
+  )
+  metrics["touchdown_flat_high_recall_macro_f1"] = float(
+    np.mean(flat_touchdown_high_recall_f1)
+  )
   metrics["touchdown_stair_deploy_macro_f1"] = float(np.mean(stair_touchdown_f1))
+  metrics["touchdown_stair_high_recall_macro_precision"] = float(
+    np.mean(stair_touchdown_high_recall_precision)
+  )
+  metrics["touchdown_stair_high_recall_macro_recall"] = float(
+    np.mean(stair_touchdown_high_recall_recall)
+  )
+  metrics["touchdown_stair_high_recall_macro_f1"] = float(
+    np.mean(stair_touchdown_high_recall_f1)
+  )
+  metrics["touchdown_stair_deploy_true_event_count"] = float(stair_touchdown_true_count)
   metrics["toe_riser_deploy_macro_f1"] = float(np.mean(toe_f1))
+  metrics["toe_riser_high_recall_macro_precision"] = float(
+    np.mean(toe_high_recall_precision)
+  )
+  metrics["toe_riser_high_recall_macro_recall"] = float(np.mean(toe_high_recall_recall))
+  metrics["toe_riser_high_recall_macro_f1"] = float(np.mean(toe_high_recall_f1))
   metrics["deploy_event_macro_f1"] = float(np.mean(touchdown_f1 + toe_f1))
+  stair_count_factor = min(
+    stair_touchdown_true_count / max(float(selection_min_stair_touchdown_events), 1.0),
+    1.0,
+  )
+  metrics["footprint_deploy_score"] = float(
+    stair_count_factor
+    * (
+      0.45 * metrics["touchdown_high_recall_macro_recall"]
+      + 0.15 * metrics["touchdown_high_recall_macro_precision"]
+      + 0.30 * metrics["touchdown_stair_deploy_macro_f1"]
+      + 0.10 * metrics["toe_riser_deploy_macro_f1"]
+    )
+  )
+  touchdown_guard = min(
+    metrics["touchdown_high_recall_macro_precision"]
+    / max(float(touchdown_recall_precision_floor), 1.0e-6),
+    1.0,
+  )
+  stair_guard = min(
+    metrics["touchdown_stair_high_recall_macro_precision"]
+    / max(float(touchdown_recall_precision_floor), 1.0e-6),
+    1.0,
+  )
+  toe_guard = min(
+    metrics["toe_riser_high_recall_macro_precision"]
+    / max(float(toe_hit_recall_precision_floor), 1.0e-6),
+    1.0,
+  )
+  metrics["high_recall_precision_guard"] = float(
+    0.45 * touchdown_guard + 0.35 * stair_guard + 0.20 * toe_guard
+  )
+  metrics["toe_riser_high_recall_score"] = float(
+    metrics["toe_riser_high_recall_macro_recall"] * toe_guard
+  )
+  metrics["high_recall_footprint_score"] = float(
+    stair_count_factor
+    * (
+      0.35 * metrics["touchdown_high_recall_macro_recall"]
+      + 0.30 * metrics["touchdown_stair_high_recall_macro_recall"]
+      + 0.20 * metrics["toe_riser_high_recall_macro_recall"]
+      + 0.15 * metrics["high_recall_precision_guard"]
+    )
+  )
+  metrics["toe_guarded_footprint_score"] = float(
+    stair_count_factor
+    * (
+      0.25 * metrics["touchdown_high_recall_macro_recall"]
+      + 0.25 * metrics["touchdown_stair_high_recall_macro_recall"]
+      + 0.30 * metrics["toe_riser_high_recall_score"]
+      + 0.20 * metrics["high_recall_precision_guard"]
+    )
+  )
   return metrics
 
 
@@ -772,6 +1235,9 @@ def _evaluate_online(
   touchdown_contact_release_threshold: float,
   touchdown_cooldown_frames: int,
   toe_hit_cooldown_frames: int,
+  touchdown_recall_precision_floor: float,
+  toe_hit_recall_precision_floor: float,
+  selection_min_stair_touchdown_events: int,
 ) -> dict[str, float]:
   snapshot = buffer.snapshot()
   labels = snapshot["labels"].astype(np.float32)
@@ -833,6 +1299,9 @@ def _evaluate_online(
       touchdown_contact_release_threshold=touchdown_contact_release_threshold,
       touchdown_cooldown_frames=touchdown_cooldown_frames,
       toe_hit_cooldown_frames=toe_hit_cooldown_frames,
+      touchdown_recall_precision_floor=touchdown_recall_precision_floor,
+      toe_hit_recall_precision_floor=toe_hit_recall_precision_floor,
+      selection_min_stair_touchdown_events=selection_min_stair_touchdown_events,
       event_tolerance_frames=event_tolerance_frames,
     )
   )
@@ -881,9 +1350,9 @@ def _mine_false_positive_hard_negatives(
     batch_size=batch_size,
   )
   labels = snapshot["labels"].astype(np.float32)
-  toe_fp = (probabilities[:, 4:6].max(axis=1) >= threshold) & (
-    labels[:, 4:6].max(axis=1) <= 0.5
-  )
+  train_labels = snapshot["train_labels"].astype(np.float32)
+  toe_negative = train_labels[:, 4:6].max(axis=1) <= 0.0
+  toe_fp = (probabilities[:, 4:6].max(axis=1) >= threshold) & (toe_negative)
   peak_indices = np.nonzero(toe_fp)[0].astype(np.int64)
   if peak_indices.shape[0] > max_peaks:
     order = np.argsort(-probabilities[peak_indices, 4:6].max(axis=1))
@@ -895,8 +1364,88 @@ def _mine_false_positive_hard_negatives(
   for peak in peak_indices:
     same_sequence = (episode_id == episode_id[peak]) & (env_id == env_id[peak])
     near_peak = np.abs(frame_idx - frame_idx[peak]) <= window_frames
-    hard_mask |= same_sequence & near_peak & (labels[:, 4:6].max(axis=1) <= 0.5)
+    hard_mask |= same_sequence & near_peak & toe_negative
   return buffer.mark_false_positive_hard_negatives(hard_mask)
+
+
+def _mine_false_negative_hard_positives(
+  model: FootEventDetectorGRU,
+  buffer: OnlineFootEventReplayBuffer,
+  *,
+  device: torch.device,
+  batch_size: int,
+  threshold: float,
+  window_frames: int,
+  max_peaks: int,
+) -> int:
+  """Replay touchdown events whose predicted touchdown probability is too low."""
+  if buffer.size == 0:
+    return 0
+  snapshot, probabilities = _predict_buffer_probabilities(
+    model,
+    buffer,
+    device=device,
+    batch_size=batch_size,
+  )
+  labels = snapshot["labels"].astype(np.float32)
+  train_labels = snapshot["train_labels"].astype(np.float32)
+  missed_touchdown = ((labels[:, 2] > 0.5) & (probabilities[:, 2] < threshold)) | (
+    (labels[:, 3] > 0.5) & (probabilities[:, 3] < threshold)
+  )
+  peak_indices = np.nonzero(missed_touchdown)[0].astype(np.int64)
+  if peak_indices.shape[0] > max_peaks:
+    order = np.argsort(probabilities[peak_indices, 2:4].max(axis=1))
+    peak_indices = peak_indices[order[:max_peaks]]
+  hard_mask = np.zeros(labels.shape[0], dtype=np.bool_)
+  episode_id = snapshot["episode_id"].astype(np.int64)
+  frame_idx = snapshot["frame_idx"].astype(np.int64)
+  env_id = snapshot["env_id"].astype(np.int64)
+  soft_positive = train_labels[:, 2:4].max(axis=1) > 0.0
+  for peak in peak_indices:
+    same_sequence = (episode_id == episode_id[peak]) & (env_id == env_id[peak])
+    near_peak = np.abs(frame_idx - frame_idx[peak]) <= window_frames
+    hard_mask |= same_sequence & near_peak & soft_positive
+  return buffer.mark_false_negative_hard_positives(hard_mask)
+
+
+def _mine_false_negative_toe_hard_positives(
+  model: FootEventDetectorGRU,
+  buffer: OnlineFootEventReplayBuffer,
+  *,
+  device: torch.device,
+  batch_size: int,
+  threshold: float,
+  window_frames: int,
+  max_peaks: int,
+) -> int:
+  """Replay toe-riser hit events whose predicted probability is too low."""
+  if buffer.size == 0:
+    return 0
+  snapshot, probabilities = _predict_buffer_probabilities(
+    model,
+    buffer,
+    device=device,
+    batch_size=batch_size,
+  )
+  labels = snapshot["labels"].astype(np.float32)
+  train_labels = snapshot["train_labels"].astype(np.float32)
+  missed_toe = ((labels[:, 4] > 0.5) & (probabilities[:, 4] < threshold)) | (
+    (labels[:, 5] > 0.5) & (probabilities[:, 5] < threshold)
+  )
+  peak_indices = np.nonzero(missed_toe)[0].astype(np.int64)
+  if peak_indices.shape[0] > max_peaks:
+    order = np.argsort(probabilities[peak_indices, 4:6].max(axis=1))
+    peak_indices = peak_indices[order[:max_peaks]]
+  hard_mask = np.zeros(labels.shape[0], dtype=np.bool_)
+  episode_id = snapshot["episode_id"].astype(np.int64)
+  frame_idx = snapshot["frame_idx"].astype(np.int64)
+  env_id = snapshot["env_id"].astype(np.int64)
+  soft_positive = train_labels[:, 4:6].max(axis=1) > 0.0
+  for peak in peak_indices:
+    same_sequence = (episode_id == episode_id[peak]) & (env_id == env_id[peak])
+    near_peak = np.abs(frame_idx - frame_idx[peak]) <= window_frames
+    hard_mask |= same_sequence & near_peak & soft_positive
+  return buffer.mark_false_negative_toe_hard_positives(hard_mask)
 
 
 def _metric_improved(
@@ -909,6 +1458,101 @@ def _metric_improved(
   if higher_better:
     return metric_value > best_value + min_delta
   return metric_value < best_value - min_delta
+
+
+def _best_val_metrics_from_payload(payload: dict[str, Any]) -> dict[str, float]:
+  if "history" in payload and "best_step" in payload:
+    best_step = int(payload["best_step"])
+    for record in payload["history"]:
+      if int(record.get("step", -1)) != best_step:
+        continue
+      values = record.get("val", record)
+      if isinstance(values, dict):
+        return {
+          key: float(value)
+          for key, value in values.items()
+          if isinstance(value, int | float)
+        }
+  if "best_metrics" in payload and isinstance(payload["best_metrics"], dict):
+    return {
+      key: float(value)
+      for key, value in payload["best_metrics"].items()
+      if isinstance(value, int | float)
+    }
+  if "val" in payload and isinstance(payload["val"], dict):
+    return {
+      key: float(value)
+      for key, value in payload["val"].items()
+      if isinstance(value, int | float)
+    }
+  return {
+    key: float(value)
+    for key, value in payload.items()
+    if isinstance(value, int | float)
+  }
+
+
+def _load_baseline_metrics(path: str | Path | None) -> dict[str, float] | None:
+  if path is None:
+    return None
+  metrics_path = Path(path).expanduser()
+  with metrics_path.open("r", encoding="utf-8") as stream:
+    payload = json.load(stream)
+  if not isinstance(payload, dict):
+    raise TypeError(f"Expected JSON object in baseline metrics file {metrics_path}.")
+  metrics = _best_val_metrics_from_payload(payload)
+  if not metrics:
+    raise ValueError(f"No numeric baseline metrics found in {metrics_path}.")
+  return metrics
+
+
+def _baseline_guard_passed(
+  metrics: dict[str, float],
+  baseline_metrics: dict[str, float] | None,
+  *,
+  touchdown_recall_tolerance: float,
+  stair_touchdown_recall_tolerance: float,
+  flat_touchdown_f1_tolerance: float,
+  toe_metric: str,
+  toe_metric_min_improvement: float,
+) -> tuple[bool, tuple[str, ...]]:
+  """Return whether a candidate keeps baseline footprint behavior intact."""
+  if baseline_metrics is None:
+    return True, ()
+
+  failures: list[str] = []
+  floor_checks = (
+    (
+      "touchdown_high_recall_macro_recall",
+      touchdown_recall_tolerance,
+    ),
+    (
+      "touchdown_stair_high_recall_macro_recall",
+      stair_touchdown_recall_tolerance,
+    ),
+    (
+      "touchdown_flat_high_recall_macro_f1",
+      flat_touchdown_f1_tolerance,
+    ),
+  )
+  for key, tolerance in floor_checks:
+    if key not in baseline_metrics or key not in metrics:
+      failures.append(f"{key}=missing")
+      continue
+    required = float(baseline_metrics[key]) - float(tolerance)
+    actual = float(metrics[key])
+    if actual < required:
+      failures.append(f"{key} {actual:.4f} < {required:.4f}")
+
+  if toe_metric not in baseline_metrics or toe_metric not in metrics:
+    failures.append(f"{toe_metric}=missing")
+  else:
+    required = float(baseline_metrics[toe_metric]) + float(toe_metric_min_improvement)
+    actual = float(metrics[toe_metric])
+    if actual < required:
+      failures.append(f"{toe_metric} {actual:.4f} < {required:.4f}")
+
+  return len(failures) == 0, tuple(failures)
 
 
 def _current_metadata(env: ManagerBasedRlEnv) -> tuple[torch.Tensor, torch.Tensor]:
@@ -972,11 +1616,21 @@ def run_online_train(
     raise ValueError("early_stop_patience_evals must be non-negative.")
   if cfg.early_stop_min_delta < 0.0:
     raise ValueError("early_stop_min_delta must be non-negative.")
+  if cfg.toe_only_finetune and cfg.toe_riser_only_model:
+    raise ValueError(
+      "toe_only_finetune and toe_riser_only_model are mutually exclusive."
+    )
+  if cfg.toe_only_finetune and cfg.init_detector_checkpoint is None:
+    raise ValueError("toe_only_finetune requires init_detector_checkpoint.")
   sample_fractions = (
     cfg.toe_positive_fraction,
+    cfg.toe_soft_positive_fraction,
     cfg.touchdown_positive_fraction,
+    cfg.touchdown_soft_positive_fraction,
     cfg.stair_hard_negative_fraction,
     cfg.false_positive_hard_negative_fraction,
+    cfg.false_negative_hard_positive_fraction,
+    cfg.false_negative_toe_hard_positive_fraction,
   )
   if any(value < 0.0 for value in sample_fractions) or sum(sample_fractions) > 1.0:
     raise ValueError("Stratified replay fractions must be non-negative and sum <= 1.")
@@ -986,12 +1640,38 @@ def run_online_train(
     raise ValueError("hard_negative_mining_window_frames must be non-negative.")
   if cfg.hard_negative_mining_max_peaks <= 0:
     raise ValueError("hard_negative_mining_max_peaks must be positive.")
+  if cfg.hard_positive_mining_window_frames < 0:
+    raise ValueError("hard_positive_mining_window_frames must be non-negative.")
+  if cfg.hard_positive_mining_max_peaks <= 0:
+    raise ValueError("hard_positive_mining_max_peaks must be positive.")
+  if cfg.hard_toe_positive_mining_window_frames < 0:
+    raise ValueError("hard_toe_positive_mining_window_frames must be non-negative.")
+  if cfg.hard_toe_positive_mining_max_peaks <= 0:
+    raise ValueError("hard_toe_positive_mining_max_peaks must be positive.")
+  if not 0.0 <= cfg.toe_soft_positive_threshold <= 1.0:
+    raise ValueError("toe_soft_positive_threshold must be in [0, 1].")
+  if not 0.0 <= cfg.touchdown_soft_positive_threshold <= 1.0:
+    raise ValueError("touchdown_soft_positive_threshold must be in [0, 1].")
+  if not 0.0 <= cfg.touchdown_recall_precision_floor <= 1.0:
+    raise ValueError("touchdown_recall_precision_floor must be in [0, 1].")
+  if not 0.0 <= cfg.toe_hit_recall_precision_floor <= 1.0:
+    raise ValueError("toe_hit_recall_precision_floor must be in [0, 1].")
+  if cfg.selection_min_stair_touchdown_events < 0:
+    raise ValueError("selection_min_stair_touchdown_events must be non-negative.")
   if cfg.touchdown_cooldown_frames < 0 or cfg.toe_hit_cooldown_frames < 0:
     raise ValueError("event cooldown frames must be non-negative.")
   if cfg.sweep_threshold_steps <= 0:
     raise ValueError("sweep_threshold_steps must be positive.")
   if not 0.0 < cfg.sweep_threshold_min <= cfg.sweep_threshold_max < 1.0:
     raise ValueError("sweep thresholds must satisfy 0 < min <= max < 1.")
+  baseline_tolerances = (
+    cfg.baseline_touchdown_recall_tolerance,
+    cfg.baseline_stair_touchdown_recall_tolerance,
+    cfg.baseline_flat_touchdown_f1_tolerance,
+    cfg.baseline_toe_metric_min_improvement,
+  )
+  if any(value < 0.0 for value in baseline_tolerances):
+    raise ValueError("Baseline guard tolerances must be non-negative.")
 
   random.seed(cfg.seed)
   np.random.seed(cfg.seed)
@@ -1002,6 +1682,10 @@ def run_online_train(
   )
   output_dir = Path(cfg.output_dir).expanduser().resolve()
   output_dir.mkdir(parents=True, exist_ok=True)
+  eval_checkpoint_dir = output_dir / "checkpoints"
+  if cfg.save_eval_checkpoints:
+    eval_checkpoint_dir.mkdir(parents=True, exist_ok=True)
+  last_checkpoint_path = output_dir / "last.pt"
 
   env_cfg = load_env_cfg(task_id, play=False)
   agent_cfg = load_rl_cfg(task_id)
@@ -1053,10 +1737,31 @@ def run_online_train(
     head_hidden_dim=cfg.head_hidden_dim,
     dropout=cfg.dropout,
   ).to(device)
+  if cfg.init_detector_checkpoint is not None:
+    _load_detector_checkpoint(
+      model,
+      cfg.init_detector_checkpoint,
+      device=device,
+    )
+  train_label_indices: tuple[int, ...] | None = None
+  if cfg.toe_only_finetune:
+    _configure_toe_only_finetune(model)
+    train_label_indices = (4, 5)
+  if cfg.toe_riser_only_model:
+    _configure_toe_riser_only_model(model)
+    train_label_indices = (4, 5)
+  trainable_parameters = [
+    parameter for parameter in model.parameters() if parameter.requires_grad
+  ]
+  if not trainable_parameters:
+    raise RuntimeError("No trainable detector parameters were configured.")
+  optimizer_weight_decay = (
+    0.0 if (cfg.toe_only_finetune or cfg.toe_riser_only_model) else cfg.weight_decay
+  )
   optimizer = torch.optim.AdamW(
-    model.parameters(),
+    trainable_parameters,
     lr=cfg.learning_rate,
-    weight_decay=cfg.weight_decay,
+    weight_decay=optimizer_weight_decay,
   )
   generator = torch.Generator(device=device)
   generator.manual_seed(cfg.seed)
@@ -1083,10 +1788,15 @@ def run_online_train(
     cfg.sweep_threshold_steps,
     dtype=np.float32,
   )
+  baseline_metrics = _load_baseline_metrics(cfg.baseline_metrics_file)
   higher_better = metric_is_higher_better(selection_metric)
   best_value = -float("inf") if higher_better else float("inf")
   best_step = 0
   best_state: dict[str, torch.Tensor] | None = None
+  if baseline_metrics is not None and selection_metric in baseline_metrics:
+    best_value = float(baseline_metrics[selection_metric])
+  if cfg.init_detector_checkpoint is not None:
+    best_state = copy.deepcopy(model.state_dict())
   metrics_history: list[dict[str, Any]] = []
   train_updates = 0
   completed_steps = 0
@@ -1106,11 +1816,24 @@ def run_online_train(
     f"max_updates={cfg.max_updates}",
     f"patience_evals={cfg.early_stop_patience_evals}",
     f"selection_metric={selection_metric}",
+    f"init_detector={cfg.init_detector_checkpoint}",
+    f"toe_only_finetune={cfg.toe_only_finetune}",
+    f"toe_riser_only_model={cfg.toe_riser_only_model}",
+    f"optimizer_weight_decay={optimizer_weight_decay}",
+    f"baseline_metrics={cfg.baseline_metrics_file}",
     f"toe_hit_pos_weight={cfg.toe_hit_pos_weight}",
     f"include_gait_phase={cfg.include_gait_phase}",
     f"obs_dim={cfg.expected_obs_dim}",
     f"toe_pos_fraction={cfg.toe_positive_fraction}",
+    f"toe_soft_fraction={cfg.toe_soft_positive_fraction}",
     f"touchdown_pos_fraction={cfg.touchdown_positive_fraction}",
+    f"touchdown_soft_fraction={cfg.touchdown_soft_positive_fraction}",
+    f"fn_hard_pos_fraction={cfg.false_negative_hard_positive_fraction}",
+    f"toe_fn_hard_pos_fraction={cfg.false_negative_toe_hard_positive_fraction}",
+    f"recall_precision_floor={cfg.touchdown_recall_precision_floor}",
+    f"toe_recall_precision_floor={cfg.toe_hit_recall_precision_floor}",
+    f"min_stair_events={cfg.selection_min_stair_touchdown_events}",
+    f"save_eval_checkpoints={cfg.save_eval_checkpoints}",
     f"history_len={cfg.history_len}",
     f"device={device}",
     f"output={output_dir}",
@@ -1242,11 +1965,21 @@ def run_online_train(
             cfg.batch_size,
             generator=generator,
             toe_positive_fraction=cfg.toe_positive_fraction,
+            toe_soft_positive_fraction=cfg.toe_soft_positive_fraction,
             touchdown_positive_fraction=cfg.touchdown_positive_fraction,
+            touchdown_soft_positive_fraction=cfg.touchdown_soft_positive_fraction,
             stair_hard_negative_fraction=cfg.stair_hard_negative_fraction,
             false_positive_hard_negative_fraction=(
               cfg.false_positive_hard_negative_fraction
             ),
+            false_negative_hard_positive_fraction=(
+              cfg.false_negative_hard_positive_fraction
+            ),
+            false_negative_toe_hard_positive_fraction=(
+              cfg.false_negative_toe_hard_positive_fraction
+            ),
+            toe_soft_positive_threshold=cfg.toe_soft_positive_threshold,
+            touchdown_soft_positive_threshold=cfg.touchdown_soft_positive_threshold,
           )
           logits = model(batch_obs)
           loss = _training_loss(
@@ -1259,6 +1992,7 @@ def run_online_train(
             focal_gamma_neg=cfg.focal_gamma_neg,
             tversky_alpha=cfg.tversky_alpha,
             tversky_beta=cfg.tversky_beta,
+            train_label_indices=train_label_indices,
           )
           optimizer.zero_grad(set_to_none=True)
           loss.backward()
@@ -1273,6 +2007,7 @@ def run_online_train(
         and (rollout_step + 1) % cfg.eval_interval_steps == 0
       )
       if should_eval:
+        eval_step = rollout_step + 1
         val_metrics = _evaluate_online(
           model,
           val_buffer,
@@ -1286,7 +2021,20 @@ def run_online_train(
           touchdown_contact_release_threshold=cfg.touchdown_contact_release_threshold,
           touchdown_cooldown_frames=cfg.touchdown_cooldown_frames,
           toe_hit_cooldown_frames=cfg.toe_hit_cooldown_frames,
+          touchdown_recall_precision_floor=cfg.touchdown_recall_precision_floor,
+          toe_hit_recall_precision_floor=cfg.toe_hit_recall_precision_floor,
+          selection_min_stair_touchdown_events=(
+            cfg.selection_min_stair_touchdown_events
+          ),
         )
+        if selection_metric not in val_metrics:
+          available = ", ".join(sorted(val_metrics))
+          raise KeyError(
+            f"selection_metric={selection_metric!r} not found in validation "
+            f"metrics. Available metrics: {available}"
+          )
+        if cfg.save_eval_checkpoints:
+          torch.save(model.state_dict(), eval_checkpoint_dir / f"step_{eval_step}.pt")
         mined_hard_negatives = 0
         if cfg.mine_false_positive_hard_negatives:
           mined_hard_negatives = _mine_false_positive_hard_negatives(
@@ -1298,8 +2046,41 @@ def run_online_train(
             window_frames=cfg.hard_negative_mining_window_frames,
             max_peaks=cfg.hard_negative_mining_max_peaks,
           )
+        mined_hard_positives = 0
+        if cfg.mine_false_negative_hard_positives:
+          mined_hard_positives = _mine_false_negative_hard_positives(
+            model,
+            train_buffer,
+            device=device,
+            batch_size=cfg.batch_size,
+            threshold=cfg.hard_positive_mining_threshold,
+            window_frames=cfg.hard_positive_mining_window_frames,
+            max_peaks=cfg.hard_positive_mining_max_peaks,
+          )
+        mined_toe_hard_positives = 0
+        if cfg.mine_false_negative_toe_hard_positives:
+          mined_toe_hard_positives = _mine_false_negative_toe_hard_positives(
+            model,
+            train_buffer,
+            device=device,
+            batch_size=cfg.batch_size,
+            threshold=cfg.hard_toe_positive_mining_threshold,
+            window_frames=cfg.hard_toe_positive_mining_window_frames,
+            max_peaks=cfg.hard_toe_positive_mining_max_peaks,
+          )
+        guard_passed, guard_failures = _baseline_guard_passed(
+          val_metrics,
+          baseline_metrics,
+          touchdown_recall_tolerance=cfg.baseline_touchdown_recall_tolerance,
+          stair_touchdown_recall_tolerance=(
+            cfg.baseline_stair_touchdown_recall_tolerance
+          ),
+          flat_touchdown_f1_tolerance=cfg.baseline_flat_touchdown_f1_tolerance,
+          toe_metric=cfg.baseline_toe_metric,
+          toe_metric_min_improvement=cfg.baseline_toe_metric_min_improvement,
+        )
         metric_value = float(val_metrics[selection_metric])
-        is_better = _metric_improved(
+        is_better = guard_passed and _metric_improved(
           metric_value=metric_value,
           best_value=best_value,
           higher_better=higher_better,
@@ -1307,7 +2088,7 @@ def run_online_train(
         )
         if is_better:
           best_value = metric_value
-          best_step = rollout_step + 1
+          best_step = eval_step
           best_state = copy.deepcopy(model.state_dict())
           torch.save(best_state, output_dir / "best.pt")
           no_improve_evals = 0
@@ -1315,23 +2096,40 @@ def run_online_train(
           no_improve_evals += 1
         metrics_history.append(
           {
-            "step": rollout_step + 1,
+            "step": eval_step,
             "train_updates": train_updates,
             "train_samples": train_buffer.size,
             "val_samples": val_buffer.size,
             "mined_false_positive_hard_negatives": mined_hard_negatives,
+            "mined_false_negative_hard_positives": mined_hard_positives,
+            "mined_false_negative_toe_hard_positives": mined_toe_hard_positives,
+            "baseline_guard_passed": guard_passed,
+            "baseline_guard_failures": list(guard_failures),
             "val": val_metrics,
           }
         )
         print(
-          f"[Stage 2D] step={rollout_step + 1}",
+          f"[Stage 2D] step={eval_step}",
           f"updates={train_updates}",
           f"val_loss={val_metrics['val_loss']:.5f}",
           f"event_macro_f1={val_metrics['event_macro_f1']:.4f}",
           f"deploy_event_macro_f1={val_metrics['deploy_event_macro_f1']:.4f}",
+          f"footprint_score={val_metrics['footprint_deploy_score']:.4f}",
+          f"high_recall_score={val_metrics['high_recall_footprint_score']:.4f}",
+          f"toe_guarded_score={val_metrics['toe_guarded_footprint_score']:.4f}",
           f"td_deploy_f1={val_metrics['touchdown_deploy_macro_f1']:.4f}",
+          f"td_high_recall={val_metrics['touchdown_high_recall_macro_recall']:.4f}",
+          "td_stair_high_recall="
+          f"{val_metrics['touchdown_stair_high_recall_macro_recall']:.4f}",
+          f"td_fallback_recall={val_metrics['touchdown_contact_fallback_macro_recall']:.4f}",
           f"toe_deploy_f1={val_metrics['toe_riser_deploy_macro_f1']:.4f}",
+          f"toe_high_recall={val_metrics['toe_riser_high_recall_macro_recall']:.4f}",
+          f"toe_high_precision={val_metrics['toe_riser_high_recall_macro_precision']:.4f}",
           f"mined_fp_hard={mined_hard_negatives}",
+          f"mined_fn_hard={mined_hard_positives}",
+          f"mined_toe_fn_hard={mined_toe_hard_positives}",
+          f"baseline_guard={'pass' if guard_passed else 'fail'}",
+          f"guard_failures={';'.join(guard_failures[:2]) if guard_failures else '-'}",
           f"left_td_stair_f1={val_metrics.get('left_touchdown_stair_event_f1', 0.0):.4f}",
           f"right_td_stair_f1={val_metrics.get('right_touchdown_stair_event_f1', 0.0):.4f}",
           f"no_improve={no_improve_evals}",
@@ -1349,11 +2147,13 @@ def run_online_train(
     _close_sequence_logger(raw_env)
     wrapped.close()
 
+  if cfg.save_last_checkpoint:
+    torch.save(model.state_dict(), last_checkpoint_path)
   if best_state is None:
     best_state = copy.deepcopy(model.state_dict())
     best_step = completed_steps
-    torch.save(best_state, output_dir / "best.pt")
     best_value = 0.0
+  torch.save(best_state, output_dir / "best.pt")
   model.load_state_dict(best_state)
   if cfg.export_onnx:
     export_detector_onnx(
@@ -1364,16 +2164,19 @@ def run_online_train(
     )
   _write_label_audit(output_dir, train_buffer, val_buffer)
   best_val_metrics: dict[str, float] = {}
-  for record in metrics_history:
-    if int(record["step"]) == best_step:
-      best_val_metrics = {
-        key: float(value) for key, value in dict(record["val"]).items()
-      }
-      break
+  if best_step == 0 and baseline_metrics is not None:
+    best_val_metrics = dict(baseline_metrics)
+  else:
+    for record in metrics_history:
+      if int(record["step"]) == best_step:
+        best_val_metrics = {
+          key: float(value) for key, value in dict(record["val"]).items()
+        }
+        break
   best_deployment_thresholds = {
     key: value
     for key, value in best_val_metrics.items()
-    if key.endswith("_deploy_best_threshold")
+    if key.endswith(("_deploy_best_threshold", "_deploy_high_recall_threshold"))
   }
   payload: dict[str, Any] = {
     "config": asdict(cfg),
@@ -1389,6 +2192,13 @@ def run_online_train(
     "stop_reason": stop_reason,
     "selection_metric": selection_metric,
     "best_metric_value": best_value,
+    "best_checkpoint_path": str(output_dir / "best.pt"),
+    "eval_checkpoint_dir": str(eval_checkpoint_dir)
+    if cfg.save_eval_checkpoints
+    else None,
+    "last_checkpoint_path": str(last_checkpoint_path)
+    if cfg.save_last_checkpoint
+    else None,
     "best_deployment_thresholds": best_deployment_thresholds,
     "deployment_threshold_grid": [
       float(value) for value in deployment_thresholds.astype(np.float32).tolist()
@@ -1398,11 +2208,26 @@ def run_online_train(
     "train_samples_in_buffer": train_buffer.size,
     "val_samples_in_buffer": val_buffer.size,
     "pos_weight": [float(value) for value in pos_weight.detach().cpu().tolist()],
+    "trained_label_indices": list(train_label_indices)
+    if train_label_indices is not None
+    else None,
+    "baseline_guard": {
+      "metrics_file": cfg.baseline_metrics_file,
+      "baseline_metrics": baseline_metrics,
+      "touchdown_recall_tolerance": cfg.baseline_touchdown_recall_tolerance,
+      "stair_touchdown_recall_tolerance": (
+        cfg.baseline_stair_touchdown_recall_tolerance
+      ),
+      "flat_touchdown_f1_tolerance": cfg.baseline_flat_touchdown_f1_tolerance,
+      "toe_metric": cfg.baseline_toe_metric,
+      "toe_metric_min_improvement": cfg.baseline_toe_metric_min_improvement,
+    },
     "model": {
       "type": "FootEventDetectorGRU",
       "obs_dim": cfg.expected_obs_dim,
       "history_len": cfg.history_len,
       "output_dim": len(FOOT_EVENT_LABEL_NAMES),
+      "toe_riser_only_output_layout": bool(cfg.toe_riser_only_model),
       "frame_hidden_dim": cfg.frame_hidden_dim,
       "recurrent_hidden_dim": cfg.recurrent_hidden_dim,
       "head_hidden_dim": cfg.head_hidden_dim,
@@ -1430,12 +2255,18 @@ def run_online_train(
 def main() -> None:
   import mjlab.tasks as _tasks  # noqa: F401
 
-  task_id, remaining_args = tyro.cli(
-    tyro.extras.literal_type_from_choices(list_tasks()),
-    args=None,
-    default="Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1",
-    return_unknown_args=True,
+  default_task_id = (
+    "Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1"
   )
+  task_choices = tuple(list_tasks())
+  remaining_args = sys.argv[1:]
+  task_id = default_task_id
+  if remaining_args and not remaining_args[0].startswith("-"):
+    task_id = remaining_args[0]
+    remaining_args = remaining_args[1:]
+  if task_id not in task_choices:
+    choices = ", ".join(task_choices)
+    raise ValueError(f"Unknown task_id {task_id!r}. Available tasks: {choices}")
   cfg = tyro.cli(OnlineFootEventDetectorConfig, args=remaining_args)
   run_online_train(task_id, cfg)
 

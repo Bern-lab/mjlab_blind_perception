@@ -466,6 +466,213 @@ def test_safe_stride_interval_head_regresses_lower_and_width_independently() -> 
     assert loss.item() == pytest.approx(0.01875)
 
 
+def test_safe_stride_spread_losses_penalize_collapsed_predictions() -> None:
+    """SafeStride spread losses should push predictions to use label range."""
+    valid = torch.ones(4, 1)
+    labels = torch.tensor([[0.20], [0.30], [0.45], [0.55]])
+    collapsed = torch.full_like(labels, 0.35)
+    centered, std_floor = PPOTeacherKL._compute_masked_centered_spread_losses(
+        collapsed,
+        labels,
+        valid,
+        std_floor_ratio=0.7,
+    )
+    matched_centered, matched_std_floor = PPOTeacherKL._compute_masked_centered_spread_losses(
+        labels,
+        labels,
+        valid,
+        std_floor_ratio=0.7,
+    )
+
+    assert centered.item() > 0.0
+    assert std_floor.item() > 0.0
+    assert matched_centered.item() == pytest.approx(0.0)
+    assert matched_std_floor.item() == pytest.approx(0.0)
+
+
+def test_safe_stride_spread_losses_ignore_invalid_nan_padding() -> None:
+    """Padded invalid rows should not turn SafeStride spread losses into NaN."""
+    valid = torch.tensor([[1.0], [1.0], [0.0]])
+    labels = torch.tensor([[0.20], [0.50], [float("nan")]])
+    predictions = torch.tensor([[0.25], [0.35], [float("nan")]])
+
+    centered, std_floor = PPOTeacherKL._compute_masked_centered_spread_losses(
+        predictions,
+        labels,
+        valid,
+        std_floor_ratio=0.7,
+    )
+
+    assert torch.isfinite(centered)
+    assert torch.isfinite(std_floor)
+
+
+def test_safe_stride_deployable_hint_penalizes_lower_bound_shortfall() -> None:
+    """Deployable foot-event hints should act as a one-sided lower-bound floor."""
+    alg = _build_teacher_kl({"enabled": False})
+    actor = cast(Any, alg.actor)
+    actor.aux_event_coef = 0.0
+    actor.aux_stair_coef = 0.0
+    actor.aux_future_collision_risk_coef = 0.0
+    actor.aux_future_safe_landing_quality_coef = 0.0
+    actor.aux_stair_shape_coef = 0.0
+    actor.aux_safe_stride_coef = 1.0
+    actor.safe_stride_huber_delta = 0.05
+    actor.safe_stride_deployable_hint_loss_coef = 1.0
+    actor.safe_stride_deployable_hint_margin = 0.0
+    actor.safe_stride_min = 0.10
+    actor.safe_stride_max = 0.55
+    actor.latent_obs_set = "latent"
+    actor.get_aux_outputs = lambda: {"safe_stride": torch.full((4, 1), 0.12)}
+    actor.get_slow_latent_diagnostics = lambda: {}
+
+    labels = torch.zeros(4, 7)
+    labels[0, 1] = 1.0
+    labels[0, 5] = 0.10
+    labels[0, 6] = 1.0
+    latent = torch.zeros(4, 80)
+    latent[0, 70] = 1.0
+    latent[0, 71] = 0.22
+    latent[0, 72] = 0.25
+    latent[0, 78] = 0.8
+    observations = TensorDict(
+        {
+            "latent_labels": labels,
+            "latent": latent,
+        },
+        batch_size=[NUM_ENVS],
+    )
+
+    loss, logs = alg._compute_slow_latent_aux_loss(
+        RolloutStorage.Batch(observations=observations, hidden_states=(None, None))
+    )
+
+    assert logs["slow_latent_safe_stride_deployable_hint_valid_ratio"] == pytest.approx(0.25)
+    assert logs["slow_latent_safe_stride_deployable_hint_mean"] == pytest.approx(0.25)
+    assert logs["slow_latent_safe_stride_deployable_hint_shortfall_mae"] == pytest.approx(0.13)
+    assert logs["slow_latent_safe_stride_deployable_hint_huber"] > 0.0
+    assert logs["slow_latent_safe_stride_regularized_huber"] == pytest.approx(
+        logs["slow_latent_safe_stride_huber"] + logs["slow_latent_safe_stride_deployable_hint_huber"]
+    )
+    assert loss.item() == pytest.approx(logs["slow_latent_safe_stride_regularized_huber"])
+
+
+def test_safe_stride_deployable_hint_accepts_legacy_summary_layout() -> None:
+    """The deployable hint parser should still read old 70-D summaries."""
+    latent = torch.zeros(2, 70)
+    latent[0, 60 + 8] = 0.31
+    observations = TensorDict({"latent": latent}, batch_size=[2])
+
+    hint = PPOTeacherKL._safe_stride_deployable_hint_from_latent_obs(
+        observations,
+        "latent",
+        0.10,
+        0.55,
+    )
+
+    assert hint is not None
+    torch.testing.assert_close(hint[0], torch.tensor([0.31, 1.0]))
+    torch.testing.assert_close(hint[1], torch.tensor([0.10, 0.0]))
+
+
+def test_safe_stride_deployable_hint_ignores_invalid_nan_padding() -> None:
+    """Invalid padded hint rows should not poison the one-sided hint loss."""
+    predictions = torch.tensor([[0.10], [float("nan")]])
+    lower_hint = torch.tensor([[0.25], [float("nan")]])
+    valid = torch.tensor([[1.0], [0.0]])
+    importance = torch.ones_like(valid)
+
+    loss, shortfall = PPOTeacherKL._compute_one_sided_lower_hint_loss(
+        predictions,
+        lower_hint,
+        valid,
+        importance,
+        margin=0.0,
+        huber_delta=0.05,
+    )
+
+    assert torch.isfinite(loss)
+    assert torch.isfinite(shortfall)
+    assert shortfall.item() == pytest.approx(0.15)
+
+
+def test_safe_stride_interval_coverage_penalizes_missing_target_bounds() -> None:
+    """Coverage loss should only fire when decoded interval excludes target bounds."""
+    predictions = torch.tensor([[0.32, 0.45], [0.18, 0.52]])
+    lower = torch.tensor([[0.20], [0.20]])
+    upper = torch.tensor([[0.50], [0.50]])
+    valid = torch.ones(2, 1)
+    importance = torch.ones_like(valid)
+
+    loss, lower_over, upper_shortfall = PPOTeacherKL._compute_safe_stride_interval_coverage_loss(
+        predictions,
+        lower,
+        upper,
+        valid,
+        importance,
+        margin=0.0,
+        huber_delta=0.05,
+    )
+    covered_loss, covered_lower_over, covered_upper_shortfall = (
+        PPOTeacherKL._compute_safe_stride_interval_coverage_loss(
+            torch.tensor([[0.18, 0.52], [0.18, 0.52]]),
+            lower,
+            upper,
+            valid,
+            importance,
+            margin=0.0,
+            huber_delta=0.05,
+        )
+    )
+
+    assert loss.item() > 0.0
+    assert lower_over.item() == pytest.approx(0.06)
+    assert upper_shortfall.item() == pytest.approx(0.025)
+    assert covered_loss.item() == pytest.approx(0.0)
+    assert covered_lower_over.item() == pytest.approx(0.0)
+    assert covered_upper_shortfall.item() == pytest.approx(0.0)
+
+
+def test_safe_stride_interval_loss_ignores_invalid_nan_padding() -> None:
+    """Invalid interval rows should not leak NaNs through zero weights."""
+    predictions = torch.tensor([[0.25, 0.35], [0.10, 0.20]])
+    lower = torch.tensor([[0.20], [float("nan")]])
+    upper = torch.tensor([[0.40], [float("nan")]])
+    lower_valid = torch.tensor([[1.0], [0.0]])
+    interval_valid = torch.tensor([[1.0], [0.0]])
+    importance = torch.ones_like(lower_valid)
+
+    loss, lower_loss, width_loss = PPOTeacherKL._compute_safe_stride_interval_loss(
+        predictions,
+        lower,
+        upper,
+        lower_valid,
+        interval_valid,
+        importance,
+        huber_delta=0.05,
+    )
+
+    assert torch.isfinite(loss)
+    assert torch.isfinite(lower_loss)
+    assert torch.isfinite(width_loss)
+
+
+def test_stair_shape_loss_ignores_invalid_nan_padding() -> None:
+    """Invalid shape rows should not produce NaN masked losses."""
+    predictions = torch.tensor([[0.30, 0.15], [0.20, 0.10]])
+    labels = torch.tensor([[0.31, 0.16], [float("nan"), float("nan")]])
+    valid = torch.tensor([[1.0], [0.0]])
+
+    loss = PPOTeacherKL._compute_stair_shape_loss(
+        predictions,
+        labels,
+        valid,
+        huber_delta=0.05,
+    )
+
+    assert torch.isfinite(loss)
+
+
 def test_safe_stride_interval_head_masks_unobservable_upper_bound() -> None:
     """Entry evidence should supervise lower without regressing privileged upper."""
     predictions = torch.tensor([[0.25, 0.55], [0.30, 0.45]])
@@ -488,6 +695,27 @@ def test_safe_stride_interval_head_masks_unobservable_upper_bound() -> None:
     assert lower_loss.item() == pytest.approx(0.0125)
     assert width_loss.item() == pytest.approx(0.025)
     assert loss.item() == pytest.approx(0.0375)
+
+
+def test_safe_stride_lower_shortfall_can_be_weighted() -> None:
+    """Too-short SafeStride predictions should be penalized more strongly."""
+    predictions = torch.tensor([[0.30], [0.50]])
+    lower = torch.tensor([[0.40], [0.20]])
+    upper = torch.tensor([[0.50], [0.40]])
+    valid = torch.ones(2, 1)
+    importance = torch.ones(2, 1)
+
+    loss = PPOTeacherKL._compute_safe_stride_loss(
+        predictions,
+        lower,
+        upper,
+        valid,
+        importance,
+        0.05,
+        lower_shortfall_coef=3.0,
+    )
+
+    assert loss.item() == pytest.approx(0.15)
 
 
 def test_stair_label_range_metrics_do_not_clamp_labels() -> None:

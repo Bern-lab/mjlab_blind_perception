@@ -299,6 +299,14 @@ class PPO:
                 batch, original_batch_size, distribution_params
             )
             loss = loss + additional_loss
+            if not torch.isfinite(loss.detach()).item():
+                self.optimizer.zero_grad()
+                if self.rnd:
+                    self.rnd.optimizer.zero_grad()
+                mean_additional_losses["skipped_nonfinite_loss_updates"] = (
+                    mean_additional_losses.get("skipped_nonfinite_loss_updates", 0.0) + 1.0
+                )
+                continue
 
             # Compute the gradients for PPO
             self.optimizer.zero_grad()
@@ -306,18 +314,31 @@ class PPO:
             # Compute the gradients for RND
             if self.rnd:
                 self.rnd.optimizer.zero_grad()
-                rnd_loss.backward()
+                if not torch.isfinite(rnd_loss.detach()).item():
+                    mean_additional_losses["skipped_nonfinite_rnd_loss_updates"] = (
+                        mean_additional_losses.get("skipped_nonfinite_rnd_loss_updates", 0.0) + 1.0
+                    )
+                    rnd_loss = None
+                else:
+                    rnd_loss.backward()
 
             # Collect gradients from all GPUs
             if self.is_multi_gpu:
                 self.reduce_parameters()
 
             # Apply the gradients for PPO
-            nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
-            nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
-            self.optimizer.step()
+            actor_grad_norm = nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+            critic_grad_norm = nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+            if torch.isfinite(actor_grad_norm).item() and torch.isfinite(critic_grad_norm).item():
+                self.optimizer.step()
+            else:
+                self.optimizer.zero_grad()
+                mean_additional_losses["skipped_nonfinite_grad_updates"] = (
+                    mean_additional_losses.get("skipped_nonfinite_grad_updates", 0.0) + 1.0
+                )
+                continue
             # Apply the gradients for RND
-            if self.rnd:
+            if self.rnd and rnd_loss is not None:
                 self.rnd.optimizer.step()
 
             # Store the losses
@@ -325,7 +346,7 @@ class PPO:
             mean_surrogate_loss += surrogate_loss.item()
             mean_entropy += entropy.mean().item()
             # RND loss
-            if mean_rnd_loss is not None:
+            if mean_rnd_loss is not None and rnd_loss is not None:
                 mean_rnd_loss += rnd_loss.item()
             # Symmetry loss
             if mean_symmetry_loss is not None:

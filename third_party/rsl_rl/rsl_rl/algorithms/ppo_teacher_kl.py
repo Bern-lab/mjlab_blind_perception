@@ -617,6 +617,7 @@ class PPOTeacherKL(PPO):
         huber_delta: float,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         predictions = torch.sigmoid(logits)
+        labels = torch.nan_to_num(labels).clamp(0.0, 1.0)
         weights = 1.0 + weight_scale * labels
         error = functional.smooth_l1_loss(
             predictions,
@@ -634,13 +635,16 @@ class PPOTeacherKL(PPO):
         huber_delta: float,
     ) -> torch.Tensor:
         """Compute a valid-mask-normalized Huber loss for stair geometry."""
+        finite_valid = torch.isfinite(predictions) & torch.isfinite(labels)
+        predictions = torch.nan_to_num(predictions)
+        labels = torch.nan_to_num(labels)
         shape_error = functional.smooth_l1_loss(
             predictions,
             labels,
             reduction="none",
             beta=huber_delta,
         )
-        component_valid = valid.expand_as(shape_error)
+        component_valid = valid.expand_as(shape_error) * finite_valid.to(shape_error.dtype)
         valid_count = component_valid.sum().clamp_min(1.0)
         return (shape_error * component_valid).sum() / valid_count
 
@@ -652,8 +656,13 @@ class PPOTeacherKL(PPO):
         valid: torch.Tensor,
         importance: torch.Tensor,
         huber_delta: float,
+        lower_shortfall_coef: float = 1.0,
     ) -> torch.Tensor:
         """Penalize predictions only when they leave the safe-stride interval."""
+        finite_valid = torch.isfinite(predictions) & torch.isfinite(lower_bounds) & torch.isfinite(upper_bounds)
+        predictions = torch.nan_to_num(predictions)
+        lower_bounds = torch.nan_to_num(lower_bounds)
+        upper_bounds = torch.nan_to_num(upper_bounds)
         interval_target = torch.minimum(
             torch.maximum(predictions, lower_bounds),
             upper_bounds,
@@ -664,9 +673,19 @@ class PPOTeacherKL(PPO):
             reduction="none",
             beta=huber_delta,
         )
-        weighted_valid = valid * importance.clamp_min(1.0)
+        below_lower = predictions < lower_bounds
+        shortfall_weight = torch.where(
+            below_lower,
+            error.new_tensor(lower_shortfall_coef),
+            torch.ones_like(error),
+        )
+        weighted_valid = (
+            torch.nan_to_num(valid).clamp_min(0.0)
+            * torch.nan_to_num(importance, nan=1.0).clamp_min(1.0)
+            * finite_valid.to(error.dtype)
+        )
         weighted_count = weighted_valid.sum().clamp_min(1.0)
-        return (error * weighted_valid).sum() / weighted_count
+        return (error * shortfall_weight * weighted_valid).sum() / weighted_count
 
     @staticmethod
     def _compute_safe_stride_interval_loss(
@@ -678,10 +697,22 @@ class PPOTeacherKL(PPO):
         importance: torch.Tensor,
         huber_delta: float,
         width_loss_coef: float = 1.0,
+        lower_shortfall_coef: float = 1.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Regress lower and absolute width with independent normalization."""
         predicted_lower = predictions[..., 0:1]
         predicted_width = predictions[..., 1:2] - predicted_lower
+        finite_lower_valid = torch.isfinite(predicted_lower) & torch.isfinite(lower_bounds)
+        finite_width_valid = (
+            torch.isfinite(predicted_lower)
+            & torch.isfinite(predicted_width)
+            & torch.isfinite(lower_bounds)
+            & torch.isfinite(upper_bounds)
+        )
+        predicted_lower = torch.nan_to_num(predicted_lower)
+        predicted_width = torch.nan_to_num(predicted_width)
+        lower_bounds = torch.nan_to_num(lower_bounds)
+        upper_bounds = torch.nan_to_num(upper_bounds)
         target_width = upper_bounds - lower_bounds
         lower_error = functional.smooth_l1_loss(
             predicted_lower,
@@ -689,15 +720,25 @@ class PPOTeacherKL(PPO):
             reduction="none",
             beta=huber_delta,
         )
+        lower_shortfall_weight = torch.where(
+            predicted_lower < lower_bounds,
+            lower_error.new_tensor(lower_shortfall_coef),
+            torch.ones_like(lower_error),
+        )
         width_error = functional.smooth_l1_loss(
             predicted_width,
             target_width,
             reduction="none",
             beta=huber_delta,
         )
-        lower_weight = lower_valid * importance.clamp_min(1.0)
-        width_weight = interval_valid * importance.clamp_min(1.0)
-        lower_loss = (lower_error * lower_weight).sum() / lower_weight.sum().clamp_min(1.0)
+        importance = torch.nan_to_num(importance, nan=1.0).clamp_min(1.0)
+        lower_weight = (
+            torch.nan_to_num(lower_valid).clamp_min(0.0) * importance * finite_lower_valid.to(lower_error.dtype)
+        )
+        width_weight = (
+            torch.nan_to_num(interval_valid).clamp_min(0.0) * importance * finite_width_valid.to(width_error.dtype)
+        )
+        lower_loss = (lower_error * lower_shortfall_weight * lower_weight).sum() / lower_weight.sum().clamp_min(1.0)
         width_loss = (width_error * width_weight).sum() / width_weight.sum().clamp_min(1.0)
         total_loss = lower_loss + width_loss_coef * width_loss
         return total_loss, lower_loss, width_loss
@@ -709,7 +750,9 @@ class PPOTeacherKL(PPO):
         importance: torch.Tensor,
     ) -> torch.Tensor:
         """Balanced BCE for whether the decoded SafeStride interval is usable."""
-        target = target.clamp(0.0, 1.0)
+        logits = torch.nan_to_num(logits)
+        target = torch.nan_to_num(target).clamp(0.0, 1.0)
+        importance = torch.nan_to_num(importance, nan=1.0).clamp_min(1.0)
         error = functional.binary_cross_entropy_with_logits(
             logits,
             target,
@@ -722,6 +765,194 @@ class PPOTeacherKL(PPO):
         positive_loss = (error * positive_weight).sum() / positive_weight.sum().clamp_min(1.0)
         negative_loss = (error * negative_weight).sum() / negative_weight.sum().clamp_min(1.0)
         return 0.5 * (positive_loss + negative_loss)
+
+    @staticmethod
+    def _compute_masked_centered_spread_losses(
+        predictions: torch.Tensor,
+        labels: torch.Tensor,
+        valid: torch.Tensor,
+        std_floor_ratio: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return centered-regression and std-floor losses for valid samples."""
+        component_valid = valid.expand_as(predictions)
+        finite_valid = (component_valid > 0.0) & torch.isfinite(predictions) & torch.isfinite(labels)
+        component_valid = component_valid * finite_valid.to(component_valid.dtype)
+        predictions = torch.where(
+            finite_valid,
+            torch.nan_to_num(predictions),
+            torch.zeros_like(predictions),
+        )
+        labels = torch.where(
+            finite_valid,
+            torch.nan_to_num(labels),
+            torch.zeros_like(labels),
+        )
+        reduce_dims = tuple(range(predictions.dim() - 1))
+        valid_count = component_valid.sum(dim=reduce_dims).clamp_min(1.0)
+        prediction_mean = (predictions * component_valid).sum(dim=reduce_dims) / valid_count
+        label_mean = (labels * component_valid).sum(dim=reduce_dims) / valid_count
+        prediction_centered = predictions - prediction_mean
+        label_centered = labels - label_mean
+        prediction_variance = (prediction_centered.square() * component_valid).sum(dim=reduce_dims) / valid_count
+        label_variance = (label_centered.square() * component_valid).sum(dim=reduce_dims) / valid_count
+        prediction_std = torch.sqrt(prediction_variance.clamp_min(0.0))
+        label_std = torch.sqrt(label_variance.clamp_min(0.0))
+        usable = (valid_count > 1.0) & (label_std > 1.0e-4)
+        label_scale = label_std.clamp_min(1.0e-4)
+        normalized_prediction = prediction_centered / label_scale
+        normalized_label = label_centered / label_scale
+        centered_error = functional.smooth_l1_loss(
+            normalized_prediction,
+            normalized_label,
+            reduction="none",
+            beta=1.0,
+        )
+        centered_loss = (centered_error * component_valid).sum(dim=reduce_dims) / valid_count
+        std_shortfall = torch.relu(label_std * float(std_floor_ratio) - prediction_std)
+        std_floor_loss = (std_shortfall / label_scale).square()
+        zeros = torch.zeros_like(centered_loss)
+        centered_loss = torch.where(usable, centered_loss, zeros)
+        std_floor_loss = torch.where(usable, std_floor_loss, zeros)
+        return centered_loss.mean(), std_floor_loss.mean()
+
+    @staticmethod
+    def _compute_one_sided_lower_hint_loss(
+        predictions: torch.Tensor,
+        lower_hint: torch.Tensor,
+        valid: torch.Tensor,
+        importance: torch.Tensor,
+        margin: float,
+        huber_delta: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Penalize lower-bound predictions only when below deployable hints."""
+        weighted_valid = torch.nan_to_num(valid).clamp_min(0.0) * torch.nan_to_num(
+            importance,
+            nan=1.0,
+        ).clamp_min(1.0)
+        finite_valid = (weighted_valid > 0.0) & torch.isfinite(predictions) & torch.isfinite(lower_hint)
+        weighted_valid = weighted_valid * finite_valid.to(weighted_valid.dtype)
+        predictions = torch.where(
+            finite_valid,
+            torch.nan_to_num(predictions),
+            torch.zeros_like(predictions),
+        )
+        lower_hint = torch.where(
+            finite_valid,
+            torch.nan_to_num(lower_hint),
+            torch.zeros_like(lower_hint),
+        )
+        hint_target = lower_hint - lower_hint.new_tensor(float(margin))
+        shortfall = torch.relu(hint_target - predictions)
+        error = functional.smooth_l1_loss(
+            predictions,
+            hint_target,
+            reduction="none",
+            beta=huber_delta,
+        )
+        active = (shortfall > 0.0).to(error.dtype) * weighted_valid
+        active_count = active.sum().clamp_min(1.0)
+        loss = (error * active).sum() / active_count
+        shortfall_mae = (shortfall * weighted_valid).sum() / weighted_valid.sum().clamp_min(1.0)
+        return loss, shortfall_mae
+
+    @staticmethod
+    def _compute_safe_stride_interval_coverage_loss(
+        predictions: torch.Tensor,
+        lower_bounds: torch.Tensor,
+        upper_bounds: torch.Tensor,
+        valid: torch.Tensor,
+        importance: torch.Tensor,
+        margin: float,
+        huber_delta: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Penalize decoded intervals that do not cover the target interval."""
+        predicted_lower = predictions[..., 0:1]
+        predicted_upper = predictions[..., 1:2]
+        finite_valid = (
+            torch.isfinite(predicted_lower)
+            & torch.isfinite(predicted_upper)
+            & torch.isfinite(lower_bounds)
+            & torch.isfinite(upper_bounds)
+        )
+        predicted_lower = torch.nan_to_num(predicted_lower)
+        predicted_upper = torch.nan_to_num(predicted_upper)
+        lower_bounds = torch.nan_to_num(lower_bounds)
+        upper_bounds = torch.nan_to_num(upper_bounds)
+        weighted_valid = (
+            torch.nan_to_num(valid).clamp_min(0.0)
+            * torch.nan_to_num(importance, nan=1.0).clamp_min(1.0)
+            * finite_valid.to(predicted_lower.dtype)
+        )
+        lower_target = lower_bounds + lower_bounds.new_tensor(float(margin))
+        upper_target = upper_bounds - upper_bounds.new_tensor(float(margin))
+        lower_over = torch.relu(predicted_lower - lower_target)
+        upper_shortfall = torch.relu(upper_target - predicted_upper)
+        lower_error = functional.smooth_l1_loss(
+            predicted_lower,
+            lower_target,
+            reduction="none",
+            beta=huber_delta,
+        )
+        upper_error = functional.smooth_l1_loss(
+            predicted_upper,
+            upper_target,
+            reduction="none",
+            beta=huber_delta,
+        )
+        lower_active = (lower_over > 0.0).to(weighted_valid.dtype) * weighted_valid
+        upper_active = (upper_shortfall > 0.0).to(weighted_valid.dtype) * weighted_valid
+        lower_loss = (lower_error * lower_active).sum() / lower_active.sum().clamp_min(1.0)
+        upper_loss = (upper_error * upper_active).sum() / upper_active.sum().clamp_min(1.0)
+        lower_over_mae = (lower_over * weighted_valid).sum() / weighted_valid.sum().clamp_min(1.0)
+        upper_shortfall_mae = (upper_shortfall * weighted_valid).sum() / weighted_valid.sum().clamp_min(1.0)
+        return 0.5 * (lower_loss + upper_loss), lower_over_mae, upper_shortfall_mae
+
+    @staticmethod
+    def _safe_stride_deployable_hint_from_latent_obs(
+        observations: TensorDict | None,
+        latent_obs_key: str,
+        safe_stride_min: float,
+        safe_stride_max: float,
+    ) -> torch.Tensor | None:
+        """Extract a one-sided lower SafeStride hint from foot-event summary obs."""
+        if observations is None or latent_obs_key not in observations:
+            return None
+        latent_obs = observations[latent_obs_key]
+        latent_dim = int(latent_obs.shape[-1])
+        if latent_dim < 70:
+            return None
+        summary_dim = 70
+        if latent_dim >= 80:
+            new_foot_only = (latent_dim - 80) % 33 == 0
+            new_with_stair = latent_dim >= 173 and (latent_dim - 173) % 33 == 0
+            if latent_dim == 80 or new_foot_only or new_with_stair:
+                summary_dim = 80
+        summary = torch.nan_to_num(latent_obs[..., -summary_dim:])
+        toe = summary[..., 50:60]
+        stats = summary[..., 60:70]
+        forward_up_stride = stats[..., 8:9].clamp_min(0.0)
+        toe_relation_valid = toe[..., 6:7] > 0.5
+        toe_forward_delta = torch.where(
+            toe_relation_valid,
+            toe[..., 7:8].clamp_min(0.0),
+            torch.zeros_like(toe[..., 7:8]),
+        )
+        ratchet_hint = torch.zeros_like(forward_up_stride)
+        if summary_dim >= 80:
+            ratchet = summary[..., 70:80]
+            ratchet_active = ratchet[..., 0:1] > 0.5
+            ratchet_confident = ratchet[..., 8:9] > 0.05
+            ratchet_lower = ratchet[..., 1:2].clamp_min(0.0)
+            ratchet_probe = ratchet[..., 2:3].clamp_min(0.0)
+            ratchet_hint = torch.where(
+                ratchet_active & ratchet_confident,
+                torch.maximum(ratchet_lower, ratchet_probe),
+                ratchet_hint,
+            )
+        hint = torch.maximum(torch.maximum(forward_up_stride, toe_forward_delta), ratchet_hint)
+        hint_valid = hint > 1.0e-5
+        hint = hint.clamp(float(safe_stride_min), float(safe_stride_max))
+        return torch.cat([hint, hint_valid.to(hint.dtype)], dim=-1)
 
     @staticmethod
     def _compute_normalized_stair_shape_loss(
@@ -751,8 +982,11 @@ class PPOTeacherKL(PPO):
         huber_delta: float,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute valid-mask-normalized MAE and Huber for each shape component."""
+        finite_valid = torch.isfinite(predictions) & torch.isfinite(labels)
+        predictions = torch.nan_to_num(predictions)
+        labels = torch.nan_to_num(labels)
         absolute_error = torch.abs(predictions - labels)
-        component_valid = valid.expand_as(absolute_error)
+        component_valid = valid.expand_as(absolute_error) * finite_valid.to(absolute_error.dtype)
         huber_error = functional.smooth_l1_loss(
             predictions,
             labels,
@@ -772,7 +1006,10 @@ class PPOTeacherKL(PPO):
         valid: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return per-component label/prediction spread, correlation, and R²."""
-        component_valid = valid.expand_as(predictions)
+        finite_valid = torch.isfinite(predictions) & torch.isfinite(labels)
+        predictions = torch.nan_to_num(predictions)
+        labels = torch.nan_to_num(labels)
+        component_valid = valid.expand_as(predictions) * finite_valid.to(predictions.dtype)
         reduce_dims = tuple(range(predictions.dim() - 1))
         valid_count = component_valid.sum(dim=reduce_dims).clamp_min(1.0)
         prediction_mean = (predictions * component_valid).sum(dim=reduce_dims) / valid_count
@@ -816,9 +1053,13 @@ class PPOTeacherKL(PPO):
         """Accumulate sufficient statistics across all update minibatches."""
         if self._safe_stride_update_statistics is None:
             return
-        prediction = predictions.detach()[..., 0]
-        label = labels.detach()[..., 0]
-        weight = valid.detach()[..., 0]
+        prediction_raw = predictions.detach()[..., 0]
+        label_raw = labels.detach()[..., 0]
+        weight = torch.nan_to_num(valid.detach()[..., 0]).clamp_min(0.0)
+        finite_weight = torch.isfinite(prediction_raw) & torch.isfinite(label_raw)
+        weight = weight * finite_weight.to(weight.dtype)
+        prediction = torch.nan_to_num(prediction_raw)
+        label = torch.nan_to_num(label_raw)
         error = prediction - label
         moments = {
             "count": weight.sum(),
@@ -922,9 +1163,13 @@ class PPOTeacherKL(PPO):
             return
         # Discrete depth cohorts often contain one exact label value. Float64
         # keeps their zero variance from becoming a large cancellation error.
-        prediction_flat = prediction.detach().double()
-        label_flat = label.detach().double()
-        weight = valid.detach().double()
+        prediction_raw = prediction.detach()
+        label_raw = label.detach()
+        weight = torch.nan_to_num(valid.detach()).clamp_min(0.0).double()
+        finite_weight = torch.isfinite(prediction_raw) & torch.isfinite(label_raw)
+        weight = weight * finite_weight.to(weight.dtype)
+        prediction_flat = torch.nan_to_num(prediction_raw).double()
+        label_flat = torch.nan_to_num(label_raw).double()
         error = prediction_flat - label_flat
         moments = {
             "count": weight.sum(),
@@ -1364,6 +1609,19 @@ class PPOTeacherKL(PPO):
                 device=labels.device,
                 dtype=labels.dtype,
             )
+        deployable_hint_padded = self._safe_stride_deployable_hint_from_latent_obs(
+            observations,
+            str(getattr(self.actor, "latent_obs_set", "latent")),
+            float(getattr(self.actor, "safe_stride_min", 0.10)),
+            float(getattr(self.actor, "safe_stride_max", 0.55)),
+        )
+        if deployable_hint_padded is None:
+            deployable_hint_padded = torch.zeros(
+                *labels.shape[:-1],
+                2,
+                device=labels.device,
+                dtype=labels.dtype,
+            )
         if labels.shape[-1] >= 13:
             collision_risk_now = labels[..., 10:11].float()
             landing_touchdown_now = labels[..., 11:12].float()
@@ -1473,6 +1731,13 @@ class PPOTeacherKL(PPO):
                     batch.masks,
                 ),
             )
+            deployable_hint = cast(
+                torch.Tensor,
+                unpad_trajectories(
+                    deployable_hint_padded,
+                    batch.masks,
+                ),
+            )
         else:
             event_labels_raw = event_labels_raw_padded
             event_labels = event_labels_padded
@@ -1492,6 +1757,7 @@ class PPOTeacherKL(PPO):
             geometry_probe_validation = geometry_probe_validation_padded
             depth_confirmation_age = depth_confirmation_age_padded
             adjacent_pair_evidence = adjacent_pair_evidence_padded
+            deployable_hint = deployable_hint_padded
 
         total_loss = torch.zeros((), device=self.device)
         logs: dict[str, float] = {}
@@ -1879,6 +2145,14 @@ class PPOTeacherKL(PPO):
                 logs[f"{prefix}_r_squared"] = r_squared_mean.item()
         if safe_stride_coef != 0.0 and "safe_stride" in aux_outputs:
             safe_stride_delta = float(getattr(self.actor, "safe_stride_huber_delta", 0.05))
+            lower_shortfall_coef = float(getattr(self.actor, "safe_stride_lower_shortfall_coef", 1.0))
+            coverage_loss_coef = float(getattr(self.actor, "safe_stride_interval_coverage_loss_coef", 0.0))
+            coverage_margin = float(getattr(self.actor, "safe_stride_interval_coverage_margin", 0.01))
+            std_floor_loss_coef = float(getattr(self.actor, "safe_stride_std_floor_loss_coef", 0.0))
+            centered_loss_coef = float(getattr(self.actor, "safe_stride_centered_loss_coef", 0.0))
+            std_floor_ratio = float(getattr(self.actor, "safe_stride_std_floor_ratio", 0.70))
+            hint_loss_coef = float(getattr(self.actor, "safe_stride_deployable_hint_loss_coef", 0.0))
+            hint_margin = float(getattr(self.actor, "safe_stride_deployable_hint_margin", 0.02))
             safe_stride_predictions = aux_outputs["safe_stride"]
             safe_stride_interval_predictions = aux_outputs.get("safe_stride_interval")
             safe_stride_confidence_logit = aux_outputs.get("safe_stride_confidence_logit")
@@ -1887,6 +2161,15 @@ class PPOTeacherKL(PPO):
             lower_loss_raw = safe_stride_predictions.new_zeros(())
             width_loss_raw = safe_stride_predictions.new_zeros(())
             confidence_loss_raw = safe_stride_predictions.new_zeros(())
+            center_centered_loss_raw = safe_stride_predictions.new_zeros(())
+            center_std_floor_loss_raw = safe_stride_predictions.new_zeros(())
+            lower_centered_loss_raw = safe_stride_predictions.new_zeros(())
+            lower_std_floor_loss_raw = safe_stride_predictions.new_zeros(())
+            coverage_loss_raw = safe_stride_predictions.new_zeros(())
+            coverage_lower_over = safe_stride_predictions.new_zeros(())
+            coverage_upper_shortfall = safe_stride_predictions.new_zeros(())
+            deployable_hint_loss_raw = safe_stride_predictions.new_zeros(())
+            deployable_hint_shortfall = safe_stride_predictions.new_zeros(())
             width_loss_coef = 1.0
             if safe_stride_interval_predictions is not None:
                 width_loss_coef = float(getattr(self.actor, "safe_stride_width_loss_coef", 1.0))
@@ -1899,10 +2182,26 @@ class PPOTeacherKL(PPO):
                     safe_stride_importance,
                     safe_stride_delta,
                     width_loss_coef,
+                    lower_shortfall_coef,
                 )
                 predicted_lower = safe_stride_interval_predictions[..., 0:1]
                 predicted_upper = safe_stride_interval_predictions[..., 1:2]
                 center_valid = interval_valid
+                if coverage_loss_coef != 0.0:
+                    (
+                        coverage_loss_raw,
+                        coverage_lower_over,
+                        coverage_upper_shortfall,
+                    ) = self._compute_safe_stride_interval_coverage_loss(
+                        safe_stride_interval_predictions,
+                        safe_stride_labels,
+                        safe_stride_upper,
+                        interval_valid,
+                        safe_stride_importance,
+                        coverage_margin,
+                        safe_stride_delta,
+                    )
+                    safe_stride_loss_raw = safe_stride_loss_raw + coverage_loss_coef * coverage_loss_raw
             else:
                 safe_stride_loss_raw = self._compute_safe_stride_loss(
                     safe_stride_predictions,
@@ -1911,11 +2210,52 @@ class PPOTeacherKL(PPO):
                     safe_stride_valid,
                     safe_stride_importance,
                     safe_stride_delta,
+                    lower_shortfall_coef,
                 )
                 predicted_lower = safe_stride_predictions
                 predicted_upper = safe_stride_predictions
                 safe_stride_target_center = safe_stride_labels
                 center_valid = safe_stride_valid
+            safe_stride_base_loss_raw = safe_stride_loss_raw
+            if centered_loss_coef != 0.0 or std_floor_loss_coef != 0.0:
+                (
+                    center_centered_loss_raw,
+                    center_std_floor_loss_raw,
+                ) = self._compute_masked_centered_spread_losses(
+                    safe_stride_predictions,
+                    safe_stride_target_center,
+                    center_valid,
+                    std_floor_ratio,
+                )
+                if safe_stride_interval_predictions is not None:
+                    (
+                        lower_centered_loss_raw,
+                        lower_std_floor_loss_raw,
+                    ) = self._compute_masked_centered_spread_losses(
+                        predicted_lower,
+                        safe_stride_labels,
+                        safe_stride_valid,
+                        std_floor_ratio,
+                    )
+                safe_stride_loss_raw = (
+                    safe_stride_loss_raw
+                    + centered_loss_coef * (center_centered_loss_raw + lower_centered_loss_raw)
+                    + std_floor_loss_coef * (center_std_floor_loss_raw + lower_std_floor_loss_raw)
+                )
+            deployable_hint_valid = deployable_hint[..., 1:2] * safe_stride_valid
+            if hint_loss_coef != 0.0:
+                (
+                    deployable_hint_loss_raw,
+                    deployable_hint_shortfall,
+                ) = self._compute_one_sided_lower_hint_loss(
+                    predicted_lower,
+                    deployable_hint[..., 0:1],
+                    deployable_hint_valid,
+                    safe_stride_importance,
+                    hint_margin,
+                    safe_stride_delta,
+                )
+                safe_stride_loss_raw = safe_stride_loss_raw + hint_loss_coef * deployable_hint_loss_raw
             if safe_stride_confidence_logit is not None:
                 confidence_target = (
                     interval_valid if safe_stride_interval_predictions is not None else safe_stride_valid
@@ -1968,12 +2308,59 @@ class PPOTeacherKL(PPO):
                     component="width",
                 )
             self._accumulate_safe_stride_depth_confirmation_events(depth_confirmation_event)
-            logs["slow_latent_safe_stride_huber"] = self._distributed_mean_scalar(safe_stride_loss_raw).item()
+            logs["slow_latent_safe_stride_huber"] = self._distributed_mean_scalar(safe_stride_base_loss_raw).item()
+            logs["slow_latent_safe_stride_regularized_huber"] = self._distributed_mean_scalar(
+                safe_stride_loss_raw
+            ).item()
             logs["slow_latent_safe_stride_loss"] = self._distributed_mean_scalar(safe_stride_loss).item()
             if safe_stride_interval_predictions is not None:
                 logs["slow_latent_safe_stride_lower_huber"] = self._distributed_mean_scalar(lower_loss_raw).item()
                 logs["slow_latent_safe_stride_width_huber"] = self._distributed_mean_scalar(width_loss_raw).item()
                 logs["slow_latent_safe_stride_width_loss_coef"] = width_loss_coef
+                logs["slow_latent_safe_stride_lower_shortfall_coef"] = lower_shortfall_coef
+                logs["slow_latent_safe_stride_interval_coverage_loss_coef"] = coverage_loss_coef
+                logs["slow_latent_safe_stride_interval_coverage_margin"] = coverage_margin
+                logs["slow_latent_safe_stride_interval_coverage_huber"] = self._distributed_mean_scalar(
+                    coverage_loss_raw
+                ).item()
+                logs["slow_latent_safe_stride_interval_lower_over_mae"] = self._distributed_mean_scalar(
+                    coverage_lower_over
+                ).item()
+                logs["slow_latent_safe_stride_interval_upper_shortfall_mae"] = self._distributed_mean_scalar(
+                    coverage_upper_shortfall
+                ).item()
+            if centered_loss_coef != 0.0 or std_floor_loss_coef != 0.0:
+                logs["slow_latent_safe_stride_centered_loss_coef"] = centered_loss_coef
+                logs["slow_latent_safe_stride_std_floor_loss_coef"] = std_floor_loss_coef
+                logs["slow_latent_safe_stride_std_floor_ratio"] = std_floor_ratio
+                logs["slow_latent_safe_stride_center_centered_loss"] = self._distributed_mean_scalar(
+                    center_centered_loss_raw
+                ).item()
+                logs["slow_latent_safe_stride_center_std_floor_loss"] = self._distributed_mean_scalar(
+                    center_std_floor_loss_raw
+                ).item()
+                logs["slow_latent_safe_stride_lower_centered_loss"] = self._distributed_mean_scalar(
+                    lower_centered_loss_raw
+                ).item()
+                logs["slow_latent_safe_stride_lower_std_floor_loss"] = self._distributed_mean_scalar(
+                    lower_std_floor_loss_raw
+                ).item()
+            if hint_loss_coef != 0.0:
+                hint_valid_count = deployable_hint_valid.sum().clamp_min(1.0)
+                logs["slow_latent_safe_stride_deployable_hint_loss_coef"] = hint_loss_coef
+                logs["slow_latent_safe_stride_deployable_hint_margin"] = hint_margin
+                logs["slow_latent_safe_stride_deployable_hint_huber"] = self._distributed_mean_scalar(
+                    deployable_hint_loss_raw
+                ).item()
+                logs["slow_latent_safe_stride_deployable_hint_valid_ratio"] = self._distributed_mean_scalar(
+                    deployable_hint_valid.mean()
+                ).item()
+                logs["slow_latent_safe_stride_deployable_hint_mean"] = self._distributed_mean_scalar(
+                    (deployable_hint[..., 0:1] * deployable_hint_valid).sum() / hint_valid_count
+                ).item()
+                logs["slow_latent_safe_stride_deployable_hint_shortfall_mae"] = self._distributed_mean_scalar(
+                    deployable_hint_shortfall
+                ).item()
             if safe_stride_confidence_logit is not None:
                 confidence_prob = torch.sigmoid(safe_stride_confidence_logit)
                 confidence_target = (

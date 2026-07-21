@@ -136,14 +136,32 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """Huber transition point for safe-stride labels, in meters."""
   safe_stride_width_loss_coef: float = 1.0
   """Weight for independently normalized SafeStride width regression."""
+  safe_stride_lower_shortfall_coef: float = 1.0
+  """Extra loss multiplier when SafeStride predicts below the safe lower bound."""
+  safe_stride_interval_coverage_loss_coef: float = 0.0
+  """Weight for covering the privileged SafeStride interval with decoded bounds."""
+  safe_stride_interval_coverage_margin: float = 0.01
+  """Slack, in meters, before interval-coverage loss is applied."""
   safe_stride_confidence_loss_coef: float = 0.30
   """Weight for SafeStride interval-confidence BCE inside the SafeStride loss."""
+  safe_stride_std_floor_loss_coef: float = 0.0
+  """Weight for penalizing collapsed SafeStride prediction spread."""
+  safe_stride_centered_loss_coef: float = 0.0
+  """Weight for centered SafeStride regression that preserves label variation."""
+  safe_stride_std_floor_ratio: float = 0.70
+  """Minimum desired SafeStride prediction std as a fraction of label std."""
+  safe_stride_deployable_hint_loss_coef: float = 0.0
+  """Weight for one-sided lower-bound hints from deployable foot-event summary."""
+  safe_stride_deployable_hint_margin: float = 0.02
+  """Slack, in meters, before deployable lower-bound hints are penalized."""
   safe_stride_min: float = 0.10
   """Minimum decoded safe stride, in meters."""
   safe_stride_max: float = 0.55
   """Maximum decoded safe stride, in meters."""
   structured_safe_stride_enabled: bool = False
   """Predict ordered SafeStride bounds instead of the legacy scalar point."""
+  dynamic_stair_shape_enabled: bool = False
+  """Decode stair size from geometry memory plus current recurrent context."""
   dynamic_safe_stride_enabled: bool = False
   """Decode SafeStride from current recurrent state, geometry memory, and gait phase."""
   safe_stride_phase_dim: int = 0
@@ -152,6 +170,8 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """Start index for gait phase, or -1 to use the trailing channels."""
   shadow_semantic_enabled: bool = False
   """Record a fixed-position semantic16 shadow vector without actor feedback."""
+  actor_semantic_enabled: bool = False
+  """Append detached semantic16 predictions to the actor conditioning."""
   geometry_probe_input: Literal["none", "shape", "hidden", "combined"] = "none"
   """Frozen-latent geometry Probe input: shape8, recurrent h_t, or both."""
   future_risk_weight_scale: float = 2.0
@@ -170,7 +190,7 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """Hidden dimensions of the pre-LSTM MLP encoder for latent_obs."""
 
   # Override parent defaults
-  latent_dim: int = 16
+  latent_dim: int = 24
   latent_hidden_dim: int = 128
   rnn_hidden_dim: int = 128
 

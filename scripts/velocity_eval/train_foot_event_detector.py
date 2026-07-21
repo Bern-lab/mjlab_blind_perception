@@ -327,7 +327,8 @@ def _event_indices(flags: np.ndarray, frames: np.ndarray) -> np.ndarray:
   order = np.argsort(frames)
   sorted_flags = flags[order].astype(np.bool_)
   sorted_frames = frames[order].astype(np.int64)
-  starts = sorted_flags & np.concatenate(([True], ~sorted_flags[:-1]))
+  frame_gap = np.concatenate(([True], np.diff(sorted_frames) > 1))
+  starts = sorted_flags & (frame_gap | np.concatenate(([True], ~sorted_flags[:-1])))
   return sorted_frames[starts]
 
 
@@ -446,6 +447,7 @@ def deployment_event_stats_for_label(
   contact_prob_index: int | None = None,
   contact_threshold: float = 0.5,
   contact_release_threshold: float | None = None,
+  contact_rising_fallback: bool = False,
   valid_mask: np.ndarray | None = None,
 ) -> dict[str, float]:
   """Evaluate deploy-style event triggers after gates, rising edges, and cooldown."""
@@ -468,9 +470,13 @@ def deployment_event_stats_for_label(
     local_labels = labels[mask]
     local_probabilities = probabilities[mask]
     local_frames = frame_idx[mask].astype(np.int64)
-    active = local_probabilities[:, event_label_index] >= threshold
+    event_active = local_probabilities[:, event_label_index] >= threshold
+    active = event_active
     if contact_prob_index is not None:
-      active &= local_probabilities[:, contact_prob_index] >= contact_threshold
+      contact_active = local_probabilities[:, contact_prob_index] >= contact_threshold
+      active = (
+        contact_active if contact_rising_fallback else event_active & contact_active
+      )
       release_values = local_probabilities[:, contact_prob_index]
     else:
       release_values = None
@@ -545,6 +551,8 @@ def sweep_deployment_event_thresholds(
   contact_prob_index: int | None = None,
   contact_threshold: float = 0.5,
   contact_release_threshold: float | None = None,
+  contact_rising_fallback: bool = False,
+  recall_precision_floor: float | None = None,
   valid_mask: np.ndarray | None = None,
 ) -> dict[str, float]:
   """Return best deploy-style event metrics across candidate thresholds."""
@@ -552,6 +560,10 @@ def sweep_deployment_event_thresholds(
     raise ValueError("thresholds must be non-empty.")
   best_threshold = float(thresholds[0])
   best_stats: dict[str, float] | None = None
+  high_recall_threshold = float(thresholds[0])
+  high_recall_stats: dict[str, float] | None = None
+  best_recall_threshold = float(thresholds[0])
+  best_recall_stats: dict[str, float] | None = None
   for threshold in thresholds:
     stats = deployment_event_stats_for_label(
       labels=labels,
@@ -566,6 +578,7 @@ def sweep_deployment_event_thresholds(
       contact_prob_index=contact_prob_index,
       contact_threshold=contact_threshold,
       contact_release_threshold=contact_release_threshold,
+      contact_rising_fallback=contact_rising_fallback,
       valid_mask=valid_mask,
     )
     if best_stats is None or (
@@ -579,12 +592,57 @@ def sweep_deployment_event_thresholds(
     ):
       best_threshold = float(threshold)
       best_stats = stats
+    if recall_precision_floor is not None:
+      meets_floor = stats["event_precision"] >= float(recall_precision_floor)
+      if meets_floor and (
+        high_recall_stats is None
+        or (
+          stats["event_recall"],
+          stats["event_f1"],
+          stats["event_precision"],
+          -abs(float(threshold) - 0.5),
+        )
+        > (
+          high_recall_stats["event_recall"],
+          high_recall_stats["event_f1"],
+          high_recall_stats["event_precision"],
+          -abs(high_recall_threshold - 0.5),
+        )
+      ):
+        high_recall_threshold = float(threshold)
+        high_recall_stats = stats
+      if best_recall_stats is None or (
+        stats["event_recall"],
+        stats["event_f1"],
+        stats["event_precision"],
+        -abs(float(threshold) - 0.5),
+      ) > (
+        best_recall_stats["event_recall"],
+        best_recall_stats["event_f1"],
+        best_recall_stats["event_precision"],
+        -abs(best_recall_threshold - 0.5),
+      ):
+        best_recall_threshold = float(threshold)
+        best_recall_stats = stats
   if best_stats is None:
     raise RuntimeError("Threshold sweep produced no metrics.")
-  return {
+  result = {
     "best_threshold": best_threshold,
     **{f"best_{key}": value for key, value in best_stats.items()},
   }
+  if recall_precision_floor is not None:
+    selected = high_recall_stats or best_recall_stats or best_stats
+    selected_threshold = (
+      high_recall_threshold if high_recall_stats is not None else best_recall_threshold
+    )
+    result.update(
+      {
+        "high_recall_precision_floor": float(recall_precision_floor),
+        "high_recall_threshold": selected_threshold,
+        **{f"high_recall_{key}": value for key, value in selected.items()},
+      }
+    )
+  return result
 
 
 def compute_metrics(
@@ -640,7 +698,7 @@ def resolve_selection_metric(cfg: TrainFootEventDetectorConfig) -> str:
 def metric_is_higher_better(metric_name: str) -> bool:
   if metric_name == "val_loss":
     return False
-  return metric_name.endswith("_f1")
+  return metric_name.endswith(("_f1", "_recall", "_precision", "_score"))
 
 
 def evaluate(

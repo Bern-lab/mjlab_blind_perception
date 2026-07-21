@@ -27,7 +27,6 @@ from .stair_geometry import (
   STAIR_CURRENT_GROUND_CONTACT_KEY,
   STAIR_DEPTH_CONFIRMATION_AGE_KEY,
   STAIR_DEPTH_CONFIRMATION_EVENT_KEY,
-  STAIR_DEPTH_LABEL_VALID_KEY,
   STAIR_ENTRY_EVENT_KEY,
   STAIR_ENTRY_RECENT_EVIDENCE_KEY,
   STAIR_PHASE_KEY,
@@ -441,14 +440,19 @@ def stair_shape_label(
 def stair_shape_component_valid_label(
   env: ManagerBasedRlEnv,
 ) -> torch.Tensor:
-  """Return privileged ``[depth_valid, height_valid]`` component masks."""
+  """Return privileged ``[depth_valid, height_valid]`` component masks.
+
+  Depth is supervised throughout accepted stair context. Strict deployable
+  depth-confirmation evidence remains available separately through
+  ``stair_depth_confirmation_*`` labels, but keeping the depth component dense
+  gives the slow latent a continuous geometry target instead of a rare pulse.
+  """
   zeros = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
   shape_valid = env.extras.get(STAIR_SHAPE_LABEL_VALID_KEY, zeros).bool()
-  depth_evidence = env.extras.get(STAIR_DEPTH_LABEL_VALID_KEY, zeros).bool()
   stair_phase = env.extras.get(STAIR_PHASE_KEY)
   sequence_active = zeros if stair_phase is None else stair_phase >= 1
   height_valid = shape_valid & sequence_active
-  depth_valid = height_valid & depth_evidence
+  depth_valid = height_valid
   return torch.stack(
     [depth_valid.float(), height_valid.float()],
     dim=-1,
@@ -802,14 +806,36 @@ def stair_latent_obs_dim(include_gait_phase: bool = False) -> int:
 FOOT_EVENT_MEMORY_LEN = 6
 FOOTPRINT_SLOT_DIM = 17
 TOE_MARK_SLOT_DIM = 16
+FOOT_EVENT_PAIR_COUNT = FOOT_EVENT_MEMORY_LEN - 1
+FOOT_EVENT_PAIR_FEATURE_DIM = 10
+FOOT_EVENT_PAIR_SUMMARY_DIM = FOOT_EVENT_PAIR_COUNT * FOOT_EVENT_PAIR_FEATURE_DIM
+FOOT_EVENT_TOE_SUMMARY_DIM = 10
+FOOT_EVENT_GEOMETRY_STATS_DIM = 10
+FOOT_EVENT_TREND_DIM = FOOT_EVENT_GEOMETRY_STATS_DIM
+FOOT_EVENT_RATCHET_DIM = 10
+FOOT_EVENT_TOE_SUMMARY_START = FOOT_EVENT_PAIR_SUMMARY_DIM
+FOOT_EVENT_GEOMETRY_STATS_START = (
+  FOOT_EVENT_TOE_SUMMARY_START + FOOT_EVENT_TOE_SUMMARY_DIM
+)
+FOOT_EVENT_RATCHET_START = FOOT_EVENT_GEOMETRY_STATS_START + FOOT_EVENT_TREND_DIM
+FOOT_EVENT_SUMMARY_DIM = FOOT_EVENT_RATCHET_START + FOOT_EVENT_RATCHET_DIM
 FOOT_EVENT_MEMORY_OBS_DIM = (
-  FOOT_EVENT_MEMORY_LEN * FOOTPRINT_SLOT_DIM + FOOT_EVENT_MEMORY_LEN * TOE_MARK_SLOT_DIM
+  FOOT_EVENT_MEMORY_LEN * FOOTPRINT_SLOT_DIM
+  + FOOT_EVENT_MEMORY_LEN * TOE_MARK_SLOT_DIM
+  + FOOT_EVENT_SUMMARY_DIM
 )
 
 
-def foot_event_memory_obs_dim(memory_len: int = FOOT_EVENT_MEMORY_LEN) -> int:
+def foot_event_memory_obs_dim(
+  memory_len: int = FOOT_EVENT_MEMORY_LEN,
+  include_summary: bool = True,
+  include_raw_memory: bool = True,
+) -> int:
   """Return flattened deployable footprint/toe-mark memory dimension."""
-  return int(memory_len) * (FOOTPRINT_SLOT_DIM + TOE_MARK_SLOT_DIM)
+  dim = int(memory_len) * (FOOTPRINT_SLOT_DIM + TOE_MARK_SLOT_DIM)
+  if not include_summary:
+    return dim
+  return (dim if include_raw_memory else 0) + FOOT_EVENT_SUMMARY_DIM
 
 
 def _tensor_extra(
@@ -879,6 +905,8 @@ class FootEventMemoryObs:
     self.gait_period = max(float(params.get("gait_period", 0.6)), 1.0e-6)
     self.command_name = str(params.get("command_name", "twist"))
     self.noise_enabled = bool(params.get("noise_enabled", True))
+    self.include_summary = bool(params.get("include_summary", True))
+    self.include_raw_memory = bool(params.get("include_raw_memory", True))
 
     self.contact_true_prob_range = tuple(
       params.get("contact_true_prob_range", (0.75, 1.0))
@@ -937,6 +965,27 @@ class FootEventMemoryObs:
       float(params.get("early_contact_time_s", 0.08)), 0.0
     )
     self.predicted_fill_enabled = bool(params.get("predicted_fill_enabled", True))
+    self.ratchet_height_threshold_m = max(
+      float(params.get("ratchet_height_threshold_m", 0.025)),
+      0.0,
+    )
+    self.ratchet_flat_height_threshold_m = max(
+      float(params.get("ratchet_flat_height_threshold_m", 0.02)),
+      0.0,
+    )
+    self.ratchet_probe_increment_m = max(
+      float(params.get("ratchet_probe_increment_m", 0.025)),
+      0.0,
+    )
+    self.ratchet_min_stride_m = float(params.get("ratchet_min_stride_m", 0.10))
+    self.ratchet_max_stride_m = max(
+      float(params.get("ratchet_max_stride_m", 0.55)),
+      self.ratchet_min_stride_m,
+    )
+    self.ratchet_reset_flat_pairs = max(
+      int(params.get("ratchet_reset_flat_pairs", 4)),
+      1,
+    )
 
     self.footprints = torch.zeros(
       self.num_envs,
@@ -994,6 +1043,27 @@ class FootEventMemoryObs:
       dtype=torch.long,
       device=self.device,
     )
+    self.ratchet_active = torch.zeros(
+      self.num_envs,
+      dtype=torch.bool,
+      device=self.device,
+    )
+    self.ratchet_lower_s = torch.zeros(
+      self.num_envs,
+      dtype=torch.float32,
+      device=self.device,
+    )
+    self.ratchet_probe_target_s = torch.zeros_like(self.ratchet_lower_s)
+    self.ratchet_last_forward_up_stride = torch.zeros_like(self.ratchet_lower_s)
+    self.ratchet_stride_growth = torch.zeros_like(self.ratchet_lower_s)
+    self.ratchet_safe_no_hit_steps = torch.zeros(
+      self.num_envs,
+      dtype=torch.long,
+      device=self.device,
+    )
+    self.ratchet_confidence = torch.zeros_like(self.ratchet_lower_s)
+    self.ratchet_age_s = torch.zeros_like(self.ratchet_lower_s)
+    self.ratchet_flat_pair_steps = torch.zeros_like(self.ratchet_safe_no_hit_steps)
 
   def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
     ids = self._env_ids(env_ids)
@@ -1011,6 +1081,15 @@ class FootEventMemoryObs:
     self.release_count[ids] = 0
     self.stance_age_s[ids] = 0.0
     self.active_footprint_slot[ids] = -1
+    self.ratchet_active[ids] = False
+    self.ratchet_lower_s[ids] = 0.0
+    self.ratchet_probe_target_s[ids] = 0.0
+    self.ratchet_last_forward_up_stride[ids] = 0.0
+    self.ratchet_stride_growth[ids] = 0.0
+    self.ratchet_safe_no_hit_steps[ids] = 0
+    self.ratchet_confidence[ids] = 0.0
+    self.ratchet_age_s[ids] = 0.0
+    self.ratchet_flat_pair_steps[ids] = 0
 
   def __call__(self, env: ManagerBasedRlEnv, **_: Any) -> torch.Tensor:
     root_pos_w, root_quat_w = _root_pose_from_env(env)
@@ -1041,6 +1120,8 @@ class FootEventMemoryObs:
       & self.prev_ground_contact_valid[:, None]
     )
     toe_hit = _per_foot_toe_hit(env)
+    new_footprint_any = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+    new_toe_mark_any = torch.zeros_like(new_footprint_any)
 
     for foot_id in range(2):
       allowed = ~self.foot_in_stance[:, foot_id]
@@ -1052,6 +1133,7 @@ class FootEventMemoryObs:
         allowed & ~touchdown_mask & self._bernoulli(self.touchdown_false_positive_prob)
       )
       footprint_mask = confirmed | predicted | false_positive
+      new_footprint_any |= footprint_mask
       confirmed_touchdown_prob = self._uniform_like(
         confirmed,
         self.touchdown_prob_range,
@@ -1125,6 +1207,7 @@ class FootEventMemoryObs:
       toe_false_positive = self._bernoulli(self.toe_false_positive_prob)
       false_toe = toe_false_positive & ~real_toe
       toe_mark_mask = real_toe | false_toe
+      new_toe_mark_any |= toe_mark_mask
       real_toe_prob = self._uniform_like(real_toe, self.toe_hit_prob_range, default=0.7)
       false_toe_prob = self._uniform_like(
         false_toe,
@@ -1172,13 +1255,693 @@ class FootEventMemoryObs:
     self.prev_ground_contact.copy_(ground_contact)
     self.prev_ground_contact_valid[:] = True
     self._refresh_relative_positions(root_pos_w, root_quat_w)
-    return torch.cat(
+    raw_memory = torch.cat(
       [
         self.footprints.reshape(self.num_envs, -1),
         self.toe_marks.reshape(self.num_envs, -1),
       ],
       dim=-1,
     )
+    if not self.include_summary:
+      return raw_memory
+    summary = self._compute_event_summary(
+      update_ratchet=True,
+      new_footprint_any=new_footprint_any,
+      new_toe_mark_any=new_toe_mark_any,
+      step_dt=float(env.step_dt),
+    )
+    self._log_summary_metrics(env, summary, new_footprint_any, new_toe_mark_any)
+    if not self.include_raw_memory:
+      return summary
+    return torch.cat([raw_memory, summary], dim=-1)
+
+  def _compute_event_summary(
+    self,
+    *,
+    update_ratchet: bool = False,
+    new_footprint_any: torch.Tensor | None = None,
+    new_toe_mark_any: torch.Tensor | None = None,
+    step_dt: float = 0.0,
+  ) -> torch.Tensor:
+    """Summarize ordered deployable event memory into direct geometry cues.
+
+    Layout:
+    ordered footprint pairs [0:50], latest toe cue [50:60],
+    simple footprint statistics [60:70], and stride-ratchet state [70:80].
+    """
+    summary = torch.zeros(
+      self.num_envs,
+      FOOT_EVENT_SUMMARY_DIM,
+      dtype=torch.float32,
+      device=self.device,
+    )
+    pair_features = self._all_adjacent_pair_features()
+    pair_count = min(pair_features.shape[1], FOOT_EVENT_PAIR_COUNT)
+    if pair_count > 0:
+      pair_end = pair_count * FOOT_EVENT_PAIR_FEATURE_DIM
+      summary[:, :pair_end] = pair_features[:, :pair_count].reshape(
+        self.num_envs,
+        pair_end,
+      )
+
+    toe_features = self._latest_toe_features()
+    summary[
+      :,
+      FOOT_EVENT_TOE_SUMMARY_START:FOOT_EVENT_GEOMETRY_STATS_START,
+    ] = toe_features
+    summary[:, FOOT_EVENT_GEOMETRY_STATS_START:FOOT_EVENT_RATCHET_START] = (
+      self._summary_stats_features(pair_features)
+    )
+    if update_ratchet:
+      if new_footprint_any is None:
+        new_footprint_any = torch.zeros(
+          self.num_envs,
+          dtype=torch.bool,
+          device=self.device,
+        )
+      if new_toe_mark_any is None:
+        new_toe_mark_any = torch.zeros_like(new_footprint_any)
+      self._update_ratchet_state(
+        pair_features,
+        toe_features,
+        new_footprint_any,
+        new_toe_mark_any,
+        step_dt,
+      )
+    summary[:, FOOT_EVENT_RATCHET_START:] = self._ratchet_features(toe_features)
+    return summary
+
+  def _all_adjacent_pair_features(
+    self,
+  ) -> torch.Tensor:
+    pair_features = torch.zeros(
+      self.num_envs,
+      max(self.memory_len - 1, 0),
+      FOOT_EVENT_PAIR_FEATURE_DIM,
+      dtype=torch.float32,
+      device=self.device,
+    )
+    if self.memory_len < 2:
+      return pair_features
+
+    newer = self.footprints[:, :-1]
+    older = self.footprints[:, 1:]
+    valid = self.footprint_valid[:, :-1] & self.footprint_valid[:, 1:]
+    return self._pair_features(newer, older, valid)
+
+  def _summary_stats_features(
+    self,
+    pair_features: torch.Tensor,
+  ) -> torch.Tensor:
+    """Aggregate direct geometry from ordered footprint-pair features.
+
+    Layout:
+    [0] valid pair count / max pair count.
+    [1] confidence-weighted mean signed stride.
+    [2] confidence-weighted mean signed height.
+    [3:5] latest signed stride/height.
+    [5:7] latest pair minus previous pair stride/height.
+    [7] max forward signed stride.
+    [8] max forward stride among pairs with positive signed height.
+    [9] confidence-weighted mean positive signed height.
+    """
+    stats = torch.zeros(
+      self.num_envs,
+      FOOT_EVENT_GEOMETRY_STATS_DIM,
+      dtype=torch.float32,
+      device=self.device,
+    )
+    pair_count = min(pair_features.shape[1], FOOT_EVENT_PAIR_COUNT)
+    if pair_count <= 0:
+      return stats
+
+    pair_features = pair_features[:, :pair_count]
+    valid = pair_features[..., 0] > 0.5
+    weight = pair_features[..., 1] * valid.float()
+    delta_s = pair_features[..., 5]
+    delta_z = pair_features[..., 6]
+
+    count = valid.float().sum(dim=-1)
+    weight_denom = weight.sum(dim=-1).clamp_min(1.0e-6)
+    weighted_mean_s = (delta_s * weight).sum(dim=-1) / weight_denom
+    weighted_mean_z = (delta_z * weight).sum(dim=-1) / weight_denom
+
+    latest_valid = valid[:, 0]
+    if pair_count > 1:
+      previous_valid = valid[:, 1]
+      latest_minus_prev = torch.where(
+        latest_valid & previous_valid,
+        delta_s[:, 0] - delta_s[:, 1],
+        torch.zeros_like(count),
+      )
+      height_latest_minus_prev = torch.where(
+        latest_valid & previous_valid,
+        delta_z[:, 0] - delta_z[:, 1],
+        torch.zeros_like(count),
+      )
+    else:
+      latest_minus_prev = torch.zeros_like(count)
+      height_latest_minus_prev = torch.zeros_like(count)
+
+    forward = valid & (delta_s > 0.0)
+    forward_up = forward & (delta_z > 0.025)
+    positive_height = valid & (delta_z > 0.025)
+    max_forward_stride = torch.where(
+      forward.any(dim=-1),
+      delta_s.masked_fill(~forward, -1.0).max(dim=-1).values,
+      torch.zeros_like(count),
+    )
+    max_forward_up_stride = torch.where(
+      forward_up.any(dim=-1),
+      delta_s.masked_fill(~forward_up, -1.0).max(dim=-1).values,
+      torch.zeros_like(count),
+    )
+    positive_weight = weight * positive_height.float()
+    positive_denom = positive_weight.sum(dim=-1).clamp_min(1.0e-6)
+    positive_height_mean = (delta_z * positive_weight).sum(dim=-1) / positive_denom
+
+    stats[:, 0] = (count / float(max(FOOT_EVENT_PAIR_COUNT, 1))).clamp(0.0, 1.0)
+    stats[:, 1] = torch.where(count > 0.0, weighted_mean_s, torch.zeros_like(count))
+    stats[:, 2] = torch.where(count > 0.0, weighted_mean_z, torch.zeros_like(count))
+    stats[:, 3] = torch.where(latest_valid, delta_s[:, 0], torch.zeros_like(count))
+    stats[:, 4] = torch.where(latest_valid, delta_z[:, 0], torch.zeros_like(count))
+    stats[:, 5] = latest_minus_prev
+    stats[:, 6] = height_latest_minus_prev
+    stats[:, 7] = max_forward_stride
+    stats[:, 8] = max_forward_up_stride
+    stats[:, 9] = torch.where(
+      positive_height.any(dim=-1),
+      positive_height_mean,
+      torch.zeros_like(count),
+    )
+    return stats
+
+  def _update_ratchet_state(
+    self,
+    pair_features: torch.Tensor,
+    toe_features: torch.Tensor,
+    new_footprint_any: torch.Tensor,
+    new_toe_mark_any: torch.Tensor,
+    step_dt: float,
+  ) -> None:
+    """Maintain a deployable lower-bound/probe target from ordered events."""
+    aged = torch.where(
+      self.ratchet_active,
+      self.ratchet_age_s + float(step_dt),
+      self.ratchet_age_s,
+    )
+    pair_count = min(pair_features.shape[1], FOOT_EVENT_PAIR_COUNT)
+    if pair_count > 0:
+      latest = pair_features[:, 0]
+      latest_valid = latest[:, 0] > 0.5
+      latest_score = latest[:, 1].clamp(0.0, 1.0)
+      latest_stride = latest[:, 5]
+      latest_height = latest[:, 6]
+    else:
+      latest_valid = torch.zeros(
+        self.num_envs,
+        dtype=torch.bool,
+        device=self.device,
+      )
+      latest_score = torch.zeros(
+        self.num_envs,
+        dtype=torch.float32,
+        device=self.device,
+      )
+      latest_stride = torch.zeros_like(latest_score)
+      latest_height = torch.zeros_like(latest_score)
+
+    new_footprint_any = new_footprint_any.to(device=self.device, dtype=torch.bool)
+    new_toe_mark_any = new_toe_mark_any.to(device=self.device, dtype=torch.bool)
+    forward_up_step = (
+      new_footprint_any
+      & latest_valid
+      & (latest_stride >= self.ratchet_min_stride_m)
+      & (latest_height > self.ratchet_height_threshold_m)
+    )
+    flat_step = (
+      new_footprint_any
+      & latest_valid
+      & (torch.abs(latest_height) <= self.ratchet_flat_height_threshold_m)
+    )
+
+    toe_relation_valid = toe_features[:, 6] > 0.5
+    toe_delta_s = toe_features[:, 7].clamp_min(0.0)
+    toe_evidence = (
+      (new_footprint_any | new_toe_mark_any)
+      & toe_relation_valid
+      & (toe_delta_s > 1.0e-5)
+    )
+    has_evidence = forward_up_step | toe_evidence
+
+    stride_evidence = torch.where(
+      forward_up_step,
+      latest_stride.clamp_min(0.0),
+      torch.zeros_like(latest_stride),
+    )
+    toe_evidence_value = torch.where(
+      toe_evidence,
+      toe_delta_s,
+      torch.zeros_like(toe_delta_s),
+    )
+    evidence_lower = torch.maximum(stride_evidence, toe_evidence_value)
+    old_lower = torch.where(
+      self.ratchet_active,
+      self.ratchet_lower_s,
+      torch.zeros_like(self.ratchet_lower_s),
+    )
+    new_lower = torch.where(
+      has_evidence,
+      torch.maximum(old_lower, evidence_lower),
+      self.ratchet_lower_s,
+    )
+    new_lower = new_lower.clamp(self.ratchet_min_stride_m, self.ratchet_max_stride_m)
+
+    old_probe = torch.where(
+      self.ratchet_active,
+      self.ratchet_probe_target_s,
+      torch.zeros_like(self.ratchet_probe_target_s),
+    )
+    grow_probe = torch.maximum(
+      old_probe + self.ratchet_probe_increment_m,
+      new_lower + self.ratchet_probe_increment_m,
+    )
+    confirm_probe = torch.maximum(old_probe, new_lower)
+    new_probe = torch.where(
+      forward_up_step & ~toe_evidence,
+      grow_probe,
+      torch.where(toe_evidence, confirm_probe, self.ratchet_probe_target_s),
+    )
+    new_probe = torch.maximum(new_probe, new_lower).clamp(
+      self.ratchet_min_stride_m,
+      self.ratchet_max_stride_m,
+    )
+
+    new_growth = torch.where(
+      forward_up_step,
+      latest_stride - self.ratchet_last_forward_up_stride,
+      self.ratchet_stride_growth,
+    )
+    new_last_stride = torch.where(
+      forward_up_step,
+      latest_stride.clamp_min(0.0),
+      self.ratchet_last_forward_up_stride,
+    )
+    new_no_hit_steps = torch.where(
+      forward_up_step & ~toe_evidence,
+      self.ratchet_safe_no_hit_steps + 1,
+      self.ratchet_safe_no_hit_steps,
+    )
+    new_no_hit_steps = torch.where(
+      toe_evidence,
+      torch.zeros_like(new_no_hit_steps),
+      new_no_hit_steps,
+    )
+    evidence_confidence = torch.maximum(
+      torch.where(forward_up_step, latest_score, torch.zeros_like(latest_score)),
+      torch.where(
+        toe_evidence,
+        toe_features[:, 1].clamp(0.0, 1.0),
+        torch.zeros_like(latest_score),
+      ),
+    )
+    new_confidence = torch.where(
+      has_evidence,
+      torch.maximum(self.ratchet_confidence, evidence_confidence),
+      self.ratchet_confidence,
+    )
+    new_flat_steps = torch.where(
+      flat_step & ~has_evidence,
+      self.ratchet_flat_pair_steps + 1,
+      self.ratchet_flat_pair_steps,
+    )
+    new_flat_steps = torch.where(
+      has_evidence,
+      torch.zeros_like(new_flat_steps),
+      new_flat_steps,
+    )
+
+    stale = self.ratchet_active & (aged >= self.age_norm_s) & ~has_evidence
+    flat_reset = self.ratchet_active & (new_flat_steps >= self.ratchet_reset_flat_pairs)
+    reset = stale | flat_reset
+    active = (self.ratchet_active | has_evidence) & ~reset
+    age = torch.where(has_evidence, torch.zeros_like(aged), aged)
+    age = torch.where(active, age, torch.zeros_like(age))
+
+    self.ratchet_active = active
+    self.ratchet_lower_s = torch.where(active, new_lower, torch.zeros_like(new_lower))
+    self.ratchet_probe_target_s = torch.where(
+      active,
+      new_probe,
+      torch.zeros_like(new_probe),
+    )
+    self.ratchet_last_forward_up_stride = torch.where(
+      active,
+      new_last_stride,
+      torch.zeros_like(new_last_stride),
+    )
+    self.ratchet_stride_growth = torch.where(
+      active,
+      new_growth,
+      torch.zeros_like(new_growth),
+    )
+    self.ratchet_safe_no_hit_steps = torch.where(
+      active,
+      new_no_hit_steps,
+      torch.zeros_like(new_no_hit_steps),
+    )
+    self.ratchet_confidence = torch.where(
+      active,
+      new_confidence,
+      torch.zeros_like(new_confidence),
+    )
+    self.ratchet_age_s = age
+    self.ratchet_flat_pair_steps = torch.where(
+      active,
+      new_flat_steps,
+      torch.zeros_like(new_flat_steps),
+    )
+
+  def _ratchet_features(self, toe_features: torch.Tensor) -> torch.Tensor:
+    """Expose the step-to-step lower-bound ratchet as deployable summary cues."""
+    features = torch.zeros(
+      self.num_envs,
+      FOOT_EVENT_RATCHET_DIM,
+      dtype=torch.float32,
+      device=self.device,
+    )
+    active = self.ratchet_active
+    active_f = active.float()
+    age_norm = (self.ratchet_age_s / self.age_norm_s).clamp(0.0, 1.0)
+    toe_relation_valid = (toe_features[:, 6] > 0.5) & active
+    toe_delta_s = torch.where(
+      toe_relation_valid,
+      toe_features[:, 7],
+      torch.zeros_like(toe_features[:, 7]),
+    )
+
+    features[:, 0] = active_f
+    features[:, 1] = self.ratchet_lower_s * active_f
+    features[:, 2] = self.ratchet_probe_target_s * active_f
+    features[:, 3] = self.ratchet_last_forward_up_stride * active_f
+    features[:, 4] = self.ratchet_stride_growth * active_f
+    features[:, 5] = (
+      self.ratchet_safe_no_hit_steps.float() / float(max(FOOT_EVENT_PAIR_COUNT, 1))
+    ).clamp(0.0, 1.0) * active_f
+    features[:, 6] = toe_relation_valid.float()
+    features[:, 7] = toe_delta_s
+    features[:, 8] = self.ratchet_confidence.clamp(0.0, 1.0) * active_f
+    features[:, 9] = torch.where(active, age_norm, torch.ones_like(age_norm))
+    return features
+
+  def _pair_features(
+    self,
+    newer: torch.Tensor,
+    older: torch.Tensor,
+    valid: torch.Tensor,
+  ) -> torch.Tensor:
+    pair_shape = newer.shape[:-1]
+    features = torch.zeros(
+      *pair_shape,
+      FOOT_EVENT_PAIR_FEATURE_DIM,
+      dtype=torch.float32,
+      device=self.device,
+    )
+    newer_left = newer[..., 1] > 0.5
+    newer_right = newer[..., 2] > 0.5
+    older_left = older[..., 1] > 0.5
+    alternating = newer_left != older_left
+    both_confirmed = (newer[..., 3] > 0.5) & (older[..., 3] > 0.5)
+    min_conf = torch.minimum(newer[..., 5], older[..., 5]).clamp(0.0, 1.0)
+    age_max = torch.maximum(newer[..., 6], older[..., 6]).clamp(0.0, 1.0)
+    delta_s = newer[..., 10] - older[..., 10]
+    delta_z = newer[..., 9] - older[..., 9]
+    lateral_delta = newer[..., 11] - older[..., 11]
+    abs_delta_s = delta_s.abs()
+    valid = valid.bool()
+    source_score = torch.where(
+      both_confirmed,
+      torch.ones_like(min_conf),
+      torch.full_like(min_conf, 0.55),
+    )
+    score = valid.float() * min_conf * (1.0 - age_max).clamp(0.0, 1.0) * source_score
+    foot_sign = torch.where(
+      newer_right,
+      torch.ones_like(min_conf),
+      torch.where(
+        newer_left, torch.full_like(min_conf, -1.0), torch.zeros_like(min_conf)
+      ),
+    )
+
+    features[..., 0] = valid.float()
+    features[..., 1] = score
+    features[..., 2] = torch.where(valid, foot_sign, torch.zeros_like(foot_sign))
+    features[..., 3] = torch.where(
+      valid, alternating.float(), torch.zeros_like(min_conf)
+    )
+    features[..., 4] = age_max
+    features[..., 5] = torch.where(valid, delta_s, torch.zeros_like(delta_s))
+    features[..., 6] = torch.where(valid, delta_z, torch.zeros_like(delta_z))
+    features[..., 7] = torch.where(
+      valid, lateral_delta, torch.zeros_like(lateral_delta)
+    )
+    features[..., 8] = torch.where(valid, abs_delta_s, torch.zeros_like(abs_delta_s))
+    features[..., 9] = torch.where(valid, min_conf, torch.zeros_like(min_conf))
+    return features
+
+  def _latest_toe_features(self) -> torch.Tensor:
+    """Return latest toe-hit cue.
+
+    Layout:
+    [0] toe valid, [1] confidence, [2] age, [3] toe foot sign,
+    [4] toe_s, [5] toe_z, [6] opposite-after-toe valid,
+    [7] signed horizontal distance from toe to later opposite footprint,
+    [8] absolute horizontal distance for the same relation, [9] age gap.
+    """
+    toe_features = torch.zeros(
+      self.num_envs, 10, dtype=torch.float32, device=self.device
+    )
+    latest_toe = self.toe_marks[:, 0]
+    toe_valid = self.toe_valid[:, 0]
+    toe_left = latest_toe[:, 1] > 0.5
+    toe_right = latest_toe[:, 2] > 0.5
+    toe_s = latest_toe[:, 9]
+
+    opposite_fp, opposite_valid = self._first_footprint_after_toe(
+      toe_left,
+      toe_right,
+      opposite=True,
+    )
+    toe_age = latest_toe[:, 5]
+
+    toe_features[:, 0] = toe_valid.float()
+    toe_features[:, 1] = torch.where(toe_valid, latest_toe[:, 4], 0.0)
+    toe_features[:, 2] = torch.where(toe_valid, latest_toe[:, 5], 0.0)
+    toe_features[:, 3] = torch.where(
+      toe_valid & toe_right,
+      torch.ones_like(toe_s),
+      torch.where(toe_valid & toe_left, torch.full_like(toe_s, -1.0), 0.0),
+    )
+    toe_features[:, 4] = torch.where(toe_valid, toe_s, 0.0)
+    toe_features[:, 5] = torch.where(toe_valid, latest_toe[:, 8], 0.0)
+    relation_valid = toe_valid & opposite_valid
+    relation_delta_s = opposite_fp[:, 10] - toe_s
+    toe_features[:, 6] = torch.where(
+      relation_valid,
+      torch.ones_like(toe_s),
+      torch.zeros_like(toe_s),
+    )
+    toe_features[:, 7] = torch.where(
+      relation_valid,
+      relation_delta_s,
+      torch.zeros_like(toe_s),
+    )
+    toe_features[:, 8] = torch.where(
+      relation_valid,
+      relation_delta_s.abs(),
+      torch.zeros_like(toe_s),
+    )
+    toe_features[:, 9] = torch.where(
+      relation_valid,
+      (toe_age - opposite_fp[:, 6]).clamp(0.0, 1.0),
+      torch.zeros_like(toe_s),
+    )
+    return toe_features
+
+  def _first_footprint_after_toe(
+    self,
+    toe_left: torch.Tensor,
+    toe_right: torch.Tensor,
+    *,
+    opposite: bool,
+  ) -> tuple[torch.Tensor, torch.Tensor]:
+    fp_left = self.footprints[..., 1] > 0.5
+    fp_right = self.footprints[..., 2] > 0.5
+    if opposite:
+      target_foot = (toe_left[:, None] & fp_right) | (toe_right[:, None] & fp_left)
+    else:
+      target_foot = (toe_left[:, None] & fp_left) | (toe_right[:, None] & fp_right)
+    toe_age = self.toe_marks[:, 0, 5]
+    after_toe = self.footprints[..., 6] < (toe_age[:, None] - 1.0e-6)
+    candidate = self.footprint_valid & target_foot & after_toe
+    # Pick the first footprint after the toe mark in event time.  Age grows with
+    # time since event, so this is the largest footprint age below toe_age.
+    score = torch.where(
+      candidate,
+      self.footprints[..., 6],
+      torch.full_like(self.footprints[..., 6], -1.0),
+    )
+    idx = torch.argmax(score, dim=-1)
+    env_ids = torch.arange(self.num_envs, device=self.device)
+    valid = torch.any(candidate, dim=-1)
+    return self.footprints[env_ids, idx], valid
+
+  def _log_summary_metrics(
+    self,
+    env: ManagerBasedRlEnv,
+    summary: torch.Tensor,
+    new_footprint_any: torch.Tensor,
+    new_toe_mark_any: torch.Tensor,
+  ) -> None:
+    log = env.extras.get("log")
+    if not isinstance(log, dict):
+      return
+
+    pair_features = summary[:, :FOOT_EVENT_PAIR_SUMMARY_DIM].reshape(
+      self.num_envs,
+      FOOT_EVENT_PAIR_COUNT,
+      FOOT_EVENT_PAIR_FEATURE_DIM,
+    )
+    valid = pair_features[..., 0] > 0.5
+    valid_f = valid.float()
+    valid_count = valid_f.sum(dim=-1)
+    valid_denom = valid_count.clamp_min(1.0)
+    delta_s = pair_features[..., 5]
+    delta_z = pair_features[..., 6]
+    latest_valid = valid[:, 0]
+    stats = summary[:, FOOT_EVENT_GEOMETRY_STATS_START:FOOT_EVENT_RATCHET_START]
+    toe = summary[:, FOOT_EVENT_TOE_SUMMARY_START:FOOT_EVENT_GEOMETRY_STATS_START]
+    ratchet = summary[:, FOOT_EVENT_RATCHET_START:]
+    toe_relation_valid = toe[:, 6] > 0.5
+    toe_relation_valid_f = toe_relation_valid.float()
+    toe_relation_denom = toe_relation_valid_f.sum().clamp_min(1.0)
+    ratchet_active = ratchet[:, 0] > 0.5
+    ratchet_active_f = ratchet_active.float()
+    ratchet_denom = ratchet_active_f.sum().clamp_min(1.0)
+
+    forward = valid & (delta_s > 0.0)
+    up = forward & (delta_z > 0.025)
+    down = forward & (delta_z < -0.025)
+    flat = valid & (torch.abs(delta_z) <= 0.025)
+
+    log["Metrics/foot_event_summary_pair_valid_ratio"] = (
+      valid_count / float(max(FOOT_EVENT_PAIR_COUNT, 1))
+    ).mean()
+    log["Metrics/foot_event_summary_latest_delta_s_mean"] = torch.where(
+      latest_valid, delta_s[:, 0], torch.zeros_like(delta_s[:, 0])
+    ).mean()
+    log["Metrics/foot_event_summary_latest_delta_z_mean"] = torch.where(
+      latest_valid, delta_z[:, 0], torch.zeros_like(delta_z[:, 0])
+    ).mean()
+    log["Metrics/foot_event_summary_mean_delta_s_mean"] = stats[:, 1].mean()
+    log["Metrics/foot_event_summary_mean_delta_z_mean"] = stats[:, 2].mean()
+    log["Metrics/foot_event_summary_max_forward_stride_mean"] = stats[:, 7].mean()
+    log["Metrics/foot_event_summary_max_forward_up_stride_mean"] = stats[:, 8].mean()
+    log["Metrics/foot_event_summary_positive_height_mean"] = stats[:, 9].mean()
+    log["Metrics/foot_event_summary_toe_opposite_after_valid_ratio"] = (
+      toe_relation_valid_f.mean()
+    )
+    log["Metrics/foot_event_summary_toe_opposite_after_delta_s_mean"] = (
+      toe[:, 7] * toe_relation_valid_f
+    ).sum() / toe_relation_denom
+    log["Metrics/foot_event_summary_toe_opposite_after_abs_delta_s_mean"] = (
+      toe[:, 8] * toe_relation_valid_f
+    ).sum() / toe_relation_denom
+    log["Metrics/foot_event_summary_toe_opposite_after_age_gap_mean"] = (
+      toe[:, 9] * toe_relation_valid_f
+    ).sum() / toe_relation_denom
+    log["Metrics/foot_event_summary_up_pair_ratio"] = (
+      up.float().sum(dim=-1) / valid_denom
+    ).mean()
+    log["Metrics/foot_event_summary_down_pair_ratio"] = (
+      down.float().sum(dim=-1) / valid_denom
+    ).mean()
+    log["Metrics/foot_event_summary_flat_pair_ratio"] = (
+      flat.float().sum(dim=-1) / valid_denom
+    ).mean()
+    log["Metrics/foot_event_summary_new_footprint_ratio"] = (
+      new_footprint_any.float().mean()
+    )
+    log["Metrics/foot_event_summary_new_toe_mark_ratio"] = (
+      new_toe_mark_any.float().mean()
+    )
+    log["Metrics/foot_event_ratchet_active_ratio"] = ratchet_active_f.mean()
+    log["Metrics/foot_event_ratchet_lower_mean"] = (
+      ratchet[:, 1] * ratchet_active_f
+    ).sum() / ratchet_denom
+    log["Metrics/foot_event_ratchet_probe_target_mean"] = (
+      ratchet[:, 2] * ratchet_active_f
+    ).sum() / ratchet_denom
+    log["Metrics/foot_event_ratchet_last_forward_up_stride_mean"] = (
+      ratchet[:, 3] * ratchet_active_f
+    ).sum() / ratchet_denom
+    log["Metrics/foot_event_ratchet_stride_growth_mean"] = (
+      ratchet[:, 4] * ratchet_active_f
+    ).sum() / ratchet_denom
+    log["Metrics/foot_event_ratchet_step_count_mean"] = (
+      ratchet[:, 5] * ratchet_active_f
+    ).sum() / ratchet_denom
+    log["Metrics/foot_event_ratchet_toe_confirm_ratio"] = ratchet[:, 6].mean()
+    log["Metrics/foot_event_ratchet_toe_delta_s_mean"] = (
+      ratchet[:, 7] * ratchet_active_f
+    ).sum() / ratchet_denom
+    log["Metrics/foot_event_ratchet_confidence_mean"] = (
+      ratchet[:, 8] * ratchet_active_f
+    ).sum() / ratchet_denom
+    log["Metrics/foot_event_ratchet_age_mean"] = (
+      ratchet[:, 9] * ratchet_active_f
+    ).sum() / ratchet_denom
+
+    riser_label = env.extras.get(STAIR_RISER_HEIGHT_LABEL_KEY)
+    shape_valid = env.extras.get(STAIR_SHAPE_LABEL_VALID_KEY)
+    if isinstance(riser_label, torch.Tensor) and isinstance(shape_valid, torch.Tensor):
+      label = riser_label.to(device=self.device, dtype=torch.float32)
+      estimate = stats[:, 9]
+      mask = (estimate > 0.0) & shape_valid.to(device=self.device, dtype=torch.bool)
+      mask_f = mask.float()
+      mask_denom = mask_f.sum().clamp_min(1.0)
+      log["Metrics/foot_event_summary_positive_height_to_riser_mae"] = (
+        torch.abs(estimate - label) * mask_f
+      ).sum() / mask_denom
+
+    safe_lower = env.extras.get(MINIMUM_SAFE_STRIDE_KEY)
+    safe_valid = env.extras.get(MINIMUM_SAFE_STRIDE_VALID_KEY)
+    if isinstance(safe_lower, torch.Tensor) and isinstance(safe_valid, torch.Tensor):
+      lower_label = safe_lower.to(device=self.device, dtype=torch.float32)
+      lower_est = stats[:, 8]
+      lower_mask = (lower_est > 0.0) & safe_valid.to(
+        device=self.device, dtype=torch.bool
+      )
+      lower_mask_f = lower_mask.float()
+      lower_denom = lower_mask_f.sum().clamp_min(1.0)
+      log["Metrics/foot_event_summary_forward_up_stride_to_safe_lower_mae"] = (
+        torch.abs(lower_est - lower_label) * lower_mask_f
+      ).sum() / lower_denom
+      log["Metrics/foot_event_summary_forward_up_stride_below_lower_ratio"] = (
+        (lower_est < lower_label).float() * lower_mask_f
+      ).sum() / lower_denom
+      ratchet_hint = ratchet[:, 2]
+      ratchet_mask = ratchet_active & safe_valid.to(
+        device=self.device, dtype=torch.bool
+      )
+      ratchet_mask_f = ratchet_mask.float()
+      ratchet_label_denom = ratchet_mask_f.sum().clamp_min(1.0)
+      log["Metrics/foot_event_ratchet_hint_to_safe_lower_mae"] = (
+        torch.abs(ratchet_hint - lower_label) * ratchet_mask_f
+      ).sum() / ratchet_label_denom
+      log["Metrics/foot_event_ratchet_hint_below_lower_ratio"] = (
+        (ratchet_hint < lower_label).float() * ratchet_mask_f
+      ).sum() / ratchet_label_denom
 
   def _env_ids(self, env_ids: torch.Tensor | slice | None) -> torch.Tensor:
     all_ids = torch.arange(self.num_envs, device=self.device)

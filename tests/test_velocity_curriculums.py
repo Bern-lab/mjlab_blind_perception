@@ -837,7 +837,7 @@ def test_slow_latent_labels_follow_env_stair_state_machine() -> None:
           0.75,
           1.0,
           0.45,
-          0.0,
+          1.0,
           1.0,
           0.0,
           0.0,
@@ -994,9 +994,7 @@ def test_stair_shape_label_is_masked_outside_active_sequence() -> None:
   )
 
 
-def test_stair_shape_component_masks_require_depth_evidence_and_active_sequence() -> (
-  None
-):
+def test_stair_shape_component_masks_are_dense_during_active_sequence() -> None:
   env = SimpleNamespace(
     num_envs=4,
     device="cpu",
@@ -1014,7 +1012,7 @@ def test_stair_shape_component_masks_require_depth_evidence_and_active_sequence(
     torch.tensor(
       [
         [0.0, 0.0],
-        [0.0, 1.0],
+        [1.0, 1.0],
         [1.0, 1.0],
         [0.0, 0.0],
       ]

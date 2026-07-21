@@ -8,6 +8,7 @@ from mjlab.managers.observation_manager import ObservationGroupCfg
 from mjlab.tasks.registry import list_tasks, load_env_cfg
 
 MAIN_BRANCH_TASK_IDS = (
+  "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2GeometryProbe-Unitree-G1",
   "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2SafeStrideProbe-Unitree-G1",
   "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2Shadow-TeacherKL-Unitree-G1",
   "Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1",
@@ -172,22 +173,28 @@ def test_step_boundary_rewards_scoped_to_target_stair_tasks(
   slow_latent_task = (
     "Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1"
   )
+  semantic_geometry_task = (
+    "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2GeometryProbe-Unitree-G1"
+  )
   semantic_shadow_task = (
     "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2Shadow-TeacherKL-Unitree-G1"
   )
   semantic_probe_task = (
     "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2SafeStrideProbe-Unitree-G1"
   )
-  allowed_tasks = {
+  lip_penalty_tasks = {
     target_navigation_task,
     step_danger_task,
+  }
+  slab_penalty_tasks = lip_penalty_tasks | {
     slow_latent_task,
+    semantic_geometry_task,
     semantic_shadow_task,
     semantic_probe_task,
   }
   for task_id in all_task_ids:
     cfg = load_env_cfg(task_id)
-    if task_id in allowed_tasks:
+    if task_id in lip_penalty_tasks:
       assert "foot_step_lip_volume_penalty" in cfg.rewards
       assert (
         cfg.rewards["foot_step_lip_volume_penalty"].params["min_terrain_level"] == 3
@@ -195,14 +202,14 @@ def test_step_boundary_rewards_scoped_to_target_stair_tasks(
       assert (
         cfg.rewards["foot_step_lip_volume_penalty"].params["nearest_boundaries"] == 4
       )
+    else:
+      assert "foot_step_lip_volume_penalty" not in cfg.rewards
+
+    if task_id in slab_penalty_tasks:
       assert "toe_step_riser_slab_penalty" in cfg.rewards
       slab_params = cfg.rewards["toe_step_riser_slab_penalty"].params
       assert slab_params["min_terrain_level"] == 3
       assert slab_params["nearest_boundaries"] == 4
       assert slab_params["slab_depth"] == 0.10
     else:
-      unexpected = {
-        "foot_step_lip_volume_penalty",
-        "toe_step_riser_slab_penalty",
-      }.intersection(cfg.rewards)
-      assert not unexpected, f"{task_id} unexpectedly enables {sorted(unexpected)}"
+      assert "toe_step_riser_slab_penalty" not in cfg.rewards

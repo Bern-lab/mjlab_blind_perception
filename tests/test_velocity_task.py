@@ -367,6 +367,16 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert (
     env_cfg.observations["latent"].terms["foot_event_memory"].params["memory_len"] == 6
   )
+  assert (
+    env_cfg.observations["latent"].terms["foot_event_memory"].params["include_summary"]
+    is True
+  )
+  foot_event_params = env_cfg.observations["latent"].terms["foot_event_memory"].params
+  assert foot_event_params["include_raw_memory"] is False
+  assert foot_event_params["ratchet_height_threshold_m"] == 0.025
+  assert foot_event_params["ratchet_probe_increment_m"] == 0.025
+  assert foot_event_params["ratchet_min_stride_m"] == 0.10
+  assert foot_event_params["ratchet_max_stride_m"] == 0.55
   assert "latent_labels" in env_cfg.observations
   assert tuple(env_cfg.observations["latent_labels"].terms) == (
     "toe_riser_event",
@@ -391,14 +401,10 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   )
   assert rl_cfg.obs_groups["actor"] == ("actor",)
   assert rl_cfg.obs_groups["latent"] == ("latent",)
-  foot_asset_cfg = env_cfg.rewards["foot_step_lip_volume_penalty"].params["asset_cfg"]
+  assert "foot_step_lip_volume_penalty" not in env_cfg.rewards
   toe_reward_params = env_cfg.rewards["toe_step_riser_slab_penalty"].params
   toe_asset_cfg = toe_reward_params["asset_cfg"]
-  assert foot_asset_cfg is not toe_asset_cfg
-  assert (
-    env_cfg.rewards["foot_step_lip_volume_penalty"].params["ignore_boundary_layers"]
-    == 0
-  )
+  assert toe_asset_cfg.body_names == ("left_ankle_roll_link", "right_ankle_roll_link")
   assert toe_reward_params["contact_sensor_name"] == "toe_terrain_contact"
   assert toe_reward_params["contact_penalty_scale"] == 0.5
   assert toe_reward_params["event_min_forward_intent_speed"] == 0.04
@@ -441,15 +447,20 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert skip_reward.weight == -1.0
   midline_reward = env_cfg.rewards["target_tread_midline_shaping"]
   assert midline_reward.func is target_tread_midline_shaping
-  assert midline_reward.weight == 0.4
+  assert midline_reward.weight == 1.2
   assert midline_reward.params["height_clearance"] == 0.02
   assert midline_reward.params["sigma_fraction"] == 0.60
-  assert midline_reward.params["min_sigma"] == 0.20
-  assert midline_reward.params["edge_margin"] == 0.08
-  assert midline_reward.params["progress_scale"] == 0.30
-  assert midline_reward.params["center_scale"] == 0.70
-  assert midline_reward.params["edge_scale"] == 0.12
+  assert midline_reward.params["min_sigma"] == 0.18
+  assert midline_reward.params["edge_margin"] == 0.10
+  assert midline_reward.params["progress_scale"] == 0.10
+  assert midline_reward.params["center_scale"] == 0.80
+  assert midline_reward.params["support_scale"] == 0.85
+  assert midline_reward.params["edge_scale"] == 0.55
+  assert midline_reward.params["sole_margin"] == 0.020
+  assert midline_reward.params["support_sigma"] == 0.04
   assert midline_reward.params["max_progress_step"] == 0.20
+  assert midline_reward.params["early_stance_time"] == 0.25
+  assert midline_reward.params["stance_height_tolerance"] == 0.08
   assert midline_reward.params["heading_cos"] == 0.70
   assert midline_reward.params["asset_cfg"].site_names == (
     "left_foot",
@@ -480,7 +491,7 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   )
   assert toe_sensor_cfg.track_air_time is True
   actor_cfg = cast(RslRlGatedStairLatentModelCfg, rl_cfg.actor)
-  assert actor_cfg.latent_dim == 16
+  assert actor_cfg.latent_dim == 24
   assert actor_cfg.state_latent_dim == 8
   assert actor_cfg.latent_hidden_dim == 128
   assert actor_cfg.mlp_encoder_dims == (128, 128)
@@ -504,17 +515,27 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert actor_cfg.aux_future_safe_landing_quality_coef == 0.03
   assert actor_cfg.future_horizon == 20
   assert actor_cfg.aux_stair_shape_coef == 0.03
-  assert actor_cfg.aux_safe_stride_coef == 0.03
+  assert actor_cfg.aux_safe_stride_coef == 0.08
   assert actor_cfg.structured_safe_stride_enabled is True
+  assert actor_cfg.dynamic_stair_shape_enabled is True
   assert actor_cfg.dynamic_safe_stride_enabled is True
   assert actor_cfg.safe_stride_phase_dim == 2
   assert actor_cfg.safe_stride_phase_start == 91
   assert actor_cfg.stair_shape_huber_delta == 0.05
   assert actor_cfg.safe_stride_huber_delta == 0.05
-  assert actor_cfg.safe_stride_width_loss_coef == 1.0
+  assert actor_cfg.safe_stride_width_loss_coef == 2.0
+  assert actor_cfg.safe_stride_lower_shortfall_coef == 1.5
+  assert actor_cfg.safe_stride_interval_coverage_loss_coef == 0.75
+  assert actor_cfg.safe_stride_interval_coverage_margin == 0.01
   assert actor_cfg.safe_stride_confidence_loss_coef == 0.30
+  assert actor_cfg.safe_stride_std_floor_loss_coef == 0.10
+  assert actor_cfg.safe_stride_centered_loss_coef == 0.05
+  assert actor_cfg.safe_stride_std_floor_ratio == 0.70
+  assert actor_cfg.safe_stride_deployable_hint_loss_coef == 0.50
+  assert actor_cfg.safe_stride_deployable_hint_margin == 0.02
   assert actor_cfg.safe_stride_min == 0.10
   assert actor_cfg.safe_stride_max == 0.55
+  assert actor_cfg.actor_semantic_enabled is True
 
 
 def test_target_tread_midline_center_score_is_dense_and_centered() -> None:
@@ -538,10 +559,11 @@ def test_semantic_v2_shadow_runner_trains_heads_without_resuming_optimizer() -> 
   assert cfg.load_iteration_on_resume is False
   assert cfg.bootstrap_checkpoint_path is None
   assert actor_cfg.shadow_semantic_enabled is True
+  assert actor_cfg.actor_semantic_enabled is False
   assert actor_cfg.structured_safe_stride_enabled is True
   assert actor_cfg.aux_stair_shape_coef == 0.03
-  assert actor_cfg.aux_safe_stride_coef == 0.03
-  assert actor_cfg.latent_dim == 16
+  assert actor_cfg.aux_safe_stride_coef == 0.08
+  assert actor_cfg.latent_dim == 24
   assert actor_cfg.state_latent_dim == 8
 
 
@@ -563,7 +585,9 @@ def test_semantic_v2_probe_freezes_policy_and_uses_dynamic_stride_input() -> Non
   assert actor_cfg.safe_stride_phase_dim == 2
   assert actor_cfg.safe_stride_phase_start == 91
   assert actor_cfg.aux_safe_stride_coef == 1.0
-  assert actor_cfg.safe_stride_width_loss_coef == 1.0
+  assert actor_cfg.safe_stride_width_loss_coef == 2.0
+  assert actor_cfg.safe_stride_interval_coverage_loss_coef == 0.75
+  assert actor_cfg.actor_semantic_enabled is False
   assert actor_cfg.aux_event_coef == 0.0
   assert actor_cfg.aux_stair_coef == 0.0
   assert actor_cfg.aux_future_collision_risk_coef == 0.0
@@ -722,11 +746,7 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
   assert env_cfg.rewards["base_height_above_support"].params["min_height"] == 0.76
   assert env_cfg.rewards["self_collisions"].params["force_threshold"] == 12.0
   assert env_cfg.rewards["action_acc_l2"].weight == -0.07
-  assert env_cfg.rewards["foot_step_lip_volume_penalty"].params["edge_radius"] == 0.08
-  assert (
-    env_cfg.rewards["foot_step_lip_volume_penalty"].params["ignore_boundary_layers"]
-    == 1
-  )
+  assert "foot_step_lip_volume_penalty" not in env_cfg.rewards
   assert env_cfg.rewards["toe_step_riser_slab_penalty"].params["slab_depth"] == 0.12
   toe_params = env_cfg.rewards["toe_step_riser_slab_penalty"].params
   assert toe_params["contact_penalty_scale"] == 0.7
@@ -770,7 +790,10 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
       future_horizon=18,
       safe_stride_min=0.10,
       safe_stride_max=0.42,
+      safe_stride_interval_coverage_loss_coef=0.25,
+      safe_stride_interval_coverage_margin=0.03,
       shadow_semantic_enabled=True,
+      actor_semantic_enabled=False,
       structured_safe_stride_enabled=True,
     ),
   )
@@ -802,8 +825,12 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
   assert actor_cfg.future_horizon == 18
   assert actor_cfg.safe_stride_min == 0.10
   assert actor_cfg.safe_stride_max == 0.42
+  assert actor_cfg.safe_stride_interval_coverage_loss_coef == 0.25
+  assert actor_cfg.safe_stride_interval_coverage_margin == 0.03
   assert actor_cfg.shadow_semantic_enabled is True
+  assert actor_cfg.actor_semantic_enabled is False
   assert actor_cfg.structured_safe_stride_enabled is True
+  assert actor_cfg.dynamic_stair_shape_enabled is True
   assert actor_cfg.dynamic_safe_stride_enabled is True
   assert actor_cfg.safe_stride_phase_start == 91
 

@@ -2814,11 +2814,11 @@ def stair_skip_layer_penalty(env) -> torch.Tensor:
   return penalty
 
 
-class target_tread_midline_shaping:
-  """Shape the current swing foot toward the expected tread-depth midline."""
+class target_tread_midline_shaping(_StepBoundaryFootVolume):
+  """Shape the current swing foot toward full support on the expected tread."""
 
   def __init__(self, cfg: RewardTermCfg, env) -> None:
-    del cfg
+    super().__init__(cfg, env)
     self._prev_phi = torch.zeros(env.num_envs, device=env.device)
     self._prev_valid = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
     self._prev_sequence_id = torch.full(
@@ -2841,6 +2841,22 @@ class target_tread_midline_shaping:
     scaled_error = error.abs() / width.clamp_min(1.0e-6)
     return 1.0 / (1.0 + scaled_error.square())
 
+  @staticmethod
+  def _sole_support_features(
+    sole_s: torch.Tensor,
+    tread_depth: torch.Tensor,
+    margin: float,
+    sigma: torch.Tensor,
+  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    sole_min_s = torch.amin(sole_s, dim=-1)
+    sole_max_s = torch.amax(sole_s, dim=-1)
+    sole_center_s = 0.5 * (sole_min_s + sole_max_s)
+    rear_violation = torch.relu(margin - sole_min_s)
+    front_violation = torch.relu(sole_max_s - (tread_depth - margin))
+    violation = rear_violation + front_violation
+    support_score = 1.0 / (1.0 + torch.square(violation / sigma.clamp_min(1.0e-6)))
+    return sole_center_s, support_score, rear_violation, front_violation, violation
+
   def __call__(
     self,
     env,
@@ -2851,11 +2867,17 @@ class target_tread_midline_shaping:
     edge_margin: float = 0.08,
     progress_scale: float = 0.30,
     center_scale: float = 0.70,
+    support_scale: float = 0.45,
     edge_scale: float = 0.12,
+    sole_margin: float = 0.015,
+    support_sigma: float = 0.04,
     max_progress_step: float = 0.20,
+    early_stance_time: float = 0.15,
+    stance_height_tolerance: float = 0.08,
     heading_cos: float = 0.70,
     min_terrain_level: int = 3,
     asset_cfg: SceneEntityCfg = _DEFAULT_FOOT_SITE_CFG,
+    foot_body_cfg: SceneEntityCfg = _DEFAULT_FOOT_BODY_CFG,
   ) -> torch.Tensor:
     boundaries, valid_boundaries = _current_step_boundaries(env)
     if boundaries is None or valid_boundaries is None:
@@ -2883,6 +2905,9 @@ class target_tread_midline_shaping:
     num_envs, num_feet = foot_pos_w.shape[:2]
     if num_feet != 2:
       raise RuntimeError("target_tread_midline_shaping requires two foot sites.")
+    foot_points_w, _point_vel_w = self._foot_points_w(env, foot_body_cfg)
+    sole_z = torch.min(self._local_points[:, 2])
+    sole_points_w = foot_points_w[:, :, self._local_points[:, 2] <= sole_z + 1.0e-6]
 
     ground_sensor = env.scene[ground_contact_sensor_name]
     assert isinstance(ground_sensor, ContactSensor), (
@@ -2891,6 +2916,7 @@ class target_tread_midline_shaping:
     contact_time = ground_sensor.data.current_contact_time
     if contact_time is None:
       contact = ground_sensor.compute_first_contact(dt=env.step_dt)
+      contact_time = contact.float() * env.step_dt
     else:
       if contact_time.shape[-1] != num_feet:
         if contact_time.shape[-1] % num_feet != 0:
@@ -2905,6 +2931,8 @@ class target_tread_midline_shaping:
     env_ids = torch.arange(num_envs, device=env.device)
     target_foot_pos = foot_pos_w[env_ids, target_foot_safe]
     target_swing = target_foot_valid & ~contact[env_ids, target_foot_safe]
+    target_contact = target_foot_valid & contact[env_ids, target_foot_safe]
+    target_contact_duration = contact_time[env_ids, target_foot_safe]
 
     target_boundary = (
       valid_boundaries
@@ -2919,7 +2947,16 @@ class target_tread_midline_shaping:
       env, boundaries, valid_boundaries
     )
     target_height = target_boundary_data[:, 10]
-    height_gate = target_foot_pos[:, 2] >= target_height + height_clearance
+    swing_height_gate = target_foot_pos[:, 2] >= target_height + height_clearance
+    stance_height_gate = (
+      torch.abs(target_foot_pos[:, 2] - target_height) <= stance_height_tolerance
+    )
+    early_target_stance = (
+      target_contact
+      & (target_contact_duration <= early_stance_time)
+      & stance_height_gate
+    )
+    height_gate = swing_height_gate | early_target_stance
     heading_gate = (
       toe_step_riser_slab_penalty._base_heading_cos(
         asset.data.root_link_quat_w,
@@ -2930,7 +2967,7 @@ class target_tread_midline_shaping:
     active = (
       (stair_phase >= 1)
       & (expected_layer > 0)
-      & target_swing
+      & (target_swing | early_target_stance)
       & has_target_boundary
       & shape_valid
       & height_gate
@@ -2942,23 +2979,41 @@ class target_tread_midline_shaping:
       target_boundary_data[:, 6:8]
     )
     p0_xy = target_boundary_data[:, 0:2]
-    foot_s = torch.sum((target_foot_pos[:, :2] - p0_xy) * -normal_to_low, dim=-1)
+    target_sole_points = sole_points_w[env_ids, target_foot_safe]
+    sole_s = torch.sum(
+      (target_sole_points[:, :, :2] - p0_xy[:, None, :]) * -normal_to_low[:, None, :],
+      dim=-1,
+    )
     target_s = 0.5 * tread_depth
     sigma = torch.clamp(sigma_fraction * tread_depth, min=min_sigma)
-    center_error = foot_s - target_s
+    support_sigma_t = tread_depth.new_tensor(support_sigma)
+    (
+      sole_center_s,
+      support_score,
+      rear_violation,
+      front_violation,
+      support_violation,
+    ) = self._sole_support_features(
+      sole_s,
+      tread_depth,
+      sole_margin,
+      support_sigma_t,
+    )
+    center_error = sole_center_s - target_s
     center_score = self._center_score(center_error, sigma)
 
-    inside_target_tread = (foot_s >= 0.0) & (foot_s <= tread_depth)
-    edge_clearance = torch.minimum(foot_s, tread_depth - foot_s)
-    edge_error = torch.relu(edge_margin - edge_clearance) / max(edge_margin, 1.0e-6)
-    edge_penalty = torch.clamp(edge_error, max=1.0).square()
-    edge_penalty = torch.where(
-      inside_target_tread,
-      edge_penalty,
-      torch.zeros_like(edge_penalty),
+    center_edge_clearance = torch.minimum(sole_center_s, tread_depth - sole_center_s)
+    center_edge_error = torch.relu(edge_margin - center_edge_clearance) / max(
+      edge_margin,
+      1.0e-6,
+    )
+    support_edge_error = support_violation / max(sole_margin, 1.0e-6)
+    edge_penalty = (
+      torch.clamp(center_edge_error, max=1.0).square()
+      + torch.clamp(support_edge_error, max=1.0).square()
     )
 
-    phi = center_score
+    phi = 0.5 * center_score + 0.5 * support_score
     same_target = (
       self._prev_valid
       & (self._prev_sequence_id == sequence_id)
@@ -2974,6 +3029,7 @@ class target_tread_midline_shaping:
     reward = (
       progress_scale * progress
       + center_scale * center_score
+      + support_scale * support_score
       - edge_scale * edge_penalty
     )
     reward = torch.where(active, reward, torch.zeros_like(reward))
@@ -2994,7 +3050,7 @@ class target_tread_midline_shaping:
     candidate = (
       (stair_phase >= 1)
       & (expected_layer > 0)
-      & target_swing
+      & (target_swing | early_target_stance)
       & has_target_boundary
       & shape_valid
     )
@@ -3004,14 +3060,29 @@ class target_tread_midline_shaping:
     log["Metrics/target_tread_midline_height_gate_ratio"] = (
       candidate & height_gate
     ).float().sum() / candidate_count
+    log["Metrics/target_tread_midline_early_stance_ratio"] = (
+      early_target_stance.float().mean()
+    )
     log["Metrics/target_tread_midline_error_abs_mean"] = (
       center_error.abs() * active.float()
     ).sum() / active_count
     log["Metrics/target_tread_midline_center_score_mean"] = (
       center_score * active.float()
     ).sum() / active_count
+    log["Metrics/target_tread_midline_support_score_mean"] = (
+      support_score * active.float()
+    ).sum() / active_count
     log["Metrics/target_tread_midline_edge_penalty_mean"] = (
       edge_penalty * active.float()
+    ).sum() / active_count
+    log["Metrics/target_tread_midline_sole_center_s_mean"] = (
+      sole_center_s * active.float()
+    ).sum() / active_count
+    log["Metrics/target_tread_midline_sole_rear_violation_mean"] = (
+      rear_violation * active.float()
+    ).sum() / active_count
+    log["Metrics/target_tread_midline_sole_front_violation_mean"] = (
+      front_violation * active.float()
     ).sum() / active_count
     log["Metrics/target_tread_midline_progress_mean"] = (
       progress * active.float()
