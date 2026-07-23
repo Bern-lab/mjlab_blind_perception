@@ -517,8 +517,8 @@ class TerrainGenerator:
     return body.add_geom(
       type=mujoco.mjtGeom.mjGEOM_BOX,
       size=size,
-      pos=center,
-      quat=quat,
+      pos=tuple(float(v) for v in center),
+      quat=tuple(float(v) for v in quat),
     )
 
   def _finalize_step_boundaries(self) -> None:

@@ -1,4 +1,4 @@
-"""Booster K1 flat tracking environment configurations."""
+"""EngineAI PM01 flat tracking environment configurations."""
 
 from mjlab.asset_zoo.robots.engineai_pm01.pm01_constants import (
   PM01_ACTION_SCALE,

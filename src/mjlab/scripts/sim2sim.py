@@ -21,10 +21,6 @@ import mujoco
 import numpy as np
 import torch
 
-from mjlab.asset_zoo.robots.booster_k1.k1_constants import (
-  K1_ACTION_SCALE,
-  get_k1_robot_cfg,
-)
 from mjlab.asset_zoo.robots.engineai_pm01.pm01_constants import (
   PM01_ACTION_SCALE,
   get_pm01_robot_cfg,
@@ -68,16 +64,6 @@ class RobotProfile:
 
 
 TASK_ROBOT_PROFILES: dict[str, RobotProfile] = {
-  "Mjlab-Tracking-Flat-Booster-K1": RobotProfile(
-    robot_cfg=get_k1_robot_cfg(),
-    action_scale=K1_ACTION_SCALE,
-    base_link_name="base_link",
-  ),
-  "Mjlab-Tracking-Flat-Booster-K1-No-State-Estimation": RobotProfile(
-    robot_cfg=get_k1_robot_cfg(),
-    action_scale=K1_ACTION_SCALE,
-    base_link_name="base_link",
-  ),
   "Mjlab-Tracking-Flat-Unitree-G1": RobotProfile(
     robot_cfg=get_g1_robot_cfg(),
     action_scale=G1_ACTION_SCALE,
@@ -538,10 +524,10 @@ def _build_parser() -> argparse.ArgumentParser:
     formatter_class=argparse.RawDescriptionHelpFormatter,
     epilog=(
       "Examples:\n"
-      "  uv run python src/mjlab/scripts/sim2sim.py -t Mjlab-Tracking-Flat-Booster-K1-No-State-Estimation "
-      "-p logs/rsl_rl/k1_tracking/2026-04-13_19-58-18\n"
-      "  uv run python src/mjlab/scripts/sim2sim.py -t Mjlab-Tracking-Flat-Booster-K1-No-State-Estimation "
-      "-p logs/rsl_rl/k1_tracking/2026-04-13_19-58-18/exported/2026-04-13_19-58-18.pt "
+      "  uv run python src/mjlab/scripts/sim2sim.py -t Mjlab-Tracking-Flat-Unitree-G1-No-State-Estimation "
+      "-p logs/rsl_rl/g1_tracking/2026-04-13_19-58-18\n"
+      "  uv run python src/mjlab/scripts/sim2sim.py -t Mjlab-Tracking-Flat-Unitree-G1-No-State-Estimation "
+      "-p logs/rsl_rl/g1_tracking/2026-04-13_19-58-18/exported/2026-04-13_19-58-18.pt "
       "--motion /path/to/motion.npz --device cuda:0"
     ),
   )

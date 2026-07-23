@@ -1,4 +1,4 @@
-"""Booster K1 constants."""
+"""Noetix BUMI constants."""
 
 from pathlib import Path
 
@@ -19,7 +19,6 @@ from mjlab.utils.spec_config import CollisionCfg
 
 BUMI_XML: Path = (
   MJLAB_SRC_PATH / "asset_zoo" / "robots" / "noetix_bumi" / "xmls" / "bumi2.xml"
-  # MJLAB_SRC_PATH / "asset_zoo" / "robots" / "booster_k1" / "xmls" / "K1_serial_moonwalk.xml"
 )
 assert BUMI_XML.exists()
 

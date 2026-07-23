@@ -157,11 +157,11 @@ def export_policy(task: str, cfg: ExportConfig) -> None:
       )
     if not Path(motion_file).exists():
       raise FileNotFoundError(f"Motion file not found: {motion_file}")
-    env_cfg.commands["motion"].motion_file = motion_file
+    env_cfg.commands["motion"].motion_file = motion_file  # type: ignore[invalid-assignment]
     print(f"[INFO]: Using motion file: {motion_file}")
 
-  env_cfg.sim.nconmax = max(env_cfg.sim.nconmax, 512)
-  env_cfg.sim.njmax = max(env_cfg.sim.njmax, 4096)
+  env_cfg.sim.nconmax = max(env_cfg.sim.nconmax or 0, 512)
+  env_cfg.sim.njmax = max(env_cfg.sim.njmax or 0, 4096)
 
   if cfg.output_dir is not None:
     output_dir = Path(cfg.output_dir)
@@ -205,9 +205,9 @@ def _run_simplified_interface() -> None:
     formatter_class=argparse.RawDescriptionHelpFormatter,
     epilog="""
 Examples:
-    uv run python src/mjlab/scripts/export.py -c k1_run -t Mjlab-Tracking-Flat-Booster_K1-No-State-Estimation
-    uv run python src/mjlab/scripts/export.py -c k1_run/model_5000.pt -t Mjlab-Tracking-Flat-Booster_K1-No-State-Estimation
-    uv run python src/mjlab/scripts/export.py -c k1_run -t Mjlab-Tracking-Flat-Booster_K1-No-State-Estimation --motion data/k1/motion.npz
+    uv run python src/mjlab/scripts/export.py -c g1_run -t Mjlab-Tracking-Flat-Unitree-G1-No-State-Estimation
+    uv run python src/mjlab/scripts/export.py -c g1_run/model_5000.pt -t Mjlab-Tracking-Flat-Unitree-G1-No-State-Estimation
+    uv run python src/mjlab/scripts/export.py -c g1_run -t Mjlab-Tracking-Flat-Unitree-G1-No-State-Estimation --motion data/g1/motion.npz
         """,
   )
   parser.add_argument(

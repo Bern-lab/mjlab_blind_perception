@@ -79,13 +79,13 @@ class MotionTrackingOnPolicyRunner(MjlabOnPolicyRunner):
     os.makedirs(path, exist_ok=True)
     torch.onnx.export(
       onnx_model,
-      onnx_model.get_dummy_inputs(),
+      onnx_model.get_dummy_inputs(),  # type: ignore[operator]
       os.path.join(path, filename),
       export_params=True,
       opset_version=18,
       verbose=verbose,
-      input_names=onnx_model.input_names,
-      output_names=onnx_model.output_names,
+      input_names=onnx_model.input_names,  # type: ignore[arg-type]
+      output_names=onnx_model.output_names,  # type: ignore[arg-type]
       dynamic_axes={},
       dynamo=False,
     )
@@ -142,7 +142,7 @@ class MotionTrackingOnPolicyRunner(MjlabOnPolicyRunner):
     policy_dir, filename, onnx_path = self._get_export_paths(path)
     try:
       self.export_policy_to_onnx(str(policy_dir), filename)
-      self.export_policy_to_onnx_purepolicy(policy_dir, "policy.onnx")
+      self.export_policy_to_onnx_purepolicy(str(policy_dir), "policy.onnx")
       run_name: str = (
         wandb.run.name if self.logger.logger_type == "wandb" and wandb.run else "local"
       )  # type: ignore[assignment]
