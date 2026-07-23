@@ -157,12 +157,24 @@ ignore = ["B011"]
 
 [tool.pyright]
 pythonVersion = "3.10"
-extraPaths = ["src", "third_party/rsl_rl"]
-ignore = ["./typings", "./src/mjlab/utils/lab_api", "./docs"]
+venvPath = "."
+venv = ".venv"
+include = ["src", "tests"]
+exclude = ["typings", "docs", "eval_outputs", "scripts", "third_party/rsl_rl"]
+extraPaths = ["third_party/rsl_rl"]
+ignore = [
+  "./typings",
+  "./src/mjlab/utils/lab_api",
+  "./docs",
+  "./eval_outputs",
+  "./scripts",
+  "./third_party/rsl_rl",
+]
 stubPath = "typings"
+reportWildcardImportFromLibrary = "none"
 
 [tool.ty.environment]
-extra-paths = ["typings"]
+extra-paths = ["typings", "third_party/rsl_rl", "tests"]
 
 [tool.ty.src]
 include = ["src", "tests"]

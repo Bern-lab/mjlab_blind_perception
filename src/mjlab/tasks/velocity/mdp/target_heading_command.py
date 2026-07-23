@@ -23,7 +23,7 @@ class TargetHeadingVelocityCommand(UniformVelocityCommand):
   heading target used by the existing heading controller.
   """
 
-  cfg: TargetHeadingVelocityCommandCfg
+  cfg: TargetHeadingVelocityCommandCfg  # pyright: ignore[reportIncompatibleVariableOverride]
 
   def __init__(
     self,

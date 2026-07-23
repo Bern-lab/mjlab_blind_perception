@@ -18,10 +18,7 @@ from mjlab.utils.spec_config import CollisionCfg
 # MJCF and assets.
 ##
 
-PM01_XML: Path = (
-  MJLAB_SRC_PATH / "asset_zoo" / "robots" / "engineai_pm01" / "pm_v2.xml"
-  # MJLAB_SRC_PATH / "asset_zoo" / "robots" / "booster_k1" / "xmls" / "K1_serial_moonwalk.xml"
-)
+PM01_XML: Path = MJLAB_SRC_PATH / "asset_zoo" / "robots" / "engineai_pm01" / "pm_v2.xml"
 assert PM01_XML.exists()
 
 
@@ -36,7 +33,7 @@ def get_spec() -> mujoco.MjSpec:
   spec.assets = get_assets(spec.meshdir)
   return spec
 
-#######上部分为k1相关参数，以下为pm01参数
+####### PM01 actuator parameters
 joint_armature_hip_pitch = 0.0453
 joint_armature_hip_roll = 0.0453
 joint_armature_hip_yaw = 0.0067
@@ -67,7 +64,7 @@ PM01_ACTUATOR_HIP_PITCH = BuiltinPositionActuatorCfg(
   damping=LOWER_BODY_DAMPING,
 )
 
-# K1 Leg actuators - Hip Roll (4315 motor)
+# PM01 Leg actuators - Hip Roll
 PM01_ACTUATOR_HIP_ROLL = BuiltinPositionActuatorCfg(
   target_names_expr=(".*_HIP_ROLL_.*",),
   effort_limit=LOWER_BODY_EFFORT_LIMIT,
@@ -76,7 +73,7 @@ PM01_ACTUATOR_HIP_ROLL = BuiltinPositionActuatorCfg(
   damping=LOWER_BODY_DAMPING,
 )
 
-# K1 Leg actuators - Hip Yaw (4310 motor)
+# PM01 Leg actuators - Hip Yaw
 PM01_ACTUATOR_HIP_YAW = BuiltinPositionActuatorCfg(
   target_names_expr=(".*_HIP_YAW_.*",),
   effort_limit=UPPER_BODY_EFFORT_LIMIT,

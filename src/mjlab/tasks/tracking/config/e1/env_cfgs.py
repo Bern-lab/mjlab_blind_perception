@@ -1,4 +1,4 @@
-"""Booster K1 flat tracking environment configurations."""
+"""Noetix E1 flat tracking environment configurations."""
 
 from mjlab.asset_zoo.robots.noetix_e1.e1_constants import (
   E1_ACTION_SCALE,

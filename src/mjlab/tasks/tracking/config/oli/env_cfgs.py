@@ -1,4 +1,4 @@
-"""Booster K1 flat tracking environment configurations."""
+"""LimX OLI flat tracking environment configurations."""
 
 from mjlab.asset_zoo.robots.limx_oli.oli_constants import (
   OLI_ACTION_SCALE,

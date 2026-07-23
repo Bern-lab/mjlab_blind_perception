@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 class TeacherTargetHeadingVelocityCommand(UniformVelocityCommand):
-  cfg: TeacherTargetHeadingVelocityCommandCfg
+  cfg: TeacherTargetHeadingVelocityCommandCfg  # pyright: ignore[reportIncompatibleVariableOverride]
 
   def __init__(
     self,
@@ -41,7 +41,7 @@ class TeacherTargetHeadingVelocityCommand(UniformVelocityCommand):
 
   @property
   def target_cfg(self) -> TeacherTargetHeadingVelocityCommandCfg:
-    return cast(TeacherTargetHeadingVelocityCommandCfg, self.cfg)
+    return self.cfg
 
   def _update_metrics(self) -> None:
     super()._update_metrics()
