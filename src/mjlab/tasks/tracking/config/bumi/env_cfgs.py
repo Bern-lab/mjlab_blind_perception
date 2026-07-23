@@ -1,4 +1,4 @@
-"""Booster K1 flat tracking environment configurations."""
+"""Noetix BUMI flat tracking environment configurations."""
 
 from mjlab.asset_zoo.robots.noetix_bumi.bumi_constants import (
   BUMI_ACTION_SCALE,
