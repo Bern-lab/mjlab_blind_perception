@@ -292,7 +292,7 @@ class RslRlTeacherKLCfg:
 class RslRlPpoTeacherKLAlgorithmCfg(RslRlPpoAlgorithmCfg):
   """Config for PPO with frozen-teacher KL regularization."""
 
-  class_name: str = "third_party.rsl_rl.rsl_rl.algorithms.ppo_teacher_kl:PPOTeacherKL"
+  class_name: str = "rsl_rl.algorithms.ppo_teacher_kl:PPOTeacherKL"
   """Algorithm class name resolved by RSL-RL."""
   teacher_kl_cfg: RslRlTeacherKLCfg = field(default_factory=RslRlTeacherKLCfg)
   """Frozen-teacher KL configuration."""

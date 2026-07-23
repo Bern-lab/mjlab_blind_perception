@@ -211,7 +211,7 @@ class G1SlowLatentRewardParams:
   target_tread_midline_progress_scale: float = 0.10
   target_tread_midline_center_scale: float = 0.80
   target_tread_midline_support_scale: float = 0.85
-  target_tread_midline_edge_scale: float = 0.55
+  target_tread_midline_edge_scale: float = 0.35
   target_tread_midline_sole_margin: float = 0.020
   target_tread_midline_support_sigma: float = 0.04
   target_tread_midline_max_progress_step: float = 0.20
@@ -720,6 +720,8 @@ def _configure_latent_observations(
         "ratchet_height_threshold_m": 0.025,
         "ratchet_flat_height_threshold_m": 0.02,
         "ratchet_probe_increment_m": 0.025,
+        "ratchet_collision_margin_m": 0.02,
+        "ratchet_min_interval_width_m": 0.04,
         "ratchet_min_stride_m": params.rewards.toe_stair_min_safe_stride,
         "ratchet_max_stride_m": params.rewards.toe_stair_max_safe_stride,
         "ratchet_reset_flat_pairs": 4,

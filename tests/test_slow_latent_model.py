@@ -224,6 +224,7 @@ def test_shadow_semantic_uses_fixed_state_positions_and_physical_derivations() -
       ],
     ]
   )
+  safe_stride_confidence = torch.tensor([[0.0], [1.0], [0.5], [0.25]])
 
   semantic = model._build_shadow_semantic(
     event_prob,
@@ -231,6 +232,7 @@ def test_shadow_semantic_uses_fixed_state_positions_and_physical_derivations() -
     gate,
     stair_shape,
     safe_stride_interval,
+    safe_stride_confidence,
   )
 
   assert semantic.shape == (4, 16)
@@ -267,8 +269,11 @@ def test_shadow_semantic_uses_fixed_state_positions_and_physical_derivations() -
     semantic[:, 13],
     torch.tensor([0.0, 1.0, 0.5, 0.5]),
   )
-  torch.testing.assert_close(semantic[:, 14], semantic[:, 9])
-  torch.testing.assert_close(semantic[:, 15], torch.zeros(4))
+  torch.testing.assert_close(
+    semantic[:, 14],
+    torch.tensor([0.0, 0.5, 0.625, 0.125]),
+  )
+  torch.testing.assert_close(semantic[:, 15], safe_stride_confidence.squeeze(-1))
 
 
 def test_shadow_semantic_diagnostics_do_not_change_actor_output() -> None:

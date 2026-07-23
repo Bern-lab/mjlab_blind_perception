@@ -686,6 +686,19 @@ class LSTMSlowLatentMLPModel(MLPModel):
       if safe_stride_confidence is None
       else safe_stride_confidence
     )
+    confidence = torch.clamp(confidence, 0.0, 1.0)
+    interval_certainty = 1.0 - stride_width / (
+      self.safe_stride_max - self.safe_stride_min
+    )
+    actor_target_mix = torch.maximum(confidence, interval_certainty.clamp(0.0, 1.0))
+    stride_actor_target = stride_lower + actor_target_mix * (
+      stride_center - stride_lower
+    )
+    stride_actor_target_norm = self._normalize_semantic_value(
+      stride_actor_target,
+      self.safe_stride_min,
+      self.safe_stride_max,
+    )
     shape_semantic = torch.cat(
       [
         tread_depth_norm,
@@ -694,8 +707,8 @@ class LSTMSlowLatentMLPModel(MLPModel):
         stride_upper_norm,
         stride_center_norm,
         stride_width_norm,
-        riser_height_norm,
-        torch.clamp(confidence, 0.0, 1.0),
+        stride_actor_target_norm,
+        confidence,
       ],
       dim=-1,
     )
@@ -1866,6 +1879,19 @@ class _OnnxStairLatentModel(nn.Module):
       0.0,
       1.0,
     )
+    confidence = torch.clamp(safe_stride_confidence, 0.0, 1.0)
+    interval_certainty = 1.0 - stride_width / (
+      self.safe_stride_max - self.safe_stride_min
+    )
+    actor_target_mix = torch.maximum(confidence, interval_certainty.clamp(0.0, 1.0))
+    stride_actor_target = stride_lower + actor_target_mix * (
+      stride_center - stride_lower
+    )
+    stride_actor_target_norm = self._normalize_semantic_value(
+      stride_actor_target,
+      self.safe_stride_min,
+      self.safe_stride_max,
+    )
     shape_semantic = torch.cat(
       [
         tread_depth_norm,
@@ -1874,8 +1900,8 @@ class _OnnxStairLatentModel(nn.Module):
         stride_upper_norm,
         stride_center_norm,
         stride_width_norm,
-        riser_height_norm,
-        torch.clamp(safe_stride_confidence, 0.0, 1.0),
+        stride_actor_target_norm,
+        confidence,
       ],
       dim=-1,
     )

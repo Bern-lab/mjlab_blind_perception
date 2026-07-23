@@ -1,0 +1,297 @@
+digraph slow_latent_structure {
+  graph [
+    rankdir=LR,
+    bgcolor="white",
+    pad="0.35",
+    nodesep="0.55",
+    ranksep="0.75",
+    size="18,10!",
+    ratio=fill,
+    splines=ortho,
+    outputorder=edgesfirst,
+    fontname="Noto Sans CJK SC",
+    label="G1 Blind Rough Target Navigation: SlowLatent / SafeStride 结构",
+    labelloc=t,
+    fontsize=24
+  ];
+
+  node [
+    shape=box,
+    style="rounded,filled",
+    penwidth=1.4,
+    color="#334155",
+    fillcolor="#f8fafc",
+    fontname="Noto Sans CJK SC",
+    fontsize=12,
+    margin="0.12,0.08"
+  ];
+
+  edge [
+    color="#475569",
+    arrowsize=0.8,
+    penwidth=1.2,
+    fontname="Noto Sans CJK SC",
+    fontsize=10
+  ];
+
+  subgraph cluster_obs {
+    label="Deployable Observation / 可部署观测";
+    color="#94a3b8";
+    penwidth=1.4;
+    style="rounded";
+
+    actor_obs [
+      label="actor_obs\n本体状态 / command / gait 等",
+      fillcolor="#ecfeff"
+    ];
+
+    latent_obs [
+      label="latent_obs = 173",
+      fillcolor="#eef2ff",
+      penwidth=1.8
+    ];
+
+    stair_latent [
+      label="stair_latent = 93\n91 proprio + FK toe/heel/vel\n+ 2 gait phase",
+      fillcolor="#eef2ff"
+    ];
+
+    foot_summary [
+      label="foot_event_summary = 80",
+      fillcolor="#eef2ff",
+      penwidth=1.8
+    ];
+
+    pair_summary [
+      label="[0:50]\nadjacent L/R footprint pairs\n相邻左右脚印几何",
+      fillcolor="#f1f5f9"
+    ];
+
+    toe_summary [
+      label="[50:60]\ntoe-riser cue\n含 same-foot-before-toe stride\n脚尖撞立面形成上界线索",
+      fillcolor="#fff7ed",
+      penwidth=1.8
+    ];
+
+    geom_stats [
+      label="[60:70]\ngeometry stats\nstride / height / trend",
+      fillcolor="#f1f5f9"
+    ];
+
+    ratchet [
+      label="[70:80]\ninterval ratchet\nactive, lower_s, actor_target_s,\nupper_s, interval_confirmed,\ncollision_upper_s, confidence, age",
+      fillcolor="#dcfce7",
+      penwidth=2.0
+    ];
+
+    stair_latent -> latent_obs;
+    pair_summary -> foot_summary;
+    toe_summary -> foot_summary;
+    geom_stats -> foot_summary;
+    ratchet -> foot_summary;
+    foot_summary -> latent_obs;
+  }
+
+  subgraph cluster_ratchet {
+    label="Foot Summary 内的闭环逻辑";
+    color="#86efac";
+    penwidth=1.4;
+    style="rounded";
+
+    no_hit [
+      label="未撞到 riser\nsame-foot 上台阶步幅有效",
+      fillcolor="#f0fdf4"
+    ];
+
+    grow_lower [
+      label="lower_s 上调\nprobe_target_s += 2.5cm",
+      fillcolor="#dcfce7"
+    ];
+
+    toe_hit [
+      label="toe-riser hit\n脚尖撞到立面",
+      fillcolor="#ffedd5",
+      penwidth=1.8
+    ];
+
+    close_interval [
+      label="upper_s = toe_hit_stride - 2cm\ninterval_confirmed = 1",
+      fillcolor="#fed7aa",
+      penwidth=1.8
+    ];
+
+    center_target [
+      label="actor_target_s = (lower_s + upper_s) / 2\n撞后收步到安全中心",
+      fillcolor="#bbf7d0",
+      penwidth=2.0
+    ];
+
+    no_hit -> grow_lower;
+    toe_hit -> close_interval;
+    grow_lower -> center_target [style=dashed, label="open interval 时继续探"];
+    close_interval -> center_target [label="confirmed interval"];
+  }
+
+  subgraph cluster_model {
+    label="SlowLatent Core";
+    color="#93c5fd";
+    penwidth=1.4;
+    style="rounded";
+
+    norm [
+      label="latent normalizer",
+      fillcolor="#eff6ff"
+    ];
+
+    encoder [
+      label="MLP latent_encoder",
+      fillcolor="#dbeafe"
+    ];
+
+    lstm [
+      label="LSTM\nhidden h = 128",
+      fillcolor="#bfdbfe",
+      penwidth=1.8
+    ];
+
+    gate_heads [
+      label="event / stair heads\nwrite / memory gate",
+      fillcolor="#e0f2fe"
+    ];
+
+    z_candidate [
+      label="candidate z",
+      fillcolor="#e0f2fe"
+    ];
+
+    z_memory [
+      label="gated z_memory = 24\nz_state = 8\nz_shape = 16",
+      fillcolor="#bfdbfe",
+      penwidth=2.0
+    ];
+
+    latent_obs -> norm;
+    norm -> encoder;
+    encoder -> lstm;
+    lstm -> gate_heads;
+    lstm -> z_candidate;
+    gate_heads -> z_memory [label="alpha / mode"];
+    z_candidate -> z_memory;
+    z_memory -> z_memory [label="hold / write / memory", style=dashed];
+  }
+
+  subgraph cluster_heads {
+    label="Auxiliary Prediction Heads / 预测头";
+    color="#c4b5fd";
+    penwidth=1.4;
+    style="rounded";
+
+    future_heads [
+      label="future heads\ncollision_risk\nsafe_landing_quality",
+      fillcolor="#faf5ff"
+    ];
+
+    shape_head [
+      label="stair_shape_head\ninput: z_shape + h\npredict tread_depth, riser_height",
+      fillcolor="#f3e8ff",
+      penwidth=1.8
+    ];
+
+    stride_head [
+      label="safe_stride_head\ninput: z_shape + h + gait phase\npredict lower_s, upper_s, confidence",
+      fillcolor="#f3e8ff",
+      penwidth=1.8
+    ];
+
+    shape_pred [
+      label="stair shape\n(tread depth, riser height)",
+      fillcolor="#ede9fe"
+    ];
+
+    stride_pred [
+      label="SafeStride interval\nlower_s / upper_s / center_s\nconfidence",
+      fillcolor="#ede9fe",
+      penwidth=2.0
+    ];
+
+    z_memory -> future_heads;
+    z_memory -> shape_head;
+    lstm -> shape_head [style=dashed];
+    z_memory -> stride_head;
+    lstm -> stride_head [style=dashed];
+    stair_latent -> stride_head [style=dashed, label="gait phase slice"];
+    shape_head -> shape_pred;
+    stride_head -> stride_pred;
+  }
+
+  subgraph cluster_actor {
+    label="Actor Conditioning / 行为约束";
+    color="#fbbf24";
+    penwidth=1.4;
+    style="rounded";
+
+    semantic [
+      label="actor semantic = 16\nstate semantic 8\n+ shape / SafeStride semantic 8",
+      fillcolor="#fef3c7",
+      penwidth=1.8
+    ];
+
+    semantic_stride [
+      label="shape / SafeStride semantic 8\n1 tread_depth_norm\n2 riser_height_norm\n3 lower_norm\n4 upper_norm\n5 center_norm\n6 width_norm\n7 actor_target_norm\n8 confidence",
+      fillcolor="#fde68a",
+      penwidth=1.8
+    ];
+
+    target_mix [
+      label="actor_target_norm\nwide/low confidence: closer to lower/probe\nnarrow/confirmed: closer to center",
+      fillcolor="#fef9c3",
+      penwidth=1.8
+    ];
+
+    actor_mlp [
+      label="Actor MLP",
+      fillcolor="#fffbeb",
+      penwidth=1.8
+    ];
+
+    action [
+      label="actions\njoint targets",
+      fillcolor="#fee2e2",
+      penwidth=1.8
+    ];
+
+    shape_pred -> semantic;
+    stride_pred -> semantic_stride;
+    semantic_stride -> semantic;
+    semantic_stride -> target_mix;
+    target_mix -> semantic;
+    actor_obs -> actor_mlp;
+    z_memory -> actor_mlp;
+    semantic -> actor_mlp;
+    actor_mlp -> action;
+  }
+
+  subgraph cluster_train {
+    label="Training Labels Only / 训练监督，不直接给 actor";
+    color="#cbd5e1";
+    style="rounded,dashed";
+
+    labels [
+      label="privileged labels\nstair state / shape\nsafe stride lower-upper\ninterval valid\nfuture risk / quality",
+      fillcolor="#f8fafc"
+    ];
+
+    aux_losses [
+      label="aux losses\n让 latent 学会预测几何和安全区间",
+      fillcolor="#f8fafc"
+    ];
+
+    labels -> aux_losses;
+    aux_losses -> future_heads [style=dashed, label="supervise"];
+    aux_losses -> shape_head [style=dashed];
+    aux_losses -> stride_head [style=dashed];
+  }
+
+  ratchet -> latent_obs [ltail=cluster_ratchet, style=dashed, label="summary cues"];
+  center_target -> stride_pred [style=dashed, color="#16a34a", label="要被 latent 预测/传给 actor"];
+}

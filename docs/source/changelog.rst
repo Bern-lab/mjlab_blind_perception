@@ -103,10 +103,30 @@ Added
   exporter and trainer for diagnosing whether true foot/tread overlap anchors
   make stair depth learnable from otherwise blind histories, including a
   two-branch fusion probe and coarse three-group depth diagnostics.
+- Added SlowLatent foot-event diagnostics for same-foot stride monotonicity,
+  including latest-step growth and sample coverage, to track whether stair
+  probes are landing progressively farther without adding reward shaping.
 
 Changed
 ^^^^^^^
 
+- SlowLatent foot-event ratchet hints now compare each new footprint with the
+  previous footprint from the same foot, so post-entry stair probes use the
+  actual two-layer swing stride instead of adjacent left-right tread spacing.
+- SlowLatent foot-event ratchet hints now close a two-sided stride interval from
+  same-foot toe-riser hits, exposing a collision-derived upper bound and
+  center target so the actor can reduce stride after contact instead of only
+  increasing the probe distance.
+- SlowLatent actor semantic conditioning now replaces the duplicate riser-height
+  channel with an interval-aware SafeStride target. Wide, low-confidence
+  predictions expose the lower/probe stride, while confident or narrow
+  intervals expose the predicted center.
+- Stair attempt tracking now advances to any observed higher tread layer, not
+  only the expected layer, keeping the target sequence aligned after skipped
+  landings without adding another reward term.
+- G1 SlowLatent target-tread midline shaping now caps the combined edge penalty
+  and lowers its default edge scale, keeping center/full-support landing reward
+  useful without adding a separate probe reward.
 - Stair evidence analysis now rejects mis-associated riser contacts, reports
   episode-paired support changes, and evaluates oracle-layer multi-step depth
   estimates causally after two through five independently observed layers.

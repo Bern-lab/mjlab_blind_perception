@@ -2102,6 +2102,9 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
           self._support_layer,
         )
       )
+      completed_progress_tread = attempt_complete & (
+        completed_touchdown_layer > self._support_layer
+      )
       completed_skip = (
         attempt_complete & (completed_touchdown_layer > 0) & (completed_delta >= 2)
       )
@@ -2119,15 +2122,23 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       if bool(torch.any(attempt_complete).item()):
         completed_ids = attempt_complete.nonzero(as_tuple=False).squeeze(-1)
         previous_target = target_foot[completed_ids]
-        next_target, next_reached, next_layer = _advance_stair_attempt(
-          previous_target,
-          self._support_layer[completed_ids],
-          self._expected_layer[completed_ids],
+        observed_progress_layer = torch.where(
           self._attempt_expected_tread_contact[completed_ids],
+          self._expected_layer[completed_ids],
+          completed_touchdown_layer[completed_ids],
         )
-        reached_expected = self._attempt_expected_tread_contact[completed_ids]
+        reached_progress_tread = (
+          observed_progress_layer > self._support_layer[completed_ids]
+        )
+        next_target = 1 - previous_target
+        next_reached = torch.where(
+          reached_progress_tread,
+          observed_progress_layer,
+          self._support_layer[completed_ids],
+        )
+        next_layer = next_reached + 1
         self._support_foot[completed_ids] = torch.where(
-          reached_expected,
+          reached_progress_tread,
           previous_target,
           self._support_foot[completed_ids],
         )
@@ -2547,6 +2558,9 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       log["Metrics/stair_attempt_expected_tread_reached_ratio"] = (
         completed_expected_tread.float().sum() / attempt_complete_count
       )
+      log["Metrics/stair_attempt_progress_tread_reached_ratio"] = (
+        completed_progress_tread.float().sum() / attempt_complete_count
+      )
       log["Metrics/stair_attempt_expected_tread_partial_ratio"] = (
         completed_expected_tread & ~completed_full_support
       ).float().sum() / completed_tread_count
@@ -2857,6 +2871,17 @@ class target_tread_midline_shaping(_StepBoundaryFootVolume):
     support_score = 1.0 / (1.0 + torch.square(violation / sigma.clamp_min(1.0e-6)))
     return sole_center_s, support_score, rear_violation, front_violation, violation
 
+  @staticmethod
+  def _edge_penalty(
+    center_edge_error: torch.Tensor,
+    support_edge_error: torch.Tensor,
+  ) -> torch.Tensor:
+    raw_penalty = (
+      torch.clamp(center_edge_error, max=1.0).square()
+      + torch.clamp(support_edge_error, max=1.0).square()
+    )
+    return torch.clamp(raw_penalty, max=1.0)
+
   def __call__(
     self,
     env,
@@ -3008,9 +3033,9 @@ class target_tread_midline_shaping(_StepBoundaryFootVolume):
       1.0e-6,
     )
     support_edge_error = support_violation / max(sole_margin, 1.0e-6)
-    edge_penalty = (
-      torch.clamp(center_edge_error, max=1.0).square()
-      + torch.clamp(support_edge_error, max=1.0).square()
+    edge_penalty = self._edge_penalty(
+      center_edge_error,
+      support_edge_error,
     )
 
     phi = 0.5 * center_score + 0.5 * support_score

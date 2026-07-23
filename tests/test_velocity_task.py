@@ -1,5 +1,6 @@
 """Tests specific to velocity tasks."""
 
+import importlib
 from typing import cast
 
 import pytest
@@ -62,6 +63,16 @@ MAIN_BRANCH_VELOCITY_TASK_IDS = (
   "Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1",
   "Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1",
 )
+
+
+def test_teacherkl_algorithm_class_path_imports_from_installed_rsl_rl() -> None:
+  algorithm_cfg = RslRlPpoTeacherKLAlgorithmCfg()
+  module_name, class_name = algorithm_cfg.class_name.split(":")
+
+  algorithm_cls = getattr(importlib.import_module(module_name), class_name)
+
+  assert algorithm_cfg.class_name == "rsl_rl.algorithms.ppo_teacher_kl:PPOTeacherKL"
+  assert algorithm_cls.__name__ == "PPOTeacherKL"
 
 
 @pytest.fixture(scope="module")
@@ -375,6 +386,8 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert foot_event_params["include_raw_memory"] is False
   assert foot_event_params["ratchet_height_threshold_m"] == 0.025
   assert foot_event_params["ratchet_probe_increment_m"] == 0.025
+  assert foot_event_params["ratchet_collision_margin_m"] == 0.02
+  assert foot_event_params["ratchet_min_interval_width_m"] == 0.04
   assert foot_event_params["ratchet_min_stride_m"] == 0.10
   assert foot_event_params["ratchet_max_stride_m"] == 0.55
   assert "latent_labels" in env_cfg.observations
@@ -455,7 +468,7 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert midline_reward.params["progress_scale"] == 0.10
   assert midline_reward.params["center_scale"] == 0.80
   assert midline_reward.params["support_scale"] == 0.85
-  assert midline_reward.params["edge_scale"] == 0.55
+  assert midline_reward.params["edge_scale"] == 0.35
   assert midline_reward.params["sole_margin"] == 0.020
   assert midline_reward.params["support_sigma"] == 0.04
   assert midline_reward.params["max_progress_step"] == 0.20
@@ -546,6 +559,21 @@ def test_target_tread_midline_center_score_is_dense_and_centered() -> None:
 
   assert scores[0].item() == pytest.approx(1.0)
   assert scores[0] > scores[1] > scores[2] > 0.0
+
+
+def test_target_tread_midline_edge_penalty_is_bounded() -> None:
+  center_error = torch.tensor([0.0, 0.5, 1.0, 2.0])
+  support_error = torch.tensor([0.0, 0.5, 1.0, 2.0])
+
+  penalty = target_tread_midline_shaping._edge_penalty(
+    center_error,
+    support_error,
+  )
+
+  torch.testing.assert_close(
+    penalty,
+    torch.tensor([0.0, 0.5, 1.0, 1.0]),
+  )
 
 
 def test_semantic_v2_shadow_runner_trains_heads_without_resuming_optimizer() -> None:
