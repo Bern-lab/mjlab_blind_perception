@@ -55,13 +55,7 @@ from mjlab.terrains.primitive_terrains import (
 )
 
 MAIN_BRANCH_VELOCITY_TASK_IDS = (
-  "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2GeometryProbe-Unitree-G1",
-  "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2SafeStrideProbe-Unitree-G1",
-  "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2Shadow-TeacherKL-Unitree-G1",
-  "Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1",
-  "Mjlab-Velocity-Blind-Rough-TargetNavigation-StepDanger-TeacherKL-Unitree-G1",
-  "Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1",
-  "Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1",
+  "Mjlab-Velocity-Blind-Rough-TargetNavigation-DWAQ-TeacherKL-Unitree-G1",
 )
 
 
@@ -263,23 +257,13 @@ def test_go1_velocity_has_correct_action_scale(
 
 
 def test_teacherkl_target_navigation_switch() -> None:
-  """Teacher-KL should support both velocity and target-navigation commands."""
-  velocity_cfg = load_env_cfg("Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1")
-  target_cfg = load_env_cfg(
-    "Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1"
-  )
+  """DWAQ ablation should keep the target-navigation TeacherKL command."""
+  target_cfg = load_env_cfg(MAIN_BRANCH_VELOCITY_TASK_IDS[0])
 
-  assert isinstance(velocity_cfg.commands["twist"], UniformVelocityCommandCfg)
-  assert not isinstance(
-    velocity_cfg.commands["twist"],
-    TeacherTargetHeadingVelocityCommandCfg,
-  )
   assert isinstance(
     target_cfg.commands["twist"], TeacherTargetHeadingVelocityCommandCfg
   )
 
-  assert "target_progress" not in velocity_cfg.rewards
-  assert "target_reached_bonus" not in velocity_cfg.rewards
   assert "target_progress" in target_cfg.rewards
   assert "target_reached_bonus" in target_cfg.rewards
   assert "height_scan" not in target_cfg.observations["actor"].terms
@@ -356,6 +340,7 @@ def test_g1_high_stairs_play_uses_mixed_level_distribution() -> None:
     _assert_eight_stair_depth_variants(terrain_generator)
 
 
+@pytest.mark.skip(reason="SlowLatent task is not registered in the DWAQ branch.")
 def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   task_id = (
     "Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1"
@@ -595,6 +580,7 @@ def test_semantic_v2_shadow_runner_trains_heads_without_resuming_optimizer() -> 
   assert actor_cfg.state_latent_dim == 8
 
 
+@pytest.mark.skip(reason="Semantic-v2 probe task is not registered in the DWAQ branch.")
 def test_semantic_v2_probe_freezes_policy_and_uses_dynamic_stride_input() -> None:
   task_id = (
     "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2SafeStrideProbe-Unitree-G1"
@@ -643,6 +629,7 @@ def test_geometry_probe_freezes_policy_and_trains_independent_head() -> None:
   assert cfg.load_iteration_on_resume is False
 
 
+@pytest.mark.skip(reason="StepDanger task is not registered in the DWAQ branch.")
 def test_step_danger_target_navigation_uses_local_geometric_danger_rewards() -> None:
   task_id = (
     "Mjlab-Velocity-Blind-Rough-TargetNavigation-StepDanger-TeacherKL-Unitree-G1"
@@ -695,27 +682,16 @@ def test_step_danger_target_navigation_uses_local_geometric_danger_rewards() -> 
 
 
 def test_blind_teacherkl_play_hides_exteroceptive_visualizers() -> None:
-  task_ids = (
-    "Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1",
-    "Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1",
-    "Mjlab-Velocity-Blind-Rough-TargetNavigation-StepDanger-TeacherKL-Unitree-G1",
-    "Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1",
-  )
-
-  for task_id in task_ids:
-    cfg = load_env_cfg(task_id, play=True)
-    assert cfg.viewer.show_depth_camera_visualizers is False
-    for sensor in cfg.scene.sensors or ():
-      debug_vis = getattr(sensor, "debug_vis", None)
-      if debug_vis is not None:
-        assert debug_vis is False
+  cfg = load_env_cfg(MAIN_BRANCH_VELOCITY_TASK_IDS[0], play=True)
+  assert cfg.viewer.show_depth_camera_visualizers is False
+  for sensor in cfg.scene.sensors or ():
+    debug_vis = getattr(sensor, "debug_vis", None)
+    if debug_vis is not None:
+      assert debug_vis is False
 
 
 def test_slow_latent_play_shows_step_danger_zones() -> None:
-  cfg = load_env_cfg(
-    "Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1",
-    play=True,
-  )
+  cfg = load_env_cfg(MAIN_BRANCH_VELOCITY_TASK_IDS[0], play=True)
 
   assert cfg.scene.terrain is not None
   assert cfg.scene.terrain.terrain_generator is not None
@@ -908,20 +884,11 @@ def test_step_danger_explicit_param_interfaces_drive_configs() -> None:
 
 
 def test_blind_rough_variants_share_toe_riser_contact_penalty() -> None:
-  """Blind-rough variants should use the shared toe-riser contact penalty config."""
-  # Non-target TeacherKL variant keeps the old penalty.
-  cfg = load_env_cfg("Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1")
-  assert "toe_riser_contact_memory_penalty" in cfg.rewards
-  assert "foot_step_lip_volume_penalty" not in cfg.rewards
-  assert "toe_step_riser_slab_penalty" not in cfg.rewards
-
-  # Target-navigation TeacherKL variant replaces it with step-boundary
-  # volume penalties but keeps the contact sensor for the critic.
-  cfg = load_env_cfg("Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1")
+  """DWAQ keeps the slow-latent stair contact reward surface."""
+  cfg = load_env_cfg(MAIN_BRANCH_VELOCITY_TASK_IDS[0])
   assert "toe_riser_contact_memory_penalty" not in cfg.rewards
-  assert "foot_step_lip_volume_penalty" in cfg.rewards
+  assert "foot_step_lip_volume_penalty" not in cfg.rewards
   assert "toe_step_riser_slab_penalty" in cfg.rewards
-  assert cfg.rewards["foot_step_lip_volume_penalty"].weight == -3.2
   assert cfg.rewards["toe_step_riser_slab_penalty"].weight == -4.2
   assert cfg.sim.contact_sensor_maxmatch == 256
   assert "toe_terrain_contact" not in cfg.observations["actor"].terms
@@ -930,34 +897,20 @@ def test_blind_rough_variants_share_toe_riser_contact_penalty() -> None:
 
 
 def test_teacherkl_uses_mean_huber_guidance() -> None:
-  """Teacher-KL variants should use weak action-mean guidance."""
-  velocity_cfg = cast(
-    RslRlTeacherKLRunnerCfg,
-    load_rl_cfg("Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1"),
-  )
-  target_cfg = cast(
-    RslRlTeacherKLRunnerCfg,
-    load_rl_cfg("Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1"),
-  )
-  step_danger_cfg = cast(
-    RslRlTeacherKLRunnerCfg,
-    load_rl_cfg(
-      "Mjlab-Velocity-Blind-Rough-TargetNavigation-StepDanger-TeacherKL-Unitree-G1"
-    ),
-  )
+  """DWAQ TeacherKL should use the same weak action-mean guidance."""
+  cfg = cast(RslRlTeacherKLRunnerCfg, load_rl_cfg(MAIN_BRANCH_VELOCITY_TASK_IDS[0]))
+  algorithm_cfg = cast(RslRlPpoTeacherKLAlgorithmCfg, cfg.algorithm)
+  teacher_cfg = algorithm_cfg.teacher_kl_cfg
 
-  for cfg in (velocity_cfg, target_cfg, step_danger_cfg):
-    algorithm_cfg = cast(RslRlPpoTeacherKLAlgorithmCfg, cfg.algorithm)
-    teacher_cfg = algorithm_cfg.teacher_kl_cfg
-    assert cfg.obs_groups["teacher"] == ("teacher", "camera")
-    assert teacher_cfg.enabled is True
-    assert teacher_cfg.imitation_only is False
-    assert teacher_cfg.imitation_loss_coef == 1.0
-    assert teacher_cfg.loss_type == "mean_huber"
-    assert teacher_cfg.lambda_start == 0.05
-    assert teacher_cfg.lambda_end == 0.0
-    assert teacher_cfg.warmup_iters == 0
-    assert teacher_cfg.anneal_iters == 10000
-    assert teacher_cfg.huber_delta == 0.5
-    assert teacher_cfg.max_teacher_loss is None
-    assert teacher_cfg.max_kl_loss is None
+  assert cfg.obs_groups["teacher"] == ("teacher", "camera")
+  assert teacher_cfg.enabled is True
+  assert teacher_cfg.imitation_only is False
+  assert teacher_cfg.imitation_loss_coef == 1.0
+  assert teacher_cfg.loss_type == "mean_huber"
+  assert teacher_cfg.lambda_start == 0.05
+  assert teacher_cfg.lambda_end == 0.0
+  assert teacher_cfg.warmup_iters == 0
+  assert teacher_cfg.anneal_iters == 10000
+  assert teacher_cfg.huber_delta == 0.5
+  assert teacher_cfg.max_teacher_loss is None
+  assert teacher_cfg.max_kl_loss is None

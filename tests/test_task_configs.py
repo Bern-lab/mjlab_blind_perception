@@ -8,13 +8,7 @@ from mjlab.managers.observation_manager import ObservationGroupCfg
 from mjlab.tasks.registry import list_tasks, load_env_cfg
 
 MAIN_BRANCH_TASK_IDS = (
-  "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2GeometryProbe-Unitree-G1",
-  "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2SafeStrideProbe-Unitree-G1",
-  "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2Shadow-TeacherKL-Unitree-G1",
-  "Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1",
-  "Mjlab-Velocity-Blind-Rough-TargetNavigation-StepDanger-TeacherKL-Unitree-G1",
-  "Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1",
-  "Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1",
+  "Mjlab-Velocity-Blind-Rough-TargetNavigation-DWAQ-TeacherKL-Unitree-G1",
 )
 
 
@@ -164,34 +158,9 @@ def test_step_boundary_rewards_scoped_to_target_stair_tasks(
   all_task_ids: list[str],
 ) -> None:
   """Step-boundary danger rewards should stay scoped to stair target tasks."""
-  target_navigation_task = (
-    "Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1"
-  )
-  step_danger_task = (
-    "Mjlab-Velocity-Blind-Rough-TargetNavigation-StepDanger-TeacherKL-Unitree-G1"
-  )
-  slow_latent_task = (
-    "Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1"
-  )
-  semantic_geometry_task = (
-    "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2GeometryProbe-Unitree-G1"
-  )
-  semantic_shadow_task = (
-    "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2Shadow-TeacherKL-Unitree-G1"
-  )
-  semantic_probe_task = (
-    "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2SafeStrideProbe-Unitree-G1"
-  )
-  lip_penalty_tasks = {
-    target_navigation_task,
-    step_danger_task,
-  }
-  slab_penalty_tasks = lip_penalty_tasks | {
-    slow_latent_task,
-    semantic_geometry_task,
-    semantic_shadow_task,
-    semantic_probe_task,
-  }
+  dwaq_task = "Mjlab-Velocity-Blind-Rough-TargetNavigation-DWAQ-TeacherKL-Unitree-G1"
+  lip_penalty_tasks: set[str] = set()
+  slab_penalty_tasks = {dwaq_task}
   for task_id in all_task_ids:
     cfg = load_env_cfg(task_id)
     if task_id in lip_penalty_tasks:

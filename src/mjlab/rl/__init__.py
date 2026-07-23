@@ -1,10 +1,16 @@
 from mjlab.rl.config import RslRlBaseRunnerCfg as RslRlBaseRunnerCfg
 from mjlab.rl.config import (
+  RslRlDwaqModelCfg as RslRlDwaqModelCfg,
+)
+from mjlab.rl.config import (
   RslRlGatedStairLatentModelCfg as RslRlGatedStairLatentModelCfg,
 )
 from mjlab.rl.config import RslRlModelCfg as RslRlModelCfg
 from mjlab.rl.config import RslRlOnPolicyRunnerCfg as RslRlOnPolicyRunnerCfg
 from mjlab.rl.config import RslRlPpoAlgorithmCfg as RslRlPpoAlgorithmCfg
+from mjlab.rl.config import (
+  RslRlPpoDwaqTeacherKLAlgorithmCfg as RslRlPpoDwaqTeacherKLAlgorithmCfg,
+)
 from mjlab.rl.config import (
   RslRlPpoTeacherKLAlgorithmCfg as RslRlPpoTeacherKLAlgorithmCfg,
 )

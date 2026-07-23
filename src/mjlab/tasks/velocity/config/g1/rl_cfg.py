@@ -1,13 +1,17 @@
 """RL configuration for Unitree G1 velocity task."""
 
+from copy import deepcopy
 from dataclasses import dataclass, field
+from dataclasses import fields as dataclass_fields
 from typing import cast
 
 from mjlab.rl import (
+  RslRlDwaqModelCfg,
   RslRlGatedStairLatentModelCfg,
   RslRlModelCfg,
   RslRlOnPolicyRunnerCfg,
   RslRlPpoAlgorithmCfg,
+  RslRlPpoDwaqTeacherKLAlgorithmCfg,
   RslRlPpoTeacherKLAlgorithmCfg,
   RslRlTeacherKLCfg,
   RslRlTeacherKLRunnerCfg,
@@ -200,6 +204,36 @@ def _unitree_g1_depth_policy_model_cfg() -> RslRlModelCfg:
       "std_type": "scalar",
     },
   )
+
+
+def _unitree_g1_dwaq_policy_model_cfg() -> RslRlDwaqModelCfg:
+  return RslRlDwaqModelCfg(
+    hidden_dims=(512, 256, 128),
+    activation="elu",
+    obs_normalization=True,
+    distribution_cfg={
+      "class_name": "GaussianDistribution",
+      "init_std": 1.0,
+      "std_type": "scalar",
+    },
+    history_obs_set="dwaq_history",
+    encoder_hidden_dims=(128, 64),
+    decoder_hidden_dims=(64, 128),
+    velocity_dim=3,
+    latent_dim=16,
+    cenet_out_dim=19,
+  )
+
+
+def _clone_teacherkl_algorithm_as_dwaq(
+  cfg: RslRlPpoTeacherKLAlgorithmCfg,
+) -> RslRlPpoDwaqTeacherKLAlgorithmCfg:
+  kwargs = {
+    cfg_field.name: deepcopy(getattr(cfg, cfg_field.name))
+    for cfg_field in dataclass_fields(RslRlPpoTeacherKLAlgorithmCfg)
+    if cfg_field.init and cfg_field.name != "class_name"
+  }
+  return RslRlPpoDwaqTeacherKLAlgorithmCfg(**kwargs)
 
 
 def _unitree_g1_gated_stair_latent_policy_model_cfg(
@@ -683,6 +717,24 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
   if max_iterations is not None:
     cfg.max_iterations = max_iterations
   cfg.experiment_name = experiment_name
+  return cfg
+
+
+def unitree_g1_blind_rough_target_navigation_dwaq_teacherkl_runner_cfg() -> (
+  RslRlTeacherKLRunnerCfg
+):
+  """Create the DWAQ ablation config with the same TeacherKL training setup."""
+  cfg = unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg()
+  old_algorithm = cast(RslRlPpoTeacherKLAlgorithmCfg, cfg.algorithm)
+  cfg.actor = _unitree_g1_dwaq_policy_model_cfg()
+  cfg.algorithm = _clone_teacherkl_algorithm_as_dwaq(old_algorithm)
+  cfg.obs_groups = {
+    "actor": ("actor",),
+    "dwaq_history": ("dwaq_history",),
+    "critic": ("critic",),
+    "teacher": ("teacher", "camera"),
+  }
+  cfg.experiment_name = "g1_blind_rough_target_navigation_dwaq_teacherkl_ablation"
   return cfg
 
 

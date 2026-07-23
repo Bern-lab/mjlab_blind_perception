@@ -196,6 +196,28 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
 
 
 @dataclass
+class RslRlDwaqModelCfg(RslRlModelCfg):
+  """Config for a DWAQ beta-VAE context encoder + MLP actor model."""
+
+  class_name: str = "mjlab.rl.dwaq_model:DWAQMLPModel"
+  """Qualified model class name for the DWAQ actor."""
+  history_obs_set: str = "dwaq_history"
+  """Observation set used by the DWAQ context encoder."""
+  encoder_hidden_dims: Tuple[int, ...] = (128, 64)
+  """Hidden dimensions of the DWAQ context encoder."""
+  decoder_hidden_dims: Tuple[int, ...] = (64, 128)
+  """Hidden dimensions of the DWAQ decoder."""
+  velocity_dim: int = 3
+  """Velocity-estimation channels in the DWAQ code."""
+  latent_dim: int = 16
+  """Unsupervised latent channels in the DWAQ code."""
+  cenet_out_dim: int | None = 19
+  """DWAQ code dimension, matching velocity_dim + latent_dim in G1DWAQ_Lab."""
+  sample_code_in_eval: bool = False
+  """Whether deterministic eval/export should sample the VAE code."""
+
+
+@dataclass
 class RslRlPpoAlgorithmCfg:
   """Config for the PPO algorithm."""
 
@@ -306,6 +328,24 @@ class RslRlPpoTeacherKLAlgorithmCfg(RslRlPpoAlgorithmCfg):
   """Learning rate for the frozen-latent geometry Probe."""
   geometry_probe_permute_depth_labels: bool = False
   """Train depth against deterministically permuted labels as a null control."""
+
+
+@dataclass
+class RslRlPpoDwaqTeacherKLAlgorithmCfg(RslRlPpoTeacherKLAlgorithmCfg):
+  """Config for Teacher-KL PPO with the DWAQ beta-VAE auxiliary loss."""
+
+  class_name: str = "mjlab.rl.dwaq_algorithm:DWAQPPOTeacherKL"
+  """Algorithm class name resolved by RSL-RL."""
+  dwaq_velocity_target_groups: Tuple[str, ...] = ("dwaq_velocity_target",)
+  """Observation groups containing the privileged velocity target."""
+  dwaq_beta: float = 1.0
+  """Beta multiplier for DWAQ latent KL divergence."""
+  dwaq_autoencoder_loss_coef: float = 1.0
+  """Overall coefficient for the DWAQ auxiliary loss."""
+  dwaq_velocity_loss_coef: float = 1.0
+  """Coefficient for supervised velocity-estimation MSE."""
+  dwaq_reconstruction_loss_coef: float = 1.0
+  """Coefficient for current-observation reconstruction MSE."""
 
 
 @dataclass
