@@ -35,6 +35,10 @@ class TeacherTargetHeadingVelocityCommand(UniformVelocityCommand):
     self.target_reached = torch.zeros(
       self.num_envs, dtype=torch.bool, device=self.device
     )
+    self.target_command_in_episode = torch.zeros(
+      self.num_envs, dtype=torch.bool, device=self.device
+    )
+    self.target_reached_in_episode = torch.zeros_like(self.target_command_in_episode)
 
     self.metrics["target_distance"] = torch.zeros(self.num_envs, device=self.device)
     self.metrics["target_reached"] = torch.zeros(self.num_envs, device=self.device)
@@ -42,6 +46,12 @@ class TeacherTargetHeadingVelocityCommand(UniformVelocityCommand):
   @property
   def target_cfg(self) -> TeacherTargetHeadingVelocityCommandCfg:
     return self.cfg
+
+  def reset(self, env_ids: torch.Tensor | slice | None) -> dict[str, float]:
+    assert isinstance(env_ids, torch.Tensor)
+    self.target_command_in_episode[env_ids] = False
+    self.target_reached_in_episode[env_ids] = False
+    return super().reset(env_ids)
 
   def _update_metrics(self) -> None:
     super()._update_metrics()
@@ -102,9 +112,11 @@ class TeacherTargetHeadingVelocityCommand(UniformVelocityCommand):
     stand_ids = env_ids[self.is_standing_env[env_ids]]
     if len(stand_ids) > 0:
       self.vel_command_b[stand_ids, :] = 0.0
+      self._sample_targets(stand_ids)
 
     target_ids = env_ids[self.is_target_env[env_ids]]
     if len(target_ids) > 0:
+      self.target_command_in_episode[target_ids] = True
       self._sample_targets(target_ids)
 
   def _update_command(self) -> None:
@@ -132,6 +144,16 @@ class TeacherTargetHeadingVelocityCommand(UniformVelocityCommand):
         target_delta[:, 1], target_delta[:, 0]
       )
 
+    standing_env_ids = self.is_standing_env.nonzero(as_tuple=False).flatten()
+    if len(standing_env_ids) > 0:
+      stand_delta = (
+        self.target_pos_w[standing_env_ids, :2]
+        - self.robot.data.root_link_pos_w[standing_env_ids, :2]
+      )
+      self.heading_target[standing_env_ids] = torch.atan2(
+        stand_delta[:, 1], stand_delta[:, 0]
+      )
+
     self.heading_error = wrap_to_pi(self.heading_target - self.robot.data.heading_w)
     heading_env_ids = self.is_heading_env.nonzero(as_tuple=False).flatten()
     if len(heading_env_ids) > 0:
@@ -141,16 +163,26 @@ class TeacherTargetHeadingVelocityCommand(UniformVelocityCommand):
         max=cfg.ranges.ang_vel_z[1],
       )
 
-    standing_env_ids = self.is_standing_env.nonzero(as_tuple=False).flatten()
     if len(standing_env_ids) > 0:
-      self.vel_command_b[standing_env_ids, :] = 0.0
-      self.vel_command_w[standing_env_ids, :] = 0.0
+      self.vel_command_b[standing_env_ids, :2] = 0.0
+      self.vel_command_w[standing_env_ids, :2] = 0.0
+      self.vel_command_b[standing_env_ids, 2] = torch.clip(
+        cfg.heading_control_stiffness * self.heading_error[standing_env_ids],
+        min=cfg.ranges.ang_vel_z[0],
+        max=cfg.ranges.ang_vel_z[1],
+      )
+      aligned_ids = standing_env_ids[
+        self.heading_error[standing_env_ids].abs() <= cfg.standing_align_threshold
+      ]
+      if len(aligned_ids) > 0:
+        self._resample(aligned_ids)
 
     if len(target_env_ids) > 0:
       reached_ids = target_env_ids[
         self.target_distance[target_env_ids] <= cfg.target_reached_threshold
       ]
       if len(reached_ids) > 0:
+        self.target_reached_in_episode[reached_ids] = True
         self._resample(reached_ids)
         self.target_reached[reached_ids] = True
 
@@ -302,9 +334,16 @@ class TeacherTargetHeadingVelocityCommand(UniformVelocityCommand):
     base_pos_ws = self.robot.data.root_link_pos_w.cpu().numpy()
     target_pos_ws = self.target_pos_w.cpu().numpy()
     is_target_env = self.is_target_env.cpu().numpy()
+    is_standing_env = self.is_standing_env.cpu().numpy()
 
     for batch in env_indices:
-      if not is_target_env[batch]:
+      if is_target_env[batch]:
+        color = viz.target_color
+        arrow_color = viz.target_arrow_color
+      elif is_standing_env[batch]:
+        color = (1.0, 0.8, 0.0, 0.85)
+        arrow_color = (1.0, 0.8, 0.0, 0.75)
+      else:
         continue
 
       base_pos_w = base_pos_ws[batch]
@@ -319,13 +358,13 @@ class TeacherTargetHeadingVelocityCommand(UniformVelocityCommand):
       visualizer.add_sphere(
         center=target_pos_w,
         radius=viz.target_radius,
-        color=viz.target_color,
+        color=color,
         label=f"teacher_target_heading_target_{batch}",
       )
       visualizer.add_arrow(
         start=start,
         end=target_pos_w,
-        color=viz.target_arrow_color,
+        color=arrow_color,
         width=0.02,
         label=f"teacher_target_heading_direction_{batch}",
       )
@@ -342,6 +381,11 @@ class TeacherTargetHeadingVelocityCommandCfg(UniformVelocityCommandCfg):
   target_tile_radius: int = 1
   include_current_tile: bool = False
   zero_lateral_velocity: bool = True
+  standing_align_threshold: float = 0.2
+  """Heading error threshold (radians) for standing envs to consider aligned.
+
+  When a standing environment's heading error drops below this value,
+  the command is resampled. Default 0.2 rad ≈ 11.5°."""
 
   @dataclass
   class VizCfg(UniformVelocityCommandCfg.VizCfg):

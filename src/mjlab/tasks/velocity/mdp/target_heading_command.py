@@ -60,6 +60,10 @@ class TargetHeadingVelocityCommand(UniformVelocityCommand):
     self.target_reached_this_step = torch.zeros(
       self.num_envs, dtype=torch.bool, device=self.device
     )
+    self.target_command_in_episode = torch.zeros(
+      self.num_envs, dtype=torch.bool, device=self.device
+    )
+    self.target_reached_in_episode = torch.zeros_like(self.target_command_in_episode)
     self.is_target_env = torch.zeros(
       self.num_envs, dtype=torch.bool, device=self.device
     )
@@ -71,6 +75,12 @@ class TargetHeadingVelocityCommand(UniformVelocityCommand):
       self.num_envs, device=self.device
     )
     self.metrics["num_standing_envs"] = torch.zeros(self.num_envs, device=self.device)
+
+  def reset(self, env_ids: torch.Tensor | slice | None) -> dict[str, float]:
+    assert isinstance(env_ids, torch.Tensor)
+    self.target_command_in_episode[env_ids] = False
+    self.target_reached_in_episode[env_ids] = False
+    return super().reset(env_ids)
 
   def _update_metrics(self) -> None:
     super()._update_metrics()
@@ -133,6 +143,7 @@ class TargetHeadingVelocityCommand(UniformVelocityCommand):
     if len(target_ids) > 0:
       self.is_target_env[target_ids] = True
       self.is_heading_env[target_ids] = True
+      self.target_command_in_episode[target_ids] = True
       self._sample_target_points(target_ids)
 
       self.vel_command_b[target_ids, 0] = torch.empty(
@@ -181,9 +192,7 @@ class TargetHeadingVelocityCommand(UniformVelocityCommand):
       if valid_mask.any():
         candidates = candidates[valid_mask]
 
-      idx = int(
-        torch.randint(0, candidates.shape[0], (1,), device=self.device).item()
-      )
+      idx = int(torch.randint(0, candidates.shape[0], (1,), device=self.device).item())
       self.target_pos_w[env_id] = candidates[idx]
       self.has_target[env_id] = True
 
@@ -231,6 +240,7 @@ class TargetHeadingVelocityCommand(UniformVelocityCommand):
       reached_ids = target_ids[dist < self.cfg.target_reached_threshold]
       if len(reached_ids) > 0:
         self.target_reached_this_step[reached_ids] = True
+        self.target_reached_in_episode[reached_ids] = True
       resample_ids = target_ids[resample_mask]
       if len(resample_ids) > 0:
         self._resample(resample_ids)

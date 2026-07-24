@@ -27,6 +27,12 @@ ALL_TERRAIN_PRESETS: dict[str, Callable[..., SubTerrainCfg]] = {}
 
 _F = TypeVar("_F", bound=Callable[..., SubTerrainCfg])
 
+BLIND_HIGH_STAIRS_TREAD_DEPTHS = tuple(
+  round(0.25 + index * (0.35 - 0.25) / 7, 6) for index in range(8)
+)
+_BLIND_HIGH_STAIRS_PROPORTION = 0.0
+_BLIND_HIGH_STAIRS_INV_PROPORTION = 0.85
+
 
 def terrain_preset(fn: _F) -> _F:
   """Register a terrain preset into ALL_TERRAIN_PRESETS."""
@@ -301,28 +307,55 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
 )
 
 
+def _blind_high_stair_variants() -> dict[str, SubTerrainCfg]:
+  variants: dict[str, SubTerrainCfg] = {}
+  num_widths = len(BLIND_HIGH_STAIRS_TREAD_DEPTHS)
+  total_stair_proportion = (
+    _BLIND_HIGH_STAIRS_PROPORTION + _BLIND_HIGH_STAIRS_INV_PROPORTION
+  )
+  num_upward = round(
+    num_widths * _BLIND_HIGH_STAIRS_PROPORTION / total_stair_proportion
+  )
+  num_inverted = num_widths - num_upward
+
+  if num_upward == 0:
+    upward_indices: set[int] = set()
+  elif num_upward == 1:
+    upward_indices = {num_widths // 2}
+  else:
+    upward_indices = {
+      round(index * (num_widths - 1) / (num_upward - 1)) for index in range(num_upward)
+    }
+
+  for index, tread_depth in enumerate(BLIND_HIGH_STAIRS_TREAD_DEPTHS):
+    if index in upward_indices:
+      variants[f"high_stairs_w{index:02d}"] = pyramid_stairs(
+        proportion=_BLIND_HIGH_STAIRS_PROPORTION / num_upward,
+        step_height_range=(0.04, 0.2),
+        step_width=tread_depth,
+        platform_width=3.0,
+        border_width=1.0,
+      )
+    else:
+      variants[f"high_stairs_inv_w{index:02d}"] = pyramid_stairs_inv(
+        proportion=_BLIND_HIGH_STAIRS_INV_PROPORTION / num_inverted,
+        step_height_range=(0.04, 0.2),
+        step_width=tread_depth,
+        platform_width=3.0,
+        border_width=1.0,
+      )
+  return variants
+
+
 BLIND_HIGH_STAIRS_TERRAINS_CFG = TerrainGeneratorCfg(
   size=(8.0, 8.0),
   border_width=20.0,
   num_rows=10,
-  num_cols=5,
+  num_cols=len(BLIND_HIGH_STAIRS_TREAD_DEPTHS) + 3,
   curriculum=True,
   sub_terrains={
-    "flat": flat(proportion=0.00),
-    "high_stairs": pyramid_stairs(
-      proportion=0.45,
-      step_height_range=(0.04, 0.2),
-      step_width=0.30,
-      platform_width=3.0,
-      border_width=1.0,
-    ),
-    "high_stairs_inv": pyramid_stairs_inv(
-      proportion=0.35,
-      step_height_range=(0.04, 0.2),
-      step_width=0.30,
-      platform_width=3.0,
-      border_width=1.0,
-    ),
+    "flat": flat(proportion=0.0),
+    **_blind_high_stair_variants(),
     "gentle_slope": hf_pyramid_slope(
       proportion=0.10,
       slope_range=(0.0, 0.25),
@@ -330,7 +363,7 @@ BLIND_HIGH_STAIRS_TERRAINS_CFG = TerrainGeneratorCfg(
       border_width=0.5,
     ),
     "low_rough": random_rough(
-      proportion=0.10,
+      proportion=0.05,
       noise_range=(0.005, 0.04),
       noise_step=0.01,
       border_width=0.5,

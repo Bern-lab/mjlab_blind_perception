@@ -320,17 +320,17 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
     ),
     "dof_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-1.0),
     "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.15),
-    "air_time": RewardTermCfg(
-      func=mdp.feet_air_time,
-      weight=0.0,  # Override per-robot.
-      params={
-        "sensor_name": "feet_ground_contact",
-        "threshold_min": 0.05,
-        "threshold_max": 0.5,
-        "command_name": "twist",
-        "command_threshold": 0.5,
-      },
-    ),
+    # "air_time": RewardTermCfg(
+    #   func=mdp.feet_air_time,
+    #   weight=0.0,  # Override per-robot.
+    #   params={
+    #     "sensor_name": "feet_ground_contact",
+    #     "threshold_min": 0.05,
+    #     "threshold_max": 0.5,
+    #     "command_name": "twist",
+    #     "command_threshold": 0.5,
+    #   },
+    # ),
     "foot_clearance": RewardTermCfg(
       func=mdp.feet_clearance,
       weight=-2.0,
@@ -343,17 +343,17 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
         "asset_cfg": SceneEntityCfg("robot", site_names=()),  # Set per-robot.
       },
     ),
-    # "foot_swing_height": RewardTermCfg(
-    #   func=mdp.feet_swing_height,
-    #   weight=-0.25,
-    #   params={
-    #     "sensor_name": "feet_ground_contact",
-    #     "height_sensor_name": "foot_height_scan",
-    #     "target_height": 0.15,
-    #     "command_name": "twist",
-    #     "command_threshold": 0.05,
-    #   },
-    # ),
+    "foot_swing_height": RewardTermCfg(
+      func=mdp.feet_swing_height,
+      weight=-0.25,
+      params={
+        "sensor_name": "feet_ground_contact",
+        "height_sensor_name": "foot_height_scan",
+        "target_height": 0.1,
+        "command_name": "twist",
+        "command_threshold": 0.05,
+      },
+    ),
     "foot_slip": RewardTermCfg(
       func=mdp.feet_slip,
       weight=-0.2,
@@ -375,7 +375,7 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
     ),
     "idle_penalty": RewardTermCfg(
       func=mdp.idle_penalty,
-      weight=-2.0,#-2
+      weight=-2.0,  # -2
       params={
         "command_name": "twist",
         "command_threshold": 0.2,
@@ -392,7 +392,7 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
         "command_threshold": 0.1,
         "command_name": "twist",
         "sensor_name": "feet_ground_contact",
-      }
+      },
     ),
     "base_height_above_support": RewardTermCfg(
       func=mdp.base_height_above_support,

@@ -34,8 +34,12 @@ class RslRlModelCfg:
   """Hidden state dimension for the RNN."""
   rnn_num_layers: int = 1
   """Number of stacked RNN layers."""
+  transformer_cfg: dict[str, Any] | None = None
+  """Transformer encoder config. When set, class_name should be a transformer
+  model such as ``CausalTransformerModel``.
+  """
   class_name: str = "MLPModel"
-  """Model class name resolved by RSL-RL (MLPModel, CNNModel, or RNNModel)."""
+  """Model class name resolved by RSL-RL or a qualified import path."""
 
 
 @dataclass
@@ -221,7 +225,5 @@ class RslRlTeacherKLRunnerCfg(RslRlOnPolicyRunnerCfg):
     )
   )
   """The frozen teacher actor configuration."""
-  algorithm: RslRlPpoTeacherKLAlgorithmCfg = field(
-    default_factory=RslRlPpoTeacherKLAlgorithmCfg
-  )
+  algorithm: RslRlPpoAlgorithmCfg = field(default_factory=RslRlPpoTeacherKLAlgorithmCfg)
   """The PPO + teacher-KL algorithm configuration."""

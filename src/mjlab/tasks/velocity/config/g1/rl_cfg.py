@@ -13,11 +13,14 @@ G1_TEACHER_KL_CHECKPOINT = (
   "teacher_policies/g1_target_heading_depth_teacher/model_118200.pt"
 )
 G1_TARGET_HEADING_DEPTH_TEACHER_KL_CHECKPOINT = G1_TEACHER_KL_CHECKPOINT
-G1_LSTM_TEACHER_KL_NUM_STEPS_PER_ENV = 24
+G1_LSTM_TEACHER_KL_NUM_STEPS_PER_ENV = 64
 """Rollout horizon per env for each PPO update.
 
-G1 velocity env step is 0.02s, so 24 steps cover about 0.48s per rollout.
+G1 velocity env step is 0.02s, so 64 steps match the SlowLatent ablation
+rollout horizon.
 """
+G1_TRANSFORMER_ACTOR_TOKEN_DIMS = (3, 3, 3, 2, 29, 29, 29)
+"""Per-timestep actor observation dims before term-major history flattening."""
 
 _DEPTH_CNN_CFG = {
   "output_channels": [16, 32],
@@ -128,6 +131,31 @@ def _unitree_g1_lstm_policy_model_cfg() -> RslRlModelCfg:
   )
 
 
+def _unitree_g1_transformer_policy_model_cfg() -> RslRlModelCfg:
+  return RslRlModelCfg(
+    class_name="CausalTransformerModel",
+    hidden_dims=(512, 256, 128),
+    activation="elu",
+    obs_normalization=True,
+    transformer_cfg={
+      "token_dims": G1_TRANSFORMER_ACTOR_TOKEN_DIMS,
+      "d_model": 216,
+      "num_heads": 4,
+      "num_layers": 2,
+      "dim_feedforward": 432,
+      "dropout": 0.0,
+      "transformer_activation": "gelu",
+      "norm_first": True,
+      "pooling": "last",
+    },
+    distribution_cfg={
+      "class_name": "GaussianDistribution",
+      "init_std": 1.0,
+      "std_type": "scalar",
+    },
+  )
+
+
 def _unitree_g1_teacher_guidance_cfg() -> (
   RslRlTeacherKLCfg
 ):  # 同时影响此分支所有student
@@ -138,9 +166,9 @@ def _unitree_g1_teacher_guidance_cfg() -> (
     imitation_loss_coef=1.0,
     checkpoint_path=G1_TEACHER_KL_CHECKPOINT,
     loss_type="mean_huber",
-    lambda_start=0.03,
+    lambda_start=0.05,
     lambda_end=0.0,
-    warmup_iters=1000,
+    warmup_iters=0,
     constant_iters=0,
     anneal_iters=10000,
     schedule="cosine",
@@ -158,9 +186,9 @@ def _unitree_g1_teacher_student_runner_cfg(
   *,
   actor: RslRlModelCfg,
   experiment_name: str,
-  num_steps_per_env: int = 24,
+  num_steps_per_env: int = 64,
 ) -> RslRlTeacherKLRunnerCfg:
-  """Create the shared main-style PPO + frozen-teacher guidance runner."""
+  """Create the shared SlowLatent-matched PPO + frozen-teacher runner."""
   return RslRlTeacherKLRunnerCfg(
     actor=actor,
     critic=_unitree_g1_critic_model_cfg(),
@@ -186,7 +214,7 @@ def _unitree_g1_teacher_student_runner_cfg(
       "teacher": ("teacher", "camera"),
     },
     experiment_name=experiment_name,
-    save_interval=200,
+    save_interval=500,
     num_steps_per_env=num_steps_per_env,
     max_iterations=40_001,
   )
@@ -196,7 +224,7 @@ def unitree_g1_blind_rough_teacherkl_runner_cfg() -> RslRlTeacherKLRunnerCfg:
   """Create main-style PPO + frozen-teacher guidance config for blind rough."""
   return _unitree_g1_teacher_student_runner_cfg(
     actor=_unitree_g1_policy_model_cfg(),
-    experiment_name="g1_blind_rough_teacherkl",
+    experiment_name="g1_blind_rough_target_navigation_mlp_teacherkl_ablation",
   )
 
 
@@ -204,7 +232,7 @@ def unitree_g1_blind_stairs_flag_teacherkl_runner_cfg() -> RslRlTeacherKLRunnerC
   """Create main-style PPO + frozen-teacher guidance config for stair-flag."""
   return _unitree_g1_teacher_student_runner_cfg(
     actor=_unitree_g1_policy_model_cfg(),
-    experiment_name="g1_blind_stairs_flag_teacherkl",
+    experiment_name=("g1_blind_rough_target_navigation_boolean_mlp_teacherkl_ablation"),
   )
 
 
@@ -214,7 +242,9 @@ def unitree_g1_blind_stairs_flag_lstm_teacherkl_runner_cfg(
   """Create main-style LSTM PPO + frozen-teacher guidance config for stair-flag."""
   return _unitree_g1_teacher_student_runner_cfg(
     actor=_unitree_g1_lstm_policy_model_cfg(),
-    experiment_name="g1_blind_stairs_flag_lstm_teacherkl",
+    experiment_name=(
+      "g1_blind_rough_target_navigation_boolean_lstm_teacherkl_ablation"
+    ),
     num_steps_per_env=num_steps_per_env,
   )
 
@@ -225,6 +255,17 @@ def unitree_g1_blind_rough_lstm_teacherkl_runner_cfg(
   """Create main-style LSTM PPO + frozen-teacher guidance config for blind rough."""
   return _unitree_g1_teacher_student_runner_cfg(
     actor=_unitree_g1_lstm_policy_model_cfg(),
-    experiment_name="g1_blind_rough_lstm_teacherkl",
+    experiment_name="g1_blind_rough_target_navigation_lstm_teacherkl_ablation",
+    num_steps_per_env=num_steps_per_env,
+  )
+
+
+def unitree_g1_blind_rough_transformer_teacherkl_runner_cfg(
+  num_steps_per_env: int = G1_LSTM_TEACHER_KL_NUM_STEPS_PER_ENV,
+) -> RslRlTeacherKLRunnerCfg:
+  """Create transformer PPO + frozen-teacher guidance config for blind rough."""
+  return _unitree_g1_teacher_student_runner_cfg(
+    actor=_unitree_g1_transformer_policy_model_cfg(),
+    experiment_name="g1_blind_rough_target_navigation_transformer_teacherkl_ablation",
     num_steps_per_env=num_steps_per_env,
   )

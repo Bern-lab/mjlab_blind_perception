@@ -2,8 +2,8 @@
 
 import logging
 import os
-import sys
 import re
+import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -18,7 +18,6 @@ from mjlab.tasks.tracking.mdp import MotionCommandCfg
 from mjlab.utils.gpu import select_gpus
 from mjlab.utils.os import (
   dump_yaml,
-  get_checkpoint_path,
   get_checkpoint_path_with_fallback,
   get_task_log_root,
   get_wandb_checkpoint_path,
@@ -33,6 +32,12 @@ class TrainConfig:
   env: ManagerBasedRlEnvCfg
   agent: RslRlBaseRunnerCfg
   registry_name: str | None = None
+  actor_history_length: int | None = None
+  """Optional actor observation history override.
+
+  Preserves current-only Boolean terrain flags while changing the regular actor
+  observation terms.
+  """
   video: bool = False
   video_length: int = 200
   video_interval: int = 2000
@@ -56,6 +61,33 @@ class TrainConfig:
     return TrainConfig(env=env_cfg, agent=agent_cfg)
 
 
+def _apply_actor_history_length_override(
+  env_cfg: ManagerBasedRlEnvCfg,
+  history_length: int | None,
+) -> None:
+  """Override actor observation history while preserving current-only flags."""
+  if history_length is None:
+    return
+  if history_length < 0:
+    raise ValueError(f"actor_history_length must be >= 0, got {history_length}")
+
+  actor_group = env_cfg.observations.get("actor")
+  if actor_group is None:
+    raise ValueError("Cannot override actor history: missing 'actor' observation group")
+
+  if actor_group.history_length is not None:
+    actor_group.history_length = history_length
+    return
+
+  for term_name, term_cfg in actor_group.terms.items():
+    if term_cfg is None:
+      continue
+    if term_name == "terrain_is_stairs" and term_cfg.history_length == 0:
+      continue
+    term_cfg.history_length = history_length
+    term_cfg.flatten_history_dim = actor_group.flatten_history_dim
+
+
 def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
   cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
   if cuda_visible == "":
@@ -75,6 +107,7 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
 
   cfg.agent.seed = seed
   cfg.env.seed = seed
+  _apply_actor_history_length_override(cfg.env, cfg.actor_history_length)
 
   print(f"[INFO] Training with: device={device}, seed={seed}, rank={rank}")
 
@@ -217,7 +250,11 @@ def launch_training(task_id: str, args: TrainConfig | None = None):
     if args.agent.load_run and args.agent.load_run != ".*":
       if not log_root_path.exists():
         raise ValueError(f"Log root path does not exist: {log_root_path}")
-      matching = [d for d in log_root_path.iterdir() if d.is_dir() and re.match(args.agent.load_run, d.name)]
+      matching = [
+        d
+        for d in log_root_path.iterdir()
+        if d.is_dir() and re.match(args.agent.load_run, d.name)
+      ]
       if matching:
         matching.sort()
         chosen = matching[-1]
@@ -225,7 +262,9 @@ def launch_training(task_id: str, args: TrainConfig | None = None):
         log_dir = chosen
       else:
         # Fall back to creating a new run if no matching run found.
-        print(f"[WARN] No matching run found for '{args.agent.load_run}' under {log_root_path}; creating a new run.")
+        print(
+          f"[WARN] No matching run found for '{args.agent.load_run}' under {log_root_path}; creating a new run."
+        )
         log_dir = None  # signal to create normally
     else:
       # No explicit run regex provided: try to locate a checkpoint and resume in-place
@@ -239,7 +278,9 @@ def launch_training(task_id: str, args: TrainConfig | None = None):
         print(f"[INFO] Resuming into run directory from checkpoint: {log_dir}")
       except Exception as e:
         # If no checkpoint found, we'll create a new run as before.
-        print(f"[WARN] Could not find checkpoint to resume: {e}; will create a new run.")
+        print(
+          f"[WARN] Could not find checkpoint to resume: {e}; will create a new run."
+        )
         log_dir = None
   else:
     log_dir = None
@@ -250,15 +291,21 @@ def launch_training(task_id: str, args: TrainConfig | None = None):
     log_dir_name: str | None = None
     motion_name: str | None = None
     try:
-      if "motion" in args.env.commands and getattr(args.env.commands["motion"], "motion_file", None):
-        motion_path = Path(args.env.commands["motion"].motion_file)
+      motion_cmd = args.env.commands.get("motion")
+      motion_file = getattr(motion_cmd, "motion_file", None)
+      if motion_file:
+        motion_path = Path(str(motion_file))
         motion_name = motion_path.stem
     except Exception:
       motion_name = None
 
     if motion_name:
       log_root_path.mkdir(parents=True, exist_ok=True)
-      existing = [d.name for d in log_root_path.iterdir() if d.is_dir() and d.name.startswith(f"{motion_name}-Exp-")]
+      existing = [
+        d.name
+        for d in log_root_path.iterdir()
+        if d.is_dir() and d.name.startswith(f"{motion_name}-Exp-")
+      ]
       nums: list[int] = []
       for name in existing:
         m = re.match(rf"^{re.escape(motion_name)}-Exp-(\d+)$", name)
