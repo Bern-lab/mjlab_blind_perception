@@ -1939,6 +1939,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       target_geometry_gate = target_geometry_gate_by_foot[env_ids, target_foot]
       target_height_gate = target_height_gate_by_foot[env_ids, target_foot]
       target_full_support_gate = full_support_gate[env_ids, target_foot]
+      target_support_fraction_now = best_support_fraction[env_ids, target_foot]
       target_riser_unsafe = riser_contact[env_ids, target_foot]
       target_slab_unsafe = slab_unsafe[env_ids, target_foot]
       target_lip_unsafe = lip_unsafe[env_ids, target_foot]
@@ -2029,7 +2030,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         attempt_armed
         & target_has_stair_support
         & target_geometry_gate
-        & (best_support_fraction[env_ids, target_foot] > 0.0)
+        & (target_support_fraction_now > 0.0)
         & (target_support_layer == self._expected_layer)
       )
       self._stair_depth_confirmation_event.copy_(
@@ -2232,16 +2233,28 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         self._attempt_rear_partial_contact[completed_ids] = False
         self._attempt_touchdown_layer[completed_ids] = 0
 
-      safe_touchdown = (
-        target_contact
+      safe_contact_base = (
+        active_before
+        & target_contact
         & heading_gate
         & shape_valid
         & target_geometry_gate
-        & target_full_support_gate
         & ~target_riser_unsafe
         & ~target_slab_unsafe
         & ~target_lip_unsafe
       )
+      safe_touchdown_base = (
+        active_before
+        & target_touchdown
+        & heading_gate
+        & shape_valid
+        & target_geometry_gate
+        & ~target_riser_unsafe
+        & ~target_slab_unsafe
+        & ~target_lip_unsafe
+      )
+      safe_contact = safe_contact_base & target_full_support_gate
+      safe_touchdown_event = safe_touchdown_base & target_full_support_gate
 
       selected_idx = best_support_idx[env_ids, target_foot]
       selected_p0_xy = boundaries[env_ids, selected_idx, 0:2]
@@ -2250,7 +2263,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       landing_center_s = torch.sum(
         (target_ref_xy - selected_p0_xy) * -selected_normal, dim=-1
       )
-      target_coverage = best_support_fraction[env_ids, target_foot]
+      target_coverage = target_support_fraction_now
       quality_sigma = torch.clamp(0.25 * tread_depth, min=0.03)
       center_score = torch.exp(
         -torch.square((landing_center_s - 0.5 * tread_depth) / quality_sigma)
@@ -2309,15 +2322,13 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       safe_stride_label_clamped = (
         torch.abs(safe_tread_lower_bound - toe_front_s) > 1.0e-4
       ) | (torch.abs(safe_landing_center - landing_center_s) > 1.0e-4)
-      if bool(torch.any(safe_touchdown).item()):
-        self._safe_stride_valid[safe_touchdown] = True
-        self._safe_tread_lower_bound[safe_touchdown] = safe_tread_lower_bound[
-          safe_touchdown
+      if bool(torch.any(safe_contact).item()):
+        self._safe_stride_valid[safe_contact] = True
+        self._safe_tread_lower_bound[safe_contact] = safe_tread_lower_bound[
+          safe_contact
         ]
-        self._safe_landing_center_s[safe_touchdown] = safe_landing_center[
-          safe_touchdown
-        ]
-        self._observed_step_stride[safe_touchdown] = target_forward_gain[safe_touchdown]
+        self._safe_landing_center_s[safe_contact] = safe_landing_center[safe_contact]
+        self._observed_step_stride[safe_contact] = target_forward_gain[safe_contact]
 
       following = self._stair_phase == 2
       active_phase = phase1 | following
@@ -2450,10 +2461,16 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
 
       phase1_count = phase1.float().sum().clamp_min(1.0)
       active_phase_count = active_phase.float().sum().clamp_min(1.0)
-      touchdown_count = target_touchdown.float().sum().clamp_min(1.0)
-      contact_count = target_contact.float().sum().clamp_min(1.0)
-      geometry_touchdown = target_touchdown & target_geometry_gate
-      geometry_contact = target_contact & target_geometry_gate
+      phase1_target_touchdown = phase1 & target_touchdown
+      phase1_target_contact = phase1 & target_contact
+      active_target_touchdown = active_phase & target_touchdown
+      active_target_contact = active_phase & target_contact
+      touchdown_count = phase1_target_touchdown.float().sum().clamp_min(1.0)
+      contact_count = phase1_target_contact.float().sum().clamp_min(1.0)
+      active_touchdown_count = active_target_touchdown.float().sum().clamp_min(1.0)
+      active_contact_count = active_target_contact.float().sum().clamp_min(1.0)
+      geometry_touchdown = phase1_target_touchdown & target_geometry_gate
+      geometry_contact = phase1_target_contact & target_geometry_gate
       geometry_contact_count = geometry_contact.float().sum().clamp_min(1.0)
       log["Metrics/stair_entry_event_ratio"] = entry_mask.float().mean()
       log["Metrics/stair_entry_event_count"] = entry_mask.float().sum()
@@ -2465,16 +2482,16 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         phase1 & heading_gate
       ).float().sum() / phase1_count
       log["Metrics/stair_layer2_touchdown_candidate_ratio"] = (
-        target_touchdown.float().sum() / phase1_count
+        phase1_target_touchdown.float().sum() / phase1_count
       )
       log["Metrics/stair_layer2_contact_candidate_ratio"] = (
-        target_contact.float().sum() / phase1_count
+        phase1_target_contact.float().sum() / phase1_count
       )
       log["Metrics/stair_layer2_height_gate_ratio"] = (
-        target_touchdown & target_height_gate
+        phase1_target_touchdown & target_height_gate
       ).float().sum() / touchdown_count
       log["Metrics/stair_layer2_contact_height_gate_ratio"] = (
-        target_contact & target_height_gate
+        phase1_target_contact & target_height_gate
       ).float().sum() / contact_count
       log["Metrics/stair_layer2_segment_gate_ratio"] = (
         geometry_touchdown.float().sum() / touchdown_count
@@ -2485,8 +2502,8 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       log["Metrics/stair_layer2_support_fraction_mean"] = (
         torch.where(
           geometry_contact,
-          best_support_fraction[env_ids, target_foot],
-          torch.zeros_like(best_support_fraction[:, 0]),
+          target_support_fraction_now,
+          torch.zeros_like(target_support_fraction_now),
         ).sum()
         / geometry_contact_count
       )
@@ -2494,8 +2511,26 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         geometry_contact & target_full_support_gate
       ).float().sum() / geometry_contact_count
       log["Metrics/stair_safe_touchdown_ratio"] = (
-        safe_touchdown.float().sum() / phase1_count
+        safe_touchdown_event.float().sum() / active_touchdown_count
       )
+      log["Metrics/stair_safe_contact_ratio"] = (
+        safe_contact.float().sum() / active_contact_count
+      )
+      log["Metrics/stair_safe_contact_frame_ratio"] = (
+        safe_contact.float().sum() / active_phase_count
+      )
+      log["Metrics/stair_safe_contact_support_ge_0p75_ratio"] = (
+        safe_contact_base & (target_support_fraction_now >= 0.75)
+      ).float().sum() / active_contact_count
+      log["Metrics/stair_safe_contact_support_ge_0p50_ratio"] = (
+        safe_contact_base & (target_support_fraction_now >= 0.50)
+      ).float().sum() / active_contact_count
+      log["Metrics/stair_layer2_safe_touchdown_ratio"] = (
+        phase1 & safe_touchdown_event
+      ).float().sum() / touchdown_count
+      log["Metrics/stair_layer2_safe_contact_ratio"] = (
+        phase1 & safe_contact
+      ).float().sum() / contact_count
       log["Metrics/minimum_safe_stride_probe_evidence_ratio"] = (
         probe_evidence_now.float().sum() / phase1_count
       )
@@ -2670,16 +2705,16 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         (self._minimum_safe_stride_upper - self._minimum_safe_stride)
         * interval_valid.float()
       ).sum() / interval_valid_count
-      safe_touchdown_count = safe_touchdown.float().sum().clamp_min(1.0)
+      safe_contact_count = safe_contact.float().sum().clamp_min(1.0)
       log["Metrics/stair_safe_stride_label_clamped_ratio"] = (
-        safe_touchdown & safe_stride_label_clamped
-      ).float().sum() / safe_touchdown_count
+        safe_contact & safe_stride_label_clamped
+      ).float().sum() / safe_contact_count
       log["Metrics/stair_safe_stride_raw_toe_front_s_mean"] = (
-        toe_front_s * safe_touchdown.float()
-      ).sum() / safe_touchdown_count
+        toe_front_s * safe_contact.float()
+      ).sum() / safe_contact_count
       log["Metrics/stair_safe_landing_raw_center_s_mean"] = (
-        landing_center_s * safe_touchdown.float()
-      ).sum() / safe_touchdown_count
+        landing_center_s * safe_contact.float()
+      ).sum() / safe_contact_count
       log["Metrics/landing_touchdown_now_ratio"] = (
         self._landing_touchdown_now.float().mean()
       )

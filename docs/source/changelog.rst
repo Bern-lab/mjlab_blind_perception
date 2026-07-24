@@ -106,6 +106,9 @@ Added
 - Added SlowLatent foot-event diagnostics for same-foot stride monotonicity,
   including latest-step growth and sample coverage, to track whether stair
   probes are landing progressively farther without adding reward shaping.
+- Added SlowLatent foot-event ratchet depth diagnostics in the existing summary
+  channels, exposing monotonic no-hit lower depth and raw riser-contact upper
+  depth without changing the observation size.
 
 Changed
 ^^^^^^^
@@ -117,6 +120,10 @@ Changed
   same-foot toe-riser hits, exposing a collision-derived upper bound and
   center target so the actor can reduce stride after contact instead of only
   increasing the probe distance.
+- SlowLatent stair safe-landing diagnostics now separate touchdown events,
+  contact-frame occupancy, and contact-conditioned support ratios, so play logs
+  no longer undercount safe landings by dividing event counts by all phase
+  frames.
 - SlowLatent actor semantic conditioning now replaces the duplicate riser-height
   channel with an interval-aware SafeStride target. Wide, low-confidence
   predictions expose the lower/probe stride, while confident or narrow

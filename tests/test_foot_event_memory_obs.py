@@ -445,9 +445,10 @@ def test_foot_event_memory_ratchet_advances_after_forward_up_step() -> None:
   torch.testing.assert_close(ratchet[2], torch.tensor(0.275))
   torch.testing.assert_close(ratchet[3], torch.tensor(0.0))
   torch.testing.assert_close(ratchet[4], torch.tensor(0.12))
-  torch.testing.assert_close(ratchet[5], torch.tensor(0.2))
+  torch.testing.assert_close(ratchet[5], torch.tensor(0.25))
   torch.testing.assert_close(ratchet[6], torch.tensor(0.0))
   torch.testing.assert_close(ratchet[8], torch.tensor(1.0))
+  assert term.ratchet_safe_no_hit_steps[0].item() == 1
 
 
 def test_foot_event_memory_ratchet_uses_same_foot_two_layer_stride() -> None:
@@ -501,6 +502,7 @@ def test_foot_event_memory_ratchet_uses_same_foot_two_layer_stride() -> None:
   torch.testing.assert_close(ratchet[2], torch.tensor(0.525))
   torch.testing.assert_close(ratchet[3], torch.tensor(0.0))
   torch.testing.assert_close(ratchet[4], torch.tensor(0.20))
+  torch.testing.assert_close(ratchet[5], torch.tensor(0.50))
 
 
 def test_foot_event_memory_ratchet_closes_interval_from_same_foot_toe_hit() -> None:
@@ -520,6 +522,7 @@ def test_foot_event_memory_ratchet_closes_interval_from_same_foot_toe_hit() -> N
   term.ratchet_active[0] = True
   term.ratchet_lower_s[0] = 0.25
   term.ratchet_probe_target_s[0] = 0.45
+  term.ratchet_depth_lower_s[0] = 0.25
   term.ratchet_last_forward_up_stride[0] = 0.25
   term.ratchet_confidence[0] = 0.4
 
@@ -552,6 +555,8 @@ def test_foot_event_memory_ratchet_closes_interval_from_same_foot_toe_hit() -> N
   torch.testing.assert_close(ratchet[1], torch.tensor(0.25))
   torch.testing.assert_close(ratchet[2], torch.tensor(0.295))
   torch.testing.assert_close(ratchet[3], torch.tensor(0.34))
+  torch.testing.assert_close(ratchet[5], torch.tensor(0.25))
   torch.testing.assert_close(ratchet[6], torch.tensor(1.0))
-  torch.testing.assert_close(ratchet[7], torch.tensor(0.34))
+  torch.testing.assert_close(ratchet[7], torch.tensor(0.36))
   torch.testing.assert_close(ratchet[8], torch.tensor(0.75))
+  torch.testing.assert_close(term.ratchet_collision_upper_s[0], torch.tensor(0.34))
