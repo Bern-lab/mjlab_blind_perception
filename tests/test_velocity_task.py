@@ -5,6 +5,7 @@ from typing import cast
 
 import pytest
 import torch
+from rsl_rl.modules import MLP
 from rsl_rl.utils import resolve_callable
 from tensordict import TensorDict
 
@@ -206,22 +207,26 @@ def _make_actor_from_model_cfg(model_cfg: RslRlModelCfg, obs_dim: int = 490):
   )
 
 
-def test_transformer_actor_capacity_matches_lstm_ablation() -> None:
-  """Transformer ablation should stay close to the LSTM actor capacity."""
-  lstm_task = "Mjlab-Velocity-Blind-Rough-LSTM-TeacherKL-Unitree-G1"
+def test_transformer_actor_uses_paper_style_embedding() -> None:
+  """Transformer ablation should use MLP token embedding and fixed positions."""
   transformer_task = "Mjlab-Velocity-Blind-Rough-Transformer-TeacherKL-Unitree-G1"
-  lstm_model = _make_actor_from_model_cfg(
-    cast(RslRlTeacherKLRunnerCfg, load_rl_cfg(lstm_task)).actor
-  )
+  transformer_cfg = cast(
+    RslRlTeacherKLRunnerCfg, load_rl_cfg(transformer_task)
+  ).actor.transformer_cfg
+  assert transformer_cfg is not None
+  assert transformer_cfg["input_projection_hidden_dims"] == (512, 512)
+  assert transformer_cfg["position_encoding"] == "sinusoidal"
+
   transformer_model = _make_actor_from_model_cfg(
     cast(RslRlTeacherKLRunnerCfg, load_rl_cfg(transformer_task)).actor
   )
 
-  lstm_params = sum(p.numel() for p in lstm_model.parameters())
-  transformer_params = sum(p.numel() for p in transformer_model.parameters())
-  relative_delta = abs(transformer_params - lstm_params) / lstm_params
+  named_parameters = dict(transformer_model.named_parameters())
+  named_buffers = dict(transformer_model.named_buffers())
 
-  assert relative_delta <= 0.10
+  assert isinstance(transformer_model.input_projection, MLP)
+  assert "position_embedding" not in named_parameters
+  assert "position_embedding" in named_buffers
 
 
 def test_ablation_actor_history_length_is_configurable() -> None:

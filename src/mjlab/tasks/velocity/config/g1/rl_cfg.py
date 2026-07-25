@@ -145,6 +145,8 @@ def _unitree_g1_transformer_policy_model_cfg() -> RslRlModelCfg:
       "dim_feedforward": 432,
       "dropout": 0.0,
       "transformer_activation": "gelu",
+      "input_projection_hidden_dims": (512, 512),
+      "position_encoding": "sinusoidal",
       "norm_first": True,
       "pooling": "last",
     },

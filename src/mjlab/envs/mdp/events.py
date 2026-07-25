@@ -23,7 +23,72 @@ if TYPE_CHECKING:
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
 
-def randomize_terrain(env: ManagerBasedRlEnv, env_ids: torch.Tensor | None) -> None:
+def _sample_terrain_levels(
+  num_samples: int,
+  num_rows: int,
+  level_ranges: tuple[tuple[int, int], ...],
+  level_weights: tuple[float, ...],
+  device: str | torch.device,
+) -> torch.Tensor:
+  """Sample terrain rows from inclusive low/high buckets."""
+  if len(level_ranges) != len(level_weights):
+    raise ValueError("level_ranges and level_weights must have the same length")
+  if len(level_ranges) == 0:
+    raise ValueError("level_ranges must not be empty")
+
+  weights = torch.tensor(level_weights, dtype=torch.float, device=device)
+  if torch.any(weights < 0.0) or torch.sum(weights) <= 0.0:
+    raise ValueError("level_weights must contain at least one positive value")
+
+  clamped_ranges = []
+  for raw_low, raw_high in level_ranges:
+    low = max(0, min(num_rows - 1, int(raw_low)))
+    high = max(0, min(num_rows - 1, int(raw_high)))
+    if low > high:
+      low, high = high, low
+    clamped_ranges.append((low, high))
+
+  bucket_ids = torch.multinomial(weights / torch.sum(weights), num_samples, True)
+  ranges = torch.tensor(clamped_ranges, dtype=torch.long, device=device)
+  lows = ranges[:, 0][bucket_ids]
+  highs = ranges[:, 1][bucket_ids]
+  spans = highs - lows + 1
+  offsets = torch.floor(torch.rand(num_samples, device=device) * spans.float()).long()
+  return lows + offsets
+
+
+def _sample_terrain_types(
+  env,
+  num_samples: int,
+  num_cols: int,
+  use_sub_terrain_proportions: bool,
+) -> torch.Tensor:
+  """Sample terrain columns uniformly or from generator sub-terrain proportions."""
+  if not use_sub_terrain_proportions:
+    return torch.randint(0, num_cols, (num_samples,), device=env.device)
+
+  terrain_generator = getattr(env.scene.terrain.cfg, "terrain_generator", None)
+  sub_terrains = getattr(terrain_generator, "sub_terrains", None)
+  if sub_terrains is None or len(sub_terrains) != num_cols:
+    return torch.randint(0, num_cols, (num_samples,), device=env.device)
+
+  weights = torch.tensor(
+    [max(0.0, float(sub_cfg.proportion)) for sub_cfg in sub_terrains.values()],
+    dtype=torch.float,
+    device=env.device,
+  )
+  if torch.sum(weights) <= 0.0:
+    return torch.randint(0, num_cols, (num_samples,), device=env.device)
+  return torch.multinomial(weights / torch.sum(weights), num_samples, True)
+
+
+def randomize_terrain(
+  env: ManagerBasedRlEnv,
+  env_ids: torch.Tensor | None,
+  level_ranges: tuple[tuple[int, int], ...] | None = None,
+  level_weights: tuple[float, ...] | None = None,
+  use_sub_terrain_proportions: bool = False,
+) -> None:
   """Randomize the sub-terrain for each environment on reset.
 
   This picks a random terrain type (column) and difficulty level (row) for each
@@ -33,8 +98,47 @@ def randomize_terrain(env: ManagerBasedRlEnv, env_ids: torch.Tensor | None) -> N
     env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int)
 
   terrain = env.scene.terrain
-  if terrain is not None:
+  if terrain is None or terrain.terrain_origins is None:
+    return
+
+  if level_ranges is None and level_weights is None and not use_sub_terrain_proportions:
     terrain.randomize_env_origins(env_ids)
+    return
+
+  if level_ranges is None:
+    level_ranges = ()
+  if level_weights is None:
+    level_weights = ()
+
+  assert terrain.env_origins is not None
+  num_rows, num_cols = terrain.terrain_origins.shape[:2]
+  num_envs = len(env_ids)
+  if level_ranges:
+    terrain.terrain_levels[env_ids] = _sample_terrain_levels(
+      num_envs,
+      num_rows,
+      level_ranges,
+      level_weights,
+      env.device,
+    )
+  else:
+    terrain.terrain_levels[env_ids] = torch.randint(
+      0, num_rows, (num_envs,), device=env.device
+    )
+  terrain.terrain_types[env_ids] = _sample_terrain_types(
+    env,
+    num_envs,
+    num_cols,
+    use_sub_terrain_proportions,
+  )
+  new_origins = terrain.terrain_origins[
+    terrain.terrain_levels[env_ids],
+    terrain.terrain_types[env_ids],
+  ]
+  terrain.env_origins[env_ids] = new_origins
+  scene_env_origins = getattr(env.scene, "env_origins", None)
+  if scene_env_origins is not None:
+    scene_env_origins[env_ids] = new_origins
 
 
 def reset_scene_to_default(

@@ -56,6 +56,22 @@ def _term_major_flat_to_sequence(
     return flat_obs.reshape(flat_obs.shape[0], sequence_length, token_dim)
 
 
+def _build_sinusoidal_position_embedding(
+    sequence_length: int,
+    d_model: int,
+) -> torch.Tensor:
+    """Build fixed sinusoidal position encodings with shape ``(1, T, D)``."""
+    position = torch.arange(sequence_length, dtype=torch.float32).unsqueeze(1)
+    even_dimensions = torch.arange(0, d_model, 2, dtype=torch.float32)
+    div_term = torch.exp(even_dimensions * (-math.log(10000.0) / d_model))
+    embedding = torch.zeros(sequence_length, d_model, dtype=torch.float32)
+    embedding[:, 0::2] = torch.sin(position * div_term)
+    if d_model > 1:
+        odd_width = embedding[:, 1::2].shape[1]
+        embedding[:, 1::2] = torch.cos(position * div_term[:odd_width])
+    return embedding.unsqueeze(0)
+
+
 class CausalTransformerModel(nn.Module):
     """Causal transformer actor over a fixed observation-action history.
 
@@ -94,6 +110,11 @@ class CausalTransformerModel(nn.Module):
         transformer_activation = str(transformer_cfg.pop("transformer_activation", "gelu"))
         self.pooling = str(transformer_cfg.pop("pooling", "last"))
         norm_first = bool(transformer_cfg.pop("norm_first", True))
+        input_projection_hidden_dims = tuple(
+            int(dim) for dim in transformer_cfg.pop("input_projection_hidden_dims", ())
+        )
+        input_projection_activation = str(transformer_cfg.pop("input_projection_activation", activation))
+        position_encoding = str(transformer_cfg.pop("position_encoding", "learned"))
         if transformer_cfg:
             unknown_keys = ", ".join(sorted(transformer_cfg))
             raise ValueError(f"Unknown CausalTransformerModel config keys: {unknown_keys}")
@@ -102,6 +123,8 @@ class CausalTransformerModel(nn.Module):
             raise ValueError(f"d_model={self.d_model} must be divisible by num_heads={num_heads}.")
         if self.pooling not in {"last", "mean"}:
             raise ValueError(f"Unsupported transformer pooling mode: {self.pooling}")
+        if position_encoding not in {"learned", "sinusoidal"}:
+            raise ValueError(f"Unsupported transformer position encoding: {position_encoding}")
 
         self.obs_groups, self.obs_dim = self._get_obs_dim(obs, obs_groups, obs_set)
         if sequence_length_cfg is None:
@@ -120,7 +143,10 @@ class CausalTransformerModel(nn.Module):
 
         if self.sequence_length < 1:
             raise ValueError(f"sequence_length must be >= 1, got {self.sequence_length}")
-        self.sequence_token_dim = sum(self.token_dims) if self.token_dims else self.obs_dim // self.sequence_length
+        if self.token_dims:
+            self.sequence_token_dim = sum(self.token_dims)
+        else:
+            self.sequence_token_dim = self.obs_dim // self.sequence_length
         if self.token_dims and self.obs_dim != self.sequence_length * self.sequence_token_dim:
             raise ValueError(
                 f"obs_dim={self.obs_dim} does not match sequence_length={self.sequence_length} "
@@ -142,8 +168,25 @@ class CausalTransformerModel(nn.Module):
             self.distribution = None
             head_output_dim = output_dim
 
-        self.input_projection = nn.Linear(self.sequence_token_dim, self.d_model)
-        self.position_embedding = nn.Parameter(torch.zeros(1, self.sequence_length, self.d_model))
+        if input_projection_hidden_dims:
+            self.input_projection = MLP(
+                self.sequence_token_dim,
+                self.d_model,
+                input_projection_hidden_dims,
+                input_projection_activation,
+            )
+        else:
+            self.input_projection = nn.Linear(self.sequence_token_dim, self.d_model)
+        if position_encoding == "sinusoidal":
+            self.register_buffer(
+                "position_embedding",
+                _build_sinusoidal_position_embedding(
+                    self.sequence_length,
+                    self.d_model,
+                ),
+            )
+        else:
+            self.position_embedding = nn.Parameter(torch.zeros(1, self.sequence_length, self.d_model))
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=self.d_model,
             nhead=num_heads,
@@ -165,7 +208,8 @@ class CausalTransformerModel(nn.Module):
         self.register_buffer("causal_mask", causal_mask)
         self.head = MLP(self.d_model, head_output_dim, hidden_dims, activation)
 
-        nn.init.normal_(self.position_embedding, mean=0.0, std=0.02)
+        if isinstance(self.position_embedding, nn.Parameter):
+            nn.init.normal_(self.position_embedding, mean=0.0, std=0.02)
         if self.distribution is not None:
             self.distribution.init_mlp_weights(self.head)
 
@@ -305,7 +349,8 @@ class _TorchCausalTransformerModel(nn.Module):
         self.pooling = model.pooling
         self.obs_normalizer = copy.deepcopy(model.obs_normalizer)
         self.input_projection = copy.deepcopy(model.input_projection)
-        self.position_embedding = copy.deepcopy(model.position_embedding)
+        position_embedding = cast(torch.Tensor, model.position_embedding)
+        self.register_buffer("position_embedding", position_embedding.detach().clone())
         self.encoder = copy.deepcopy(model.encoder)
         self.head = copy.deepcopy(model.head)
         causal_mask = cast(torch.Tensor, model.causal_mask)

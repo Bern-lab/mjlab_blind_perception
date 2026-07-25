@@ -1,5 +1,7 @@
 """Tests for EventManager, special dr.* functions, and recomputation."""
 
+from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import Mock
 
 import mujoco
@@ -80,6 +82,47 @@ def create_env(device, fields, num_envs=NUM_ENVS):
 # ===========================================================================
 # Section 1: EventManager
 # ===========================================================================
+
+
+def test_randomize_terrain_accepts_weighted_play_params():
+  """Play randomization can sample weighted terrain rows and columns."""
+  num_envs = 12
+  origins = torch.zeros(4, 3, 3)
+  for row in range(origins.shape[0]):
+    for col in range(origins.shape[1]):
+      origins[row, col] = torch.tensor([float(row), float(col), 0.0])
+
+  terrain = SimpleNamespace(
+    terrain_origins=origins,
+    terrain_levels=torch.zeros(num_envs, dtype=torch.long),
+    terrain_types=torch.zeros(num_envs, dtype=torch.long),
+    env_origins=torch.zeros(num_envs, 3),
+    cfg=SimpleNamespace(
+      terrain_generator=SimpleNamespace(
+        sub_terrains={
+          "flat": SimpleNamespace(proportion=0.0),
+          "stairs": SimpleNamespace(proportion=1.0),
+          "rough": SimpleNamespace(proportion=0.0),
+        }
+      )
+    ),
+  )
+  scene = SimpleNamespace(terrain=terrain, env_origins=torch.zeros(num_envs, 3))
+  env = SimpleNamespace(scene=scene, num_envs=num_envs, device=torch.device("cpu"))
+
+  events.randomize_terrain(
+    cast(Any, env),
+    None,
+    level_ranges=((2, 2),),
+    level_weights=(1.0,),
+    use_sub_terrain_proportions=True,
+  )
+
+  assert torch.all(terrain.terrain_levels == 2)
+  assert torch.all(terrain.terrain_types == 1)
+  expected_origins = origins[terrain.terrain_levels, terrain.terrain_types]
+  assert torch.allclose(terrain.env_origins, expected_origins)
+  assert torch.allclose(scene.env_origins, expected_origins)
 
 
 def test_dr_fields_registered_in_event_manager(device):

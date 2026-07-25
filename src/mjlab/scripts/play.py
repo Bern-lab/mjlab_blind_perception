@@ -13,6 +13,7 @@ import tyro
 
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
+from mjlab.scripts.train import _apply_actor_history_length_override
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
 from mjlab.utils.lstm import reset_policy_state
@@ -49,6 +50,8 @@ class PlayConfig:
   viewer: Literal["auto", "native", "viser"] = "auto"
   no_terminations: bool = False
   """Disable all termination conditions (useful for viewing motions with dummy agents)."""
+  actor_history_length: int | None = None
+  """Override actor observation history to match checkpoints trained with a custom history."""
   show_step_danger_zones: bool = False
   """Show non-colliding stair lip/riser danger zones when the terrain supports them."""
 
@@ -74,7 +77,9 @@ def run_play(task_id: str, cfg: PlayConfig):
       terrain_cfg.step_danger_visualization.enabled = True
       print("[INFO]: Step danger-zone visualization enabled")
     else:
-      print("[WARN]: Step danger-zone visualization requested, but this terrain does not support it")
+      print(
+        "[WARN]: Step danger-zone visualization requested, but this terrain does not support it"
+      )
 
   DUMMY_MODE = cfg.agent in {"zero", "random"}
   TRAINED_MODE = not DUMMY_MODE
@@ -83,6 +88,8 @@ def run_play(task_id: str, cfg: PlayConfig):
   if cfg.no_terminations:
     env_cfg.terminations = {}
     print("[INFO]: Terminations disabled")
+
+  _apply_actor_history_length_override(env_cfg, cfg.actor_history_length)
 
   # Check if this is a tracking task by checking for motion command.
   is_tracking_task = "motion" in env_cfg.commands and isinstance(
