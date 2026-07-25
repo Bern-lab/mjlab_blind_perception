@@ -955,6 +955,95 @@ class PPOTeacherKL(PPO):
         return torch.cat([hint, hint_valid.to(hint.dtype)], dim=-1)
 
     @staticmethod
+    def _same_foot_stride_deployable_hint_from_latent_obs(
+        observations: TensorDict | None,
+        latent_obs_key: str,
+        same_foot_stride_min: float,
+        same_foot_stride_max: float,
+    ) -> torch.Tensor | None:
+        """Extract next same-foot stride targets from deployable ratchet summary."""
+        if observations is None or latent_obs_key not in observations:
+            return None
+        latent_obs = observations[latent_obs_key]
+        latent_dim = int(latent_obs.shape[-1])
+        if latent_dim < 80:
+            return None
+        summary_dim = 70
+        if latent_dim >= 80:
+            new_foot_only = (latent_dim - 80) % 33 == 0
+            new_with_stair = latent_dim >= 173 and (latent_dim - 173) % 33 == 0
+            if latent_dim == 80 or new_foot_only or new_with_stair:
+                summary_dim = 80
+        if summary_dim < 80:
+            return None
+        summary = torch.nan_to_num(latent_obs[..., -summary_dim:])
+        ratchet = summary[..., 70:80]
+        active = ratchet[..., 0:1] > 0.5
+        confirmed = ratchet[..., 6:7] > 0.5
+        lower = ratchet[..., 5:6].clamp(
+            float(same_foot_stride_min),
+            float(same_foot_stride_max),
+        )
+        probe = ratchet[..., 2:3].clamp(
+            float(same_foot_stride_min),
+            float(same_foot_stride_max),
+        )
+        upper = ratchet[..., 7:8].clamp(
+            float(same_foot_stride_min),
+            float(same_foot_stride_max),
+        )
+        open_target = torch.maximum(lower, probe)
+        closed_target = 0.5 * (lower + torch.maximum(upper, lower))
+        target = torch.where(confirmed, closed_target, open_target)
+        target = target.clamp(float(same_foot_stride_min), float(same_foot_stride_max))
+        valid = active & (target > 1.0e-5)
+        return torch.cat(
+            [
+                target,
+                valid.to(target.dtype),
+                (confirmed & valid).to(target.dtype),
+            ],
+            dim=-1,
+        )
+
+    @staticmethod
+    def _compute_same_foot_stride_hint_loss(
+        predictions: torch.Tensor,
+        hint: torch.Tensor,
+        valid: torch.Tensor,
+        confirmed: torch.Tensor,
+        minimum: float,
+        maximum: float,
+        margin: float,
+        huber_delta: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Use ratchet lower/probe as one-sided hint and confirmed interval as target."""
+        value_range = max(float(maximum) - float(minimum), 1.0e-6)
+        normalized_margin = max(float(margin), 0.0) / value_range
+        pred_norm = (predictions - float(minimum)) / value_range
+        hint_norm = (hint - float(minimum)) / value_range
+        weight = valid.float()
+        shortfall = torch.relu(hint_norm - pred_norm - normalized_margin)
+        open_mask = weight * (1.0 - confirmed.float())
+        confirmed_mask = weight * confirmed.float()
+        open_loss = functional.smooth_l1_loss(
+            shortfall,
+            torch.zeros_like(shortfall),
+            reduction="none",
+            beta=huber_delta,
+        )
+        confirmed_loss = functional.smooth_l1_loss(
+            pred_norm,
+            hint_norm,
+            reduction="none",
+            beta=huber_delta,
+        )
+        loss = ((open_loss * open_mask).sum() + (confirmed_loss * confirmed_mask).sum()) / weight.sum().clamp_min(1.0)
+        shortfall_mae = (shortfall * open_mask).sum() / open_mask.sum().clamp_min(1.0)
+        confirmed_mae = (torch.abs(predictions - hint) * confirmed_mask).sum() / confirmed_mask.sum().clamp_min(1.0)
+        return loss, shortfall_mae, confirmed_mae
+
+    @staticmethod
     def _compute_normalized_stair_shape_loss(
         predictions: torch.Tensor,
         labels: torch.Tensor,
@@ -1530,17 +1619,19 @@ class PPOTeacherKL(PPO):
             raise RuntimeError("Slow-latent 'latent_labels' must contain event and stair labels.")
         if shape_coef != 0.0 and labels.shape[-1] < 5:
             raise RuntimeError(
-                "Slow-latent stair-shape loss requires labels [event, stair, tread_depth, riser_height, shape_valid]."
+                "Slow-latent stair-shape loss requires labels [event, stair, "
+                "same_foot_stride, riser_height, shape_valid]."
             )
         if safe_stride_coef != 0.0 and labels.shape[-1] < 7:
             raise RuntimeError(
-                "Slow-latent safe-stride loss requires labels [event, stair, tread_depth, "
-                "riser_height, shape_valid, safe_stride, safe_stride_valid]."
+                "Slow-latent safe-stride loss requires labels [event, stair, "
+                "same_foot_stride, riser_height, shape_valid, safe_stride, "
+                "safe_stride_valid]."
             )
         if (future_risk_coef != 0.0 or future_quality_coef != 0.0) and labels.shape[-1] < 10:
             raise RuntimeError(
-                "Slow-latent future losses require labels [entry, stair, tread_depth, "
-                "riser_height, shape_valid, safe_stride, safe_stride_valid, "
+                "Slow-latent future losses require labels [entry, stair, "
+                "same_foot_stride, riser_height, shape_valid, safe_stride, safe_stride_valid, "
                 "collision_risk, landing_touchdown, landing_quality]."
             )
         event_labels_raw_padded = labels[..., 0:1].float()
@@ -1615,10 +1706,23 @@ class PPOTeacherKL(PPO):
             float(getattr(self.actor, "safe_stride_min", 0.10)),
             float(getattr(self.actor, "safe_stride_max", 0.55)),
         )
+        same_foot_hint_padded = self._same_foot_stride_deployable_hint_from_latent_obs(
+            observations,
+            str(getattr(self.actor, "latent_obs_set", "latent")),
+            float(getattr(self.actor, "same_foot_stride_min", 0.10)),
+            float(getattr(self.actor, "same_foot_stride_max", 0.80)),
+        )
         if deployable_hint_padded is None:
             deployable_hint_padded = torch.zeros(
                 *labels.shape[:-1],
                 2,
+                device=labels.device,
+                dtype=labels.dtype,
+            )
+        if same_foot_hint_padded is None:
+            same_foot_hint_padded = torch.zeros(
+                *labels.shape[:-1],
+                3,
                 device=labels.device,
                 dtype=labels.dtype,
             )
@@ -1738,6 +1842,13 @@ class PPOTeacherKL(PPO):
                     batch.masks,
                 ),
             )
+            same_foot_hint = cast(
+                torch.Tensor,
+                unpad_trajectories(
+                    same_foot_hint_padded,
+                    batch.masks,
+                ),
+            )
         else:
             event_labels_raw = event_labels_raw_padded
             event_labels = event_labels_padded
@@ -1758,6 +1869,7 @@ class PPOTeacherKL(PPO):
             depth_confirmation_age = depth_confirmation_age_padded
             adjacent_pair_evidence = adjacent_pair_evidence_padded
             deployable_hint = deployable_hint_padded
+            same_foot_hint = same_foot_hint_padded
 
         total_loss = torch.zeros((), device=self.device)
         logs: dict[str, float] = {}
@@ -1967,10 +2079,10 @@ class PPOTeacherKL(PPO):
                     | (confirmation_age == 16)
                     | (confirmation_age == 32)
                 )
-                depth_sample = sparse_age_sample.to(shape_component_valid.dtype)
+                stride_sample = sparse_age_sample.to(shape_component_valid.dtype)
                 height_sample = (sparse_age_sample | (event_labels_raw[..., 0] > 0.5)).to(shape_component_valid.dtype)
                 geometry_sample = torch.stack(
-                    [depth_sample, height_sample],
+                    [stride_sample, height_sample],
                     dim=-1,
                 )
                 geometry_component_valid = shape_component_valid * geometry_sample
@@ -1980,18 +2092,30 @@ class PPOTeacherKL(PPO):
             shape_loss_labels = shape_labels
             if self.geometry_probe_only and self.geometry_probe_permute_depth_labels:
                 shape_loss_labels = shape_labels.clone()
-                depth_labels_flat = shape_loss_labels[..., 0].reshape(-1)
-                depth_valid_flat = shape_loss_valid[..., 0].reshape(-1) > 0.5
-                depth_valid_indices = depth_valid_flat.nonzero(as_tuple=False).squeeze(-1)
-                if depth_valid_indices.numel() > 1:
-                    depth_values = depth_labels_flat[depth_valid_indices].clone()
-                    depth_labels_flat[depth_valid_indices] = depth_values.roll(1)
+                stride_labels_flat = shape_loss_labels[..., 0].reshape(-1)
+                stride_valid_flat = shape_loss_valid[..., 0].reshape(-1) > 0.5
+                stride_valid_indices = stride_valid_flat.nonzero(as_tuple=False).squeeze(-1)
+                if stride_valid_indices.numel() > 1:
+                    stride_values = stride_labels_flat[stride_valid_indices].clone()
+                    stride_labels_flat[stride_valid_indices] = stride_values.roll(1)
             shape_lower_bounds = shape_labels.new_tensor([
-                float(getattr(self.actor, "tread_depth_min", 0.18)),
+                float(
+                    getattr(
+                        self.actor,
+                        "same_foot_stride_min",
+                        getattr(self.actor, "safe_stride_min", 0.10),
+                    )
+                ),
                 float(getattr(self.actor, "riser_height_min", 0.088)),
             ])
             shape_upper_bounds = shape_labels.new_tensor([
-                float(getattr(self.actor, "tread_depth_max", 0.35)),
+                float(
+                    getattr(
+                        self.actor,
+                        "same_foot_stride_max",
+                        getattr(self.actor, "safe_stride_max", 0.55),
+                    )
+                ),
                 float(getattr(self.actor, "riser_height_max", 0.25)),
             ])
             if self.geometry_probe_only:
@@ -2020,6 +2144,33 @@ class PPOTeacherKL(PPO):
                 shape_loss_valid,
                 huber_delta,
             )
+            same_foot_hint_coef = float(getattr(self.actor, "same_foot_stride_deployable_hint_loss_coef", 0.0))
+            same_foot_hint_loss_raw = shape_predictions.new_zeros(())
+            same_foot_hint_shortfall_mae = shape_predictions.new_zeros(())
+            same_foot_hint_confirmed_mae = shape_predictions.new_zeros(())
+            if same_foot_hint_coef != 0.0:
+                same_foot_hint_valid = same_foot_hint[..., 1:2] * shape_loss_valid[..., 0:1]
+                (
+                    same_foot_hint_loss_raw,
+                    same_foot_hint_shortfall_mae,
+                    same_foot_hint_confirmed_mae,
+                ) = self._compute_same_foot_stride_hint_loss(
+                    shape_predictions[..., 0:1],
+                    same_foot_hint[..., 0:1],
+                    same_foot_hint_valid,
+                    same_foot_hint[..., 2:3],
+                    float(shape_lower_bounds[0].item()),
+                    float(shape_upper_bounds[0].item()),
+                    float(
+                        getattr(
+                            self.actor,
+                            "same_foot_stride_deployable_hint_margin",
+                            0.02,
+                        )
+                    ),
+                    huber_delta,
+                )
+                shape_loss_raw = shape_loss_raw + same_foot_hint_coef * same_foot_hint_loss_raw
             if self.geometry_probe_only:
                 self._accumulate_geometry_probe_statistics(
                     shape_predictions,
@@ -2031,22 +2182,10 @@ class PPOTeacherKL(PPO):
                 pair_valid = adjacent_pair_evidence[..., 2]
                 pair_event = adjacent_pair_evidence[..., 3]
                 self._accumulate_geometry_probe_component(
-                    adjacent_pair_evidence[..., 0],
-                    shape_labels[..., 0],
-                    pair_valid,
-                    "physical_pair_frame_depth",
-                )
-                self._accumulate_geometry_probe_component(
                     adjacent_pair_evidence[..., 1],
                     shape_labels[..., 1],
                     pair_valid,
                     "physical_pair_frame_height",
-                )
-                self._accumulate_geometry_probe_component(
-                    adjacent_pair_evidence[..., 0],
-                    shape_labels[..., 0],
-                    pair_event,
-                    "physical_pair_event_depth",
                 )
                 self._accumulate_geometry_probe_component(
                     adjacent_pair_evidence[..., 1],
@@ -2061,10 +2200,24 @@ class PPOTeacherKL(PPO):
             logs["slow_latent_shape_huber"] = normalized_shape_huber
             logs["slow_latent_shape_normalized_huber"] = normalized_shape_huber
             logs["slow_latent_shape_loss"] = self._distributed_mean_scalar(shape_loss).item()
+            if same_foot_hint_coef != 0.0:
+                logs["slow_latent_same_foot_stride_deployable_hint_loss_coef"] = same_foot_hint_coef
+                logs["slow_latent_same_foot_stride_deployable_hint_huber"] = self._distributed_mean_scalar(
+                    same_foot_hint_loss_raw
+                ).item()
+                logs["slow_latent_same_foot_stride_deployable_hint_valid_ratio"] = self._distributed_mean_scalar(
+                    (same_foot_hint[..., 1:2] * shape_loss_valid[..., 0:1]).mean()
+                ).item()
+                logs["slow_latent_same_foot_stride_deployable_hint_shortfall_mae"] = self._distributed_mean_scalar(
+                    same_foot_hint_shortfall_mae
+                ).item()
+                logs["slow_latent_same_foot_stride_deployable_hint_confirmed_mae"] = self._distributed_mean_scalar(
+                    same_foot_hint_confirmed_mae
+                ).item()
             logs["slow_latent_shape_valid_ratio"] = self._distributed_mean_scalar(shape_valid.mean()).item()
             shape_valid_count = self._distributed_mean_scalar(shape_valid.sum())
             logs["slow_latent_shape_valid_count"] = shape_valid_count.item()
-            logs["slow_latent_tread_depth_valid_ratio"] = self._distributed_mean_scalar(
+            logs["slow_latent_same_foot_stride_valid_ratio"] = self._distributed_mean_scalar(
                 shape_component_valid[..., 0].mean()
             ).item()
             logs["slow_latent_riser_height_valid_ratio"] = self._distributed_mean_scalar(
@@ -2074,10 +2227,10 @@ class PPOTeacherKL(PPO):
                 logs["slow_latent_geometry_probe_validation_ratio"] = self._distributed_mean_scalar(
                     geometry_probe_validation.mean()
                 ).item()
-                logs["slow_latent_geometry_probe_depth_sample_ratio"] = self._distributed_mean_scalar(
+                logs["slow_latent_geometry_probe_same_foot_stride_sample_ratio"] = self._distributed_mean_scalar(
                     geometry_component_valid[..., 0].mean()
                 ).item()
-                logs["slow_latent_geometry_probe_permuted_depth_labels"] = float(
+                logs["slow_latent_geometry_probe_permuted_stride_labels"] = float(
                     self.geometry_probe_permute_depth_labels
                 )
             stair_positive_float = (stair_labels > 0.5).to(shape_valid.dtype)
@@ -2093,7 +2246,7 @@ class PPOTeacherKL(PPO):
             logs["slow_latent_shape_valid_stair_coverage"] = stair_coverage_mean
             logs["slow_latent_shape_valid_while_flat_ratio"] = flat_leakage_mean
             component_masks = {
-                "tread_depth": shape_component_valid[..., 0:1],
+                "same_foot_stride": shape_component_valid[..., 0:1],
                 "riser_height": shape_component_valid[..., 1:2],
             }
             for component_name, component_valid in component_masks.items():
@@ -2105,9 +2258,9 @@ class PPOTeacherKL(PPO):
                 logs[f"slow_latent_{component_name}_valid_while_flat_ratio"] = mean_scalar(
                     component_flat.sum() / flat_count
                 ).item()
-            logs["slow_latent_tread_depth_mae"] = self._distributed_mean_scalar(shape_mae[0]).item()
+            logs["slow_latent_same_foot_stride_mae"] = self._distributed_mean_scalar(shape_mae[0]).item()
             logs["slow_latent_riser_height_mae"] = self._distributed_mean_scalar(shape_mae[1]).item()
-            logs["slow_latent_tread_depth_huber"] = self._distributed_mean_scalar(shape_huber[0]).item()
+            logs["slow_latent_same_foot_stride_huber"] = self._distributed_mean_scalar(shape_huber[0]).item()
             logs["slow_latent_riser_height_huber"] = self._distributed_mean_scalar(shape_huber[1]).item()
             shape_out_of_range = self._compute_label_out_of_range_ratios(
                 shape_labels,
@@ -2115,7 +2268,7 @@ class PPOTeacherKL(PPO):
                 shape_lower_bounds,
                 shape_upper_bounds,
             )
-            logs["slow_latent_tread_depth_out_of_range_label_ratio"] = self._distributed_mean_scalar(
+            logs["slow_latent_same_foot_stride_out_of_range_label_ratio"] = self._distributed_mean_scalar(
                 shape_out_of_range[0]
             ).item()
             logs["slow_latent_riser_height_out_of_range_label_ratio"] = self._distributed_mean_scalar(
@@ -2129,7 +2282,7 @@ class PPOTeacherKL(PPO):
             label_std, prediction_std, correlation, r_squared = regression_stats
             shape_ranges = shape_upper_bounds - shape_lower_bounds
             normalized_mae = shape_mae / shape_ranges
-            component_names = ("tread_depth", "riser_height")
+            component_names = ("same_foot_stride", "riser_height")
             for component_index, component_name in enumerate(component_names):
                 index = component_index
                 normalized_mae_mean = mean_scalar(normalized_mae[index])
@@ -2586,7 +2739,7 @@ class PPOTeacherKL(PPO):
 
         stair_shape = diagnostics.get("stair_shape")
         if stair_shape is not None and stair_shape.numel() > 0:
-            add_mean("slow_latent_tread_depth_pred_mean", stair_shape[..., 0])
+            add_mean("slow_latent_same_foot_stride_pred_mean", stair_shape[..., 0])
             add_mean("slow_latent_riser_height_pred_mean", stair_shape[..., 1])
 
         safe_stride = diagnostics.get("safe_stride")
@@ -2622,7 +2775,7 @@ class PPOTeacherKL(PPO):
                 "write_progress",
                 "memory_age",
                 "release_progress",
-                "tread_depth_norm",
+                "same_foot_stride_norm",
                 "riser_height_norm",
                 "safe_stride_lower_norm",
                 "safe_stride_upper_norm",

@@ -183,6 +183,12 @@ def get_recurrent_policy_metadata(policy: Any) -> dict[str, list | str | float]:
         "policy_stair_riser_height_max": str(getattr(policy, "riser_height_max", "")),
         "policy_stair_safe_stride_min": str(getattr(policy, "safe_stride_min", "")),
         "policy_stair_safe_stride_max": str(getattr(policy, "safe_stride_max", "")),
+        "policy_stair_same_foot_stride_min": str(
+          getattr(policy, "same_foot_stride_min", "")
+        ),
+        "policy_stair_same_foot_stride_max": str(
+          getattr(policy, "same_foot_stride_max", "")
+        ),
       }
     )
   elif rnn_type == "lstm" and slow_latent_dim is not None:

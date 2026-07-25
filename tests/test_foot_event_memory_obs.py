@@ -522,7 +522,7 @@ def test_foot_event_memory_ratchet_closes_interval_from_same_foot_toe_hit() -> N
   term.ratchet_active[0] = True
   term.ratchet_lower_s[0] = 0.25
   term.ratchet_probe_target_s[0] = 0.45
-  term.ratchet_depth_lower_s[0] = 0.25
+  term.ratchet_same_foot_stride_lower_s[0] = 0.25
   term.ratchet_last_forward_up_stride[0] = 0.25
   term.ratchet_confidence[0] = 0.4
 
@@ -560,3 +560,44 @@ def test_foot_event_memory_ratchet_closes_interval_from_same_foot_toe_hit() -> N
   torch.testing.assert_close(ratchet[7], torch.tensor(0.36))
   torch.testing.assert_close(ratchet[8], torch.tensor(0.75))
   torch.testing.assert_close(term.ratchet_collision_upper_s[0], torch.tensor(0.34))
+
+
+def test_foot_event_memory_ratchet_ignores_toe_hit_without_upstair_context() -> None:
+  env = _make_env()
+  term = FootEventMemoryObs(
+    SimpleNamespace(
+      params={
+        "memory_len": 6,
+        "noise_enabled": False,
+        "age_norm_s": 1.0,
+        "stance_age_norm_s": 1.0,
+      }
+    ),
+    env,
+  )
+
+  term.toe_valid[0, 0] = True
+  toe = term.toe_marks[0, 0]
+  toe[0] = 1.0
+  toe[1] = 1.0
+  toe[4] = 0.6
+  toe[9] = 0.41
+
+  term.footprint_valid[0, 0] = True
+  footprint = term.footprints[0, 0]
+  footprint[0] = 1.0
+  footprint[1] = 1.0
+  footprint[3] = 1.0
+  footprint[5] = 1.0
+  footprint[10] = 0.05
+
+  summary = term._compute_event_summary(
+    update_ratchet=True,
+    new_footprint_any=torch.tensor([False]),
+    new_toe_mark_any=torch.tensor([True]),
+    step_dt=0.02,
+  )[0]
+  ratchet = summary[FOOT_EVENT_RATCHET_START:]
+
+  torch.testing.assert_close(ratchet[0], torch.tensor(0.0))
+  torch.testing.assert_close(ratchet[6], torch.tensor(0.0))

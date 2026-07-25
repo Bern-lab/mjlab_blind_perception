@@ -36,6 +36,7 @@ from mjlab.tasks.velocity.mdp.stair_geometry import (
   STAIR_ENTRY_RECENT_EVIDENCE_KEY,
   STAIR_PHASE_KEY,
   STAIR_RISER_HEIGHT_LABEL_KEY,
+  STAIR_SAME_FOOT_STRIDE_LABEL_KEY,
   STAIR_SHAPE_LABEL_VALID_KEY,
   STAIR_TREAD_DEPTH_LABEL_KEY,
   TOE_RISER_NEW_HIT_KEY,
@@ -742,6 +743,55 @@ def test_depth_confirmation_requires_layer2_or_later_expected_riser() -> None:
   )
 
 
+def test_upstair_landing_safety_masks_exclude_flat_and_downstairs() -> None:
+  (
+    up_touchdown,
+    safe_up_touchdown,
+    expected_touchdown,
+    safe_expected_touchdown,
+    up_contact,
+    safe_up_contact,
+    expected_contact,
+    safe_expected_contact,
+  ) = temporal_stair_rewards._upstair_landing_safety_masks(
+    active=torch.tensor([True, True, True, True, True, True]),
+    target_touchdown=torch.ones(6, dtype=torch.bool),
+    target_contact=torch.ones(6, dtype=torch.bool),
+    shape_valid=torch.ones(6, dtype=torch.bool),
+    heading_gate=torch.ones(6, dtype=torch.bool),
+    target_has_stair_support=torch.tensor([True, True, True, True, False, True]),
+    target_geometry_gate=torch.tensor([True, True, True, False, False, True]),
+    target_full_support_gate=torch.tensor([True, False, True, True, True, True]),
+    target_support_layer=torch.tensor([1, 1, 0, 2, 0, 1]),
+    expected_layer=torch.tensor([1, 1, 1, 1, 1, 0]),
+    support_layer=torch.tensor([0, 0, 0, 0, 0, 1]),
+    target_riser_unsafe=torch.tensor([False, False, False, False, False, False]),
+    target_slab_unsafe=torch.tensor([False, False, False, False, False, False]),
+    target_lip_unsafe=torch.tensor([False, False, False, False, False, False]),
+  )
+
+  torch.testing.assert_close(
+    up_touchdown,
+    torch.tensor([True, True, False, True, False, False]),
+  )
+  torch.testing.assert_close(
+    safe_up_touchdown,
+    torch.tensor([True, False, False, True, False, False]),
+  )
+  torch.testing.assert_close(
+    expected_touchdown,
+    torch.tensor([True, True, False, False, False, False]),
+  )
+  torch.testing.assert_close(
+    safe_expected_touchdown,
+    torch.tensor([True, False, False, False, False, False]),
+  )
+  torch.testing.assert_close(up_contact, up_touchdown)
+  torch.testing.assert_close(safe_up_contact, safe_up_touchdown)
+  torch.testing.assert_close(expected_contact, expected_touchdown)
+  torch.testing.assert_close(safe_expected_contact, safe_expected_touchdown)
+
+
 def test_safe_stride_lower_bound_is_toe_gap_plus_complete_foot_length() -> None:
   boundaries = torch.zeros(1, 1, 11)
   boundaries[:, :, 4] = 1.0
@@ -781,6 +831,7 @@ def test_slow_latent_labels_follow_env_stair_state_machine() -> None:
       TOE_RISER_NEW_HIT_KEY: torch.tensor([False, True]),
       STAIR_PHASE_KEY: torch.tensor([1, 2]),
       STAIR_TREAD_DEPTH_LABEL_KEY: torch.tensor([0.30, 0.35]),
+      STAIR_SAME_FOOT_STRIDE_LABEL_KEY: torch.tensor([0.36, 0.44]),
       STAIR_RISER_HEIGHT_LABEL_KEY: torch.tensor([0.18, 0.20]),
       STAIR_SHAPE_LABEL_VALID_KEY: torch.tensor([True, True]),
       STAIR_DEPTH_LABEL_VALID_KEY: torch.tensor([False, True]),
@@ -826,7 +877,7 @@ def test_slow_latent_labels_follow_env_stair_state_machine() -> None:
         [
           1.0,
           1.0,
-          0.30,
+          0.36,
           0.18,
           1.0,
           0.0,
@@ -851,7 +902,7 @@ def test_slow_latent_labels_follow_env_stair_state_machine() -> None:
         [
           0.0,
           1.0,
-          0.35,
+          0.44,
           0.20,
           1.0,
           0.41,
@@ -975,6 +1026,7 @@ def test_stair_shape_label_is_masked_outside_active_sequence() -> None:
     extras={
       STAIR_PHASE_KEY: torch.tensor([0, 1, 2]),
       STAIR_TREAD_DEPTH_LABEL_KEY: torch.tensor([0.30, 0.31, 0.32]),
+      STAIR_SAME_FOOT_STRIDE_LABEL_KEY: torch.tensor([0.34, 0.42, 0.50]),
       STAIR_RISER_HEIGHT_LABEL_KEY: torch.tensor([0.10, 0.11, 0.12]),
       STAIR_SHAPE_LABEL_VALID_KEY: torch.tensor([True, True, False]),
     },
@@ -986,9 +1038,9 @@ def test_stair_shape_label_is_masked_outside_active_sequence() -> None:
     labels,
     torch.tensor(
       [
-        [0.30, 0.10, 0.0],
-        [0.31, 0.11, 1.0],
-        [0.32, 0.12, 0.0],
+        [0.34, 0.10, 0.0],
+        [0.42, 0.11, 1.0],
+        [0.50, 0.12, 0.0],
       ]
     ),
   )

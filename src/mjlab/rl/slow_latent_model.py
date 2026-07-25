@@ -97,8 +97,12 @@ class LSTMSlowLatentMLPModel(MLPModel):
     safe_stride_std_floor_ratio: float = 0.70,
     safe_stride_deployable_hint_loss_coef: float = 0.0,
     safe_stride_deployable_hint_margin: float = 0.02,
+    same_foot_stride_deployable_hint_loss_coef: float = 0.0,
+    same_foot_stride_deployable_hint_margin: float = 0.02,
     safe_stride_min: float = 0.10,
     safe_stride_max: float = 0.55,
+    same_foot_stride_min: float = 0.10,
+    same_foot_stride_max: float = 0.80,
     structured_safe_stride_enabled: bool = False,
     dynamic_stair_shape_enabled: bool = False,
     dynamic_safe_stride_enabled: bool = False,
@@ -344,6 +348,12 @@ class LSTMSlowLatentMLPModel(MLPModel):
       safe_stride_deployable_hint_loss_coef
     )
     self.safe_stride_deployable_hint_margin = float(safe_stride_deployable_hint_margin)
+    self.same_foot_stride_deployable_hint_loss_coef = float(
+      same_foot_stride_deployable_hint_loss_coef
+    )
+    self.same_foot_stride_deployable_hint_margin = float(
+      same_foot_stride_deployable_hint_margin
+    )
     if self.safe_stride_width_loss_coef < 0.0:
       raise ValueError("safe_stride_width_loss_coef must be non-negative.")
     if self.safe_stride_lower_shortfall_coef < 1.0:
@@ -364,12 +374,20 @@ class LSTMSlowLatentMLPModel(MLPModel):
       raise ValueError("safe_stride_deployable_hint_loss_coef must be non-negative.")
     if self.safe_stride_deployable_hint_margin < 0.0:
       raise ValueError("safe_stride_deployable_hint_margin must be non-negative.")
+    if self.same_foot_stride_deployable_hint_loss_coef < 0.0:
+      raise ValueError(
+        "same_foot_stride_deployable_hint_loss_coef must be non-negative."
+      )
+    if self.same_foot_stride_deployable_hint_margin < 0.0:
+      raise ValueError("same_foot_stride_deployable_hint_margin must be non-negative.")
     self.tread_depth_min = _TREAD_DEPTH_MIN_M
     self.tread_depth_max = _TREAD_DEPTH_MAX_M
     self.riser_height_min = _RISER_HEIGHT_MIN_M
     self.riser_height_max = _RISER_HEIGHT_MAX_M
     self.safe_stride_min = float(safe_stride_min)
     self.safe_stride_max = float(safe_stride_max)
+    self.same_foot_stride_min = float(same_foot_stride_min)
+    self.same_foot_stride_max = float(same_foot_stride_max)
     self.structured_safe_stride_enabled = bool(structured_safe_stride_enabled)
     self.dynamic_safe_stride_enabled = bool(dynamic_safe_stride_enabled)
     self.safe_stride_phase_dim = int(safe_stride_phase_dim)
@@ -391,6 +409,10 @@ class LSTMSlowLatentMLPModel(MLPModel):
     self.shadow_semantic_enabled = bool(shadow_semantic_enabled)
     bounds = {
       "tread_depth": (self.tread_depth_min, self.tread_depth_max),
+      "same_foot_stride": (
+        self.same_foot_stride_min,
+        self.same_foot_stride_max,
+      ),
       "riser_height": (self.riser_height_min, self.riser_height_max),
       "safe_stride": (self.safe_stride_min, self.safe_stride_max),
     }
@@ -514,21 +536,21 @@ class LSTMSlowLatentMLPModel(MLPModel):
     return self._denormalize_stair_shape(shape01)
 
   def _denormalize_stair_shape(self, shape01: torch.Tensor) -> torch.Tensor:
-    """Map normalized depth/height predictions to physical units."""
-    tread_depth = self.tread_depth_min + shape01[..., 0:1] * (
-      self.tread_depth_max - self.tread_depth_min
+    """Map normalized same-foot stride/height predictions to physical units."""
+    same_foot_stride = self.same_foot_stride_min + shape01[..., 0:1] * (
+      self.same_foot_stride_max - self.same_foot_stride_min
     )
     riser_height = self.riser_height_min + shape01[..., 1:2] * (
       self.riser_height_max - self.riser_height_min
     )
-    return torch.cat([tread_depth, riser_height], dim=-1)
+    return torch.cat([same_foot_stride, riser_height], dim=-1)
 
   def _decode_geometry_probe(
     self,
     shape_memory: torch.Tensor,
     h_t: torch.Tensor,
   ) -> torch.Tensor | None:
-    """Decode physical stair geometry from the configured frozen feature set."""
+    """Decode actionable same-foot stride and riser height from frozen features."""
     if self.geometry_probe_head is None:
       return None
     if self.geometry_probe_input == "shape":
@@ -597,6 +619,48 @@ class LSTMSlowLatentMLPModel(MLPModel):
   ) -> torch.Tensor:
     return torch.clamp((value - minimum) / (maximum - minimum), 0.0, 1.0)
 
+  @staticmethod
+  def _foot_event_summary_dim(latent_obs: torch.Tensor) -> int:
+    latent_dim = int(latent_obs.shape[-1])
+    if latent_dim < 80:
+      return 0
+    new_foot_only = (latent_dim - 80) % 33 == 0
+    new_with_stair = latent_dim >= 173 and (latent_dim - 173) % 33 == 0
+    return 80 if latent_dim == 80 or new_foot_only or new_with_stair else 0
+
+  def _same_foot_actor_stride_target(
+    self,
+    stair_shape: torch.Tensor,
+    latent_obs: torch.Tensor | None = None,
+  ) -> torch.Tensor:
+    """Fuse the stride head with deployable ratchet evidence for actor input."""
+    target = stair_shape[..., 0:1]
+    if latent_obs is None:
+      return target
+    summary_dim = self._foot_event_summary_dim(latent_obs)
+    if summary_dim < 80:
+      return target
+    summary = torch.nan_to_num(latent_obs[..., -summary_dim:])
+    ratchet = summary[..., 70:80]
+    active = ratchet[..., 0:1] > 0.5
+    lower = ratchet[..., 5:6].clamp(
+      self.same_foot_stride_min,
+      self.same_foot_stride_max,
+    )
+    probe = ratchet[..., 2:3].clamp(
+      self.same_foot_stride_min,
+      self.same_foot_stride_max,
+    )
+    upper = ratchet[..., 7:8].clamp(
+      self.same_foot_stride_min,
+      self.same_foot_stride_max,
+    )
+    confirmed = ratchet[..., 6:7] > 0.5
+    open_target = torch.maximum(probe, lower)
+    closed_target = 0.5 * (lower + torch.maximum(upper, lower))
+    ratchet_target = torch.where(confirmed, closed_target, open_target)
+    return torch.where(active, ratchet_target, target)
+
   def _build_shadow_semantic(
     self,
     event_prob: torch.Tensor,
@@ -605,6 +669,7 @@ class LSTMSlowLatentMLPModel(MLPModel):
     stair_shape: torch.Tensor,
     safe_stride_interval: torch.Tensor,
     safe_stride_confidence: torch.Tensor | None = None,
+    latent_obs: torch.Tensor | None = None,
   ) -> torch.Tensor:
     """Build a fixed-position semantic vector without feeding it to the actor."""
     mode = gate_state[..., 0:1]
@@ -645,12 +710,12 @@ class LSTMSlowLatentMLPModel(MLPModel):
       dim=-1,
     )
 
-    tread_depth = stair_shape[..., 0:1]
+    same_foot_stride = stair_shape[..., 0:1]
     riser_height = stair_shape[..., 1:2]
-    tread_depth_norm = self._normalize_semantic_value(
-      tread_depth,
-      self.tread_depth_min,
-      self.tread_depth_max,
+    same_foot_stride_norm = self._normalize_semantic_value(
+      same_foot_stride,
+      self.same_foot_stride_min,
+      self.same_foot_stride_max,
     )
     riser_height_norm = self._normalize_semantic_value(
       riser_height,
@@ -687,27 +752,20 @@ class LSTMSlowLatentMLPModel(MLPModel):
       else safe_stride_confidence
     )
     confidence = torch.clamp(confidence, 0.0, 1.0)
-    interval_certainty = 1.0 - stride_width / (
-      self.safe_stride_max - self.safe_stride_min
-    )
-    actor_target_mix = torch.maximum(confidence, interval_certainty.clamp(0.0, 1.0))
-    stride_actor_target = stride_lower + actor_target_mix * (
-      stride_center - stride_lower
-    )
-    stride_actor_target_norm = self._normalize_semantic_value(
-      stride_actor_target,
-      self.safe_stride_min,
-      self.safe_stride_max,
+    same_foot_actor_target_norm = self._normalize_semantic_value(
+      self._same_foot_actor_stride_target(stair_shape, latent_obs),
+      self.same_foot_stride_min,
+      self.same_foot_stride_max,
     )
     shape_semantic = torch.cat(
       [
-        tread_depth_norm,
+        same_foot_stride_norm,
         riser_height_norm,
         stride_lower_norm,
         stride_upper_norm,
         stride_center_norm,
         stride_width_norm,
-        stride_actor_target_norm,
+        same_foot_actor_target_norm,
         confidence,
       ],
       dim=-1,
@@ -1290,6 +1348,7 @@ class LSTMSlowLatentMLPModel(MLPModel):
         self._aux_stair_shape_predictions,
         self._aux_safe_stride_intervals,
         torch.sigmoid(self._aux_safe_stride_confidence_logits),
+        latent_obs,
       )
       if self.shadow_semantic_enabled or self.actor_semantic_enabled
       else None
@@ -1690,6 +1749,8 @@ class _OnnxStairLatentModel(nn.Module):
     self.riser_height_max = model.riser_height_max
     self.safe_stride_min = model.safe_stride_min
     self.safe_stride_max = model.safe_stride_max
+    self.same_foot_stride_min = model.same_foot_stride_min
+    self.same_foot_stride_max = model.same_foot_stride_max
     self.structured_safe_stride_enabled = model.structured_safe_stride_enabled
     self.dynamic_stair_shape_enabled = model.dynamic_stair_shape_enabled
     self.dynamic_safe_stride_enabled = model.dynamic_safe_stride_enabled
@@ -1744,13 +1805,13 @@ class _OnnxStairLatentModel(nn.Module):
     else:
       features = shape_memory
     shape01 = torch.sigmoid(self.stair_shape_head(features))
-    tread_depth = self.tread_depth_min + shape01[..., 0:1] * (
-      self.tread_depth_max - self.tread_depth_min
+    same_foot_stride = self.same_foot_stride_min + shape01[..., 0:1] * (
+      self.same_foot_stride_max - self.same_foot_stride_min
     )
     riser_height = self.riser_height_min + shape01[..., 1:2] * (
       self.riser_height_max - self.riser_height_min
     )
-    return torch.cat([tread_depth, riser_height], dim=-1)
+    return torch.cat([same_foot_stride, riser_height], dim=-1)
 
   def _decode_safe_stride_outputs(
     self,
@@ -1796,6 +1857,48 @@ class _OnnxStairLatentModel(nn.Module):
   ) -> torch.Tensor:
     return torch.clamp((value - minimum) / (maximum - minimum), 0.0, 1.0)
 
+  @staticmethod
+  def _foot_event_summary_dim(latent_obs: torch.Tensor) -> int:
+    latent_dim = int(latent_obs.shape[-1])
+    if latent_dim < 80:
+      return 0
+    new_foot_only = (latent_dim - 80) % 33 == 0
+    new_with_stair = latent_dim >= 173 and (latent_dim - 173) % 33 == 0
+    return 80 if latent_dim == 80 or new_foot_only or new_with_stair else 0
+
+  def _same_foot_actor_stride_target(
+    self,
+    stair_shape: torch.Tensor,
+    latent_obs: torch.Tensor | None = None,
+  ) -> torch.Tensor:
+    target = stair_shape[..., 0:1]
+    if latent_obs is None:
+      return target
+    summary_dim = self._foot_event_summary_dim(latent_obs)
+    if summary_dim < 80:
+      return target
+    summary = torch.nan_to_num(latent_obs[..., -summary_dim:])
+    ratchet = summary[..., 70:80]
+    active = ratchet[..., 0:1] > 0.5
+    lower = ratchet[..., 5:6].clamp(
+      self.same_foot_stride_min,
+      self.same_foot_stride_max,
+    )
+    probe = ratchet[..., 2:3].clamp(
+      self.same_foot_stride_min,
+      self.same_foot_stride_max,
+    )
+    upper = ratchet[..., 7:8].clamp(
+      self.same_foot_stride_min,
+      self.same_foot_stride_max,
+    )
+    confirmed = ratchet[..., 6:7] > 0.5
+    open_target = torch.maximum(probe, lower)
+    closed_target = 0.5 * (lower + torch.maximum(upper, lower))
+    return torch.where(
+      active, torch.where(confirmed, closed_target, open_target), target
+    )
+
   def _build_actor_semantic(
     self,
     event_prob: torch.Tensor,
@@ -1804,6 +1907,7 @@ class _OnnxStairLatentModel(nn.Module):
     stair_shape: torch.Tensor,
     safe_stride_interval: torch.Tensor,
     safe_stride_confidence: torch.Tensor,
+    latent_obs: torch.Tensor | None = None,
   ) -> torch.Tensor:
     mode = gate_state[..., 0:1]
     write_timer = gate_state[..., 3:4]
@@ -1843,12 +1947,12 @@ class _OnnxStairLatentModel(nn.Module):
       dim=-1,
     )
 
-    tread_depth = stair_shape[..., 0:1]
+    same_foot_stride = stair_shape[..., 0:1]
     riser_height = stair_shape[..., 1:2]
-    tread_depth_norm = self._normalize_semantic_value(
-      tread_depth,
-      self.tread_depth_min,
-      self.tread_depth_max,
+    same_foot_stride_norm = self._normalize_semantic_value(
+      same_foot_stride,
+      self.same_foot_stride_min,
+      self.same_foot_stride_max,
     )
     riser_height_norm = self._normalize_semantic_value(
       riser_height,
@@ -1880,27 +1984,20 @@ class _OnnxStairLatentModel(nn.Module):
       1.0,
     )
     confidence = torch.clamp(safe_stride_confidence, 0.0, 1.0)
-    interval_certainty = 1.0 - stride_width / (
-      self.safe_stride_max - self.safe_stride_min
-    )
-    actor_target_mix = torch.maximum(confidence, interval_certainty.clamp(0.0, 1.0))
-    stride_actor_target = stride_lower + actor_target_mix * (
-      stride_center - stride_lower
-    )
-    stride_actor_target_norm = self._normalize_semantic_value(
-      stride_actor_target,
-      self.safe_stride_min,
-      self.safe_stride_max,
+    same_foot_actor_target_norm = self._normalize_semantic_value(
+      self._same_foot_actor_stride_target(stair_shape, latent_obs),
+      self.same_foot_stride_min,
+      self.same_foot_stride_max,
     )
     shape_semantic = torch.cat(
       [
-        tread_depth_norm,
+        same_foot_stride_norm,
         riser_height_norm,
         stride_lower_norm,
         stride_upper_norm,
         stride_center_norm,
         stride_width_norm,
-        stride_actor_target_norm,
+        same_foot_actor_target_norm,
         confidence,
       ],
       dim=-1,
@@ -2113,6 +2210,7 @@ class _OnnxStairLatentModel(nn.Module):
           stair_shape,
           safe_stride_interval,
           safe_stride_confidence,
+          latent_obs,
         )
       )
     actor_input = torch.cat(actor_input_terms, dim=-1)

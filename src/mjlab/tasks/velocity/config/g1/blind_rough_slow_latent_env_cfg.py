@@ -723,7 +723,7 @@ def _configure_latent_observations(
         "ratchet_collision_margin_m": 0.02,
         "ratchet_min_interval_width_m": 0.04,
         "ratchet_min_stride_m": params.rewards.toe_stair_min_safe_stride,
-        "ratchet_max_stride_m": params.rewards.toe_stair_max_safe_stride,
+        "ratchet_max_stride_m": params.rewards.toe_stair_max_tracking_stride,
         "ratchet_reset_flat_pairs": 4,
       },
     )

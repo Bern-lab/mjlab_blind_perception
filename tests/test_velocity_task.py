@@ -389,7 +389,7 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert foot_event_params["ratchet_collision_margin_m"] == 0.02
   assert foot_event_params["ratchet_min_interval_width_m"] == 0.04
   assert foot_event_params["ratchet_min_stride_m"] == 0.10
-  assert foot_event_params["ratchet_max_stride_m"] == 0.55
+  assert foot_event_params["ratchet_max_stride_m"] == 0.80
   assert "latent_labels" in env_cfg.observations
   assert tuple(env_cfg.observations["latent_labels"].terms) == (
     "toe_riser_event",
@@ -546,6 +546,8 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert actor_cfg.safe_stride_std_floor_ratio == 0.70
   assert actor_cfg.safe_stride_deployable_hint_loss_coef == 0.50
   assert actor_cfg.safe_stride_deployable_hint_margin == 0.02
+  assert actor_cfg.same_foot_stride_deployable_hint_loss_coef == 0.35
+  assert actor_cfg.same_foot_stride_deployable_hint_margin == 0.02
   assert actor_cfg.safe_stride_min == 0.10
   assert actor_cfg.safe_stride_max == 0.55
   assert actor_cfg.actor_semantic_enabled is True

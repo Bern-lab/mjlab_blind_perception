@@ -192,7 +192,7 @@ digraph slow_latent_structure {
     ];
 
     shape_head [
-      label="stair_shape_head\ninput: z_shape + h\npredict tread_depth, riser_height",
+      label="stair_shape_head\ninput: z_shape + h\npredict same-foot stride, riser height",
       fillcolor="#f3e8ff",
       penwidth=1.8
     ];
@@ -237,13 +237,13 @@ digraph slow_latent_structure {
     ];
 
     semantic_stride [
-      label="shape / SafeStride semantic 8\n1 tread_depth_norm\n2 riser_height_norm\n3 lower_norm\n4 upper_norm\n5 center_norm\n6 width_norm\n7 actor_target_norm\n8 confidence",
+      label="shape / SafeStride semantic 8\n1 same_foot_stride_norm\n2 riser_height_norm\n3 safe_lower_norm\n4 safe_upper_norm\n5 safe_center_norm\n6 safe_width_norm\n7 same_foot_actor_target_norm\n8 confidence",
       fillcolor="#fde68a",
       penwidth=1.8
     ];
 
     target_mix [
-      label="actor_target_norm\nwide/low confidence: closer to lower/probe\nnarrow/confirmed: closer to center",
+      label="same_foot_actor_target_norm\nopen ratchet: monotonic probe\nconfirmed ratchet: interval center",
       fillcolor="#fef9c3",
       penwidth=1.8
     ];

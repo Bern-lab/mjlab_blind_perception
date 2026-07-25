@@ -575,6 +575,51 @@ def test_safe_stride_deployable_hint_accepts_legacy_summary_layout() -> None:
     torch.testing.assert_close(hint[1], torch.tensor([0.10, 0.0]))
 
 
+def test_same_foot_stride_deployable_hint_reads_ratchet_interval() -> None:
+    """Same-foot hints should expose open probes and confirmed interval centers."""
+    latent = torch.zeros(2, 80)
+    latent[:, 70] = 1.0
+    latent[:, 72] = torch.tensor([0.45, 0.60])
+    latent[:, 75] = 0.30
+    latent[:, 76] = torch.tensor([0.0, 1.0])
+    latent[:, 77] = torch.tensor([0.0, 0.50])
+    observations = TensorDict({"latent": latent}, batch_size=[2])
+
+    hint = PPOTeacherKL._same_foot_stride_deployable_hint_from_latent_obs(
+        observations,
+        "latent",
+        0.10,
+        0.80,
+    )
+
+    assert hint is not None
+    torch.testing.assert_close(hint[0], torch.tensor([0.45, 1.0, 0.0]))
+    torch.testing.assert_close(hint[1], torch.tensor([0.40, 1.0, 1.0]))
+
+
+def test_same_foot_stride_deployable_hint_penalizes_open_shortfall_only() -> None:
+    """Open ratchet targets act as a floor while confirmed intervals regress center."""
+    predictions = torch.tensor([[0.20], [0.50], [0.35]])
+    hint = torch.tensor([[0.45], [0.40], [0.40]])
+    valid = torch.tensor([[1.0], [1.0], [0.0]])
+    confirmed = torch.tensor([[0.0], [1.0], [0.0]])
+
+    loss, shortfall, confirmed_mae = PPOTeacherKL._compute_same_foot_stride_hint_loss(
+        predictions,
+        hint,
+        valid,
+        confirmed,
+        minimum=0.10,
+        maximum=0.80,
+        margin=0.02,
+        huber_delta=0.05,
+    )
+
+    assert torch.isfinite(loss)
+    assert shortfall.item() > 0.0
+    assert confirmed_mae.item() == pytest.approx(0.10)
+
+
 def test_safe_stride_deployable_hint_ignores_invalid_nan_padding() -> None:
     """Invalid padded hint rows should not poison the one-sided hint loss."""
     predictions = torch.tensor([[0.10], [float("nan")]])
@@ -734,6 +779,8 @@ def test_stair_label_range_metrics_do_not_clamp_labels() -> None:
     actor.riser_height_max = 0.25
     actor.safe_stride_min = 0.10
     actor.safe_stride_max = 0.55
+    actor.same_foot_stride_min = 0.10
+    actor.same_foot_stride_max = 0.55
     actor.get_aux_outputs = lambda: {
         "stair_shape": torch.tensor([
             [0.30, 0.18],
@@ -745,7 +792,7 @@ def test_stair_label_range_metrics_do_not_clamp_labels() -> None:
     }
     actor.get_slow_latent_diagnostics = lambda: {}
     labels = torch.tensor([
-        [0.0, 1.0, 0.10, 0.18, 1.0, 0.60, 1.0],
+        [0.0, 1.0, 0.05, 0.18, 1.0, 0.60, 1.0],
         [0.0, 1.0, 0.30, 0.30, 1.0, 0.20, 1.0],
         [0.0, 1.0, 0.60, 0.18, 0.0, 0.05, 1.0],
         [0.0, 1.0, 0.30, 0.18, 1.0, 0.60, 0.0],
@@ -758,7 +805,7 @@ def test_stair_label_range_metrics_do_not_clamp_labels() -> None:
     )
 
     torch.testing.assert_close(labels, labels_before)
-    assert logs["slow_latent_tread_depth_out_of_range_label_ratio"] == pytest.approx(1 / 3)
+    assert logs["slow_latent_same_foot_stride_out_of_range_label_ratio"] == pytest.approx(1 / 3)
     assert logs["slow_latent_riser_height_out_of_range_label_ratio"] == pytest.approx(1 / 3)
     assert logs["slow_latent_safe_stride_out_of_range_label_ratio"] == pytest.approx(2 / 3)
     assert logs["slow_latent_shape_valid_stair_coverage"] == pytest.approx(0.75)
@@ -767,7 +814,7 @@ def test_stair_label_range_metrics_do_not_clamp_labels() -> None:
 
 
 def test_stair_shape_aux_loss_uses_appended_component_masks() -> None:
-    """Depth evidence may be sparse while height remains valid on stairs."""
+    """Stride evidence may be sparse while height remains valid on stairs."""
     alg = _build_teacher_kl({"enabled": False})
     actor = cast(Any, alg.actor)
     actor.aux_event_coef = 0.0
@@ -781,6 +828,8 @@ def test_stair_shape_aux_loss_uses_appended_component_masks() -> None:
     actor.tread_depth_max = 0.37
     actor.riser_height_min = 0.088
     actor.riser_height_max = 0.25
+    actor.same_foot_stride_min = 0.10
+    actor.same_foot_stride_max = 0.55
     actor.get_aux_outputs = lambda: {
         "stair_shape": torch.tensor([
             [10.0, 0.10],
@@ -803,13 +852,13 @@ def test_stair_shape_aux_loss_uses_appended_component_masks() -> None:
         RolloutStorage.Batch(observations=observations, hidden_states=(None, None))
     )
 
-    assert logs["slow_latent_tread_depth_valid_ratio"] == pytest.approx(0.25)
+    assert logs["slow_latent_same_foot_stride_valid_ratio"] == pytest.approx(0.25)
     assert logs["slow_latent_riser_height_valid_ratio"] == pytest.approx(0.5)
-    assert logs["slow_latent_tread_depth_valid_stair_coverage"] == pytest.approx(0.5)
+    assert logs["slow_latent_same_foot_stride_valid_stair_coverage"] == pytest.approx(0.5)
     assert logs["slow_latent_riser_height_valid_stair_coverage"] == pytest.approx(1.0)
-    assert logs["slow_latent_tread_depth_valid_while_flat_ratio"] == 0.0
+    assert logs["slow_latent_same_foot_stride_valid_while_flat_ratio"] == 0.0
     assert logs["slow_latent_riser_height_valid_while_flat_ratio"] == 0.0
-    assert logs["slow_latent_tread_depth_mae"] == pytest.approx(0.01)
+    assert logs["slow_latent_same_foot_stride_mae"] == pytest.approx(0.01)
     assert logs["slow_latent_riser_height_mae"] == pytest.approx(0.005)
 
 

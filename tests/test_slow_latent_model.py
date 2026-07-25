@@ -103,7 +103,8 @@ def test_slow_latent_actor_forward_updates_state_and_aux_outputs() -> None:
   assert aux["safe_stride_confidence_logit"].shape == (4, 1)
   assert "safe_stride_interval" not in aux
   assert torch.all(
-    (0.23 <= aux["stair_shape"][..., 0]) & (aux["stair_shape"][..., 0] <= 0.37)
+    (model.same_foot_stride_min <= aux["stair_shape"][..., 0])
+    & (aux["stair_shape"][..., 0] <= model.same_foot_stride_max)
   )
   assert torch.all(
     (0.088 <= aux["stair_shape"][..., 1]) & (aux["stair_shape"][..., 1] <= 0.25)
@@ -152,8 +153,8 @@ def test_geometry_probe_decodes_configured_frozen_features(
 
   assert prediction.shape == (4, 2)
   assert torch.all(
-    (model.tread_depth_min <= prediction[:, 0])
-    & (prediction[:, 0] <= model.tread_depth_max)
+    (model.same_foot_stride_min <= prediction[:, 0])
+    & (prediction[:, 0] <= model.same_foot_stride_max)
   )
   assert torch.all(
     (model.riser_height_min <= prediction[:, 1])
@@ -201,13 +202,13 @@ def test_shadow_semantic_uses_fixed_state_positions_and_physical_derivations() -
   stair_prob = torch.tensor([[0.40], [0.20], [0.50], [0.10]])
   stair_shape = torch.tensor(
     [
-      [model.tread_depth_min, model.riser_height_min],
-      [model.tread_depth_max, model.riser_height_max],
+      [model.same_foot_stride_min, model.riser_height_min],
+      [model.same_foot_stride_max, model.riser_height_max],
       [
-        0.5 * (model.tread_depth_min + model.tread_depth_max),
+        0.5 * (model.same_foot_stride_min + model.same_foot_stride_max),
         0.5 * (model.riser_height_min + model.riser_height_max),
       ],
-      [model.tread_depth_min, model.riser_height_max],
+      [model.same_foot_stride_min, model.riser_height_max],
     ]
   )
   safe_stride_interval = torch.tensor(
@@ -271,9 +272,48 @@ def test_shadow_semantic_uses_fixed_state_positions_and_physical_derivations() -
   )
   torch.testing.assert_close(
     semantic[:, 14],
-    torch.tensor([0.0, 0.5, 0.625, 0.125]),
+    torch.tensor([0.0, 1.0, 0.5, 0.0]),
   )
   torch.testing.assert_close(semantic[:, 15], safe_stride_confidence.squeeze(-1))
+
+
+def test_shadow_semantic_actor_stride_target_uses_ratchet_hint() -> None:
+  model = _make_model(
+    structured_safe_stride_enabled=True,
+    shadow_semantic_enabled=True,
+  )
+  batch = 2
+  event_prob = torch.zeros(batch, 1)
+  stair_prob = torch.zeros(batch, 1)
+  gate = torch.zeros(batch, 5)
+  stair_shape = torch.tensor([[0.20, 0.12], [0.70, 0.12]])
+  safe_stride_interval = torch.full((batch, 2), 0.20)
+  safe_stride_confidence = torch.zeros(batch, 1)
+  latent_obs = torch.zeros(batch, 80)
+  latent_obs[:, 70] = 1.0
+  latent_obs[:, 72] = torch.tensor([0.45, 0.60])
+  latent_obs[:, 75] = 0.30
+  latent_obs[:, 76] = torch.tensor([0.0, 1.0])
+  latent_obs[:, 77] = torch.tensor([0.0, 0.50])
+
+  semantic = model._build_shadow_semantic(
+    event_prob,
+    stair_prob,
+    gate,
+    stair_shape,
+    safe_stride_interval,
+    safe_stride_confidence,
+    latent_obs,
+  )
+
+  stride_range = model.same_foot_stride_max - model.same_foot_stride_min
+  expected = torch.tensor(
+    [
+      (0.45 - model.same_foot_stride_min) / stride_range,
+      (0.40 - model.same_foot_stride_min) / stride_range,
+    ]
+  )
+  torch.testing.assert_close(semantic[:, 14], expected)
 
 
 def test_shadow_semantic_diagnostics_do_not_change_actor_output() -> None:
@@ -1078,7 +1118,10 @@ def test_onnx_wrapper_exposes_gated_slow_latent_state() -> None:
   assert outputs[10].shape == (1, 1)
   assert outputs[11].shape == (1, 2)
   assert outputs[12].shape == (1, 1)
-  assert torch.all((0.23 <= outputs[9][..., 0]) & (outputs[9][..., 0] <= 0.37))
+  assert torch.all(
+    (model.same_foot_stride_min <= outputs[9][..., 0])
+    & (outputs[9][..., 0] <= model.same_foot_stride_max)
+  )
   assert torch.all((0.088 <= outputs[9][..., 1]) & (outputs[9][..., 1] <= 0.25))
   assert torch.all(
     (model.safe_stride_min <= outputs[10]) & (outputs[10] <= model.safe_stride_max)
@@ -1126,6 +1169,8 @@ def test_slow_latent_export_metadata() -> None:
   assert metadata["policy_stair_riser_height_max"] == "0.25"
   assert metadata["policy_stair_safe_stride_min"] == "0.1"
   assert metadata["policy_stair_safe_stride_max"] == "0.55"
+  assert metadata["policy_stair_same_foot_stride_min"] == "0.1"
+  assert metadata["policy_stair_same_foot_stride_max"] == "0.8"
   assert metadata["policy_onnx_input_names"] == [
     "actor_obs",
     "latent_obs",

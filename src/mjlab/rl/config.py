@@ -154,14 +154,22 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """Weight for one-sided lower-bound hints from deployable foot-event summary."""
   safe_stride_deployable_hint_margin: float = 0.02
   """Slack, in meters, before deployable lower-bound hints are penalized."""
+  same_foot_stride_deployable_hint_loss_coef: float = 0.0
+  """Weight for deployable same-foot stride ratchet hints inside shape loss."""
+  same_foot_stride_deployable_hint_margin: float = 0.02
+  """Slack, in meters, before open same-foot stride hints are penalized."""
   safe_stride_min: float = 0.10
   """Minimum decoded safe stride, in meters."""
   safe_stride_max: float = 0.55
   """Maximum decoded safe stride, in meters."""
+  same_foot_stride_min: float = 0.10
+  """Minimum decoded same-foot stair stride, in meters."""
+  same_foot_stride_max: float = 0.80
+  """Maximum decoded same-foot stair stride, in meters."""
   structured_safe_stride_enabled: bool = False
   """Predict ordered SafeStride bounds instead of the legacy scalar point."""
   dynamic_stair_shape_enabled: bool = False
-  """Decode stair size from geometry memory plus current recurrent context."""
+  """Decode same-foot stride/height from geometry memory plus recurrent context."""
   dynamic_safe_stride_enabled: bool = False
   """Decode SafeStride from current recurrent state, geometry memory, and gait phase."""
   safe_stride_phase_dim: int = 0
