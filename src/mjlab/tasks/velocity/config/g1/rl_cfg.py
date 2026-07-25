@@ -92,36 +92,36 @@ class G1SlowLatentPolicyModelParams:
   """BCE loss weight for current stair-state prediction."""
   aux_stair_pos_weight: float = 3.0
   """Positive-class weight for stair-state prediction."""
-  aux_future_collision_risk_coef: float = 0.03
-  """Huber loss weight for continuous future collision risk."""
-  aux_future_safe_landing_quality_coef: float = 0.03
-  """Huber loss weight for continuous next-touchdown quality."""
-  aux_stair_shape_coef: float = 0.03
-  """Huber loss weight for privileged stair geometry prediction."""
-  aux_safe_stride_coef: float = 0.08
-  """Huber loss weight for the Event-to-layer2 minimum safe stride."""
+  aux_future_collision_risk_coef: float = 0.0
+  """Disabled by default; current stair probing uses explicit stride/depth heads."""
+  aux_future_safe_landing_quality_coef: float = 0.0
+  """Disabled by default; touchdown quality is handled by task rewards/metrics."""
+  aux_stair_shape_coef: float = 0.05
+  """Huber loss weight for same-foot stride and riser-height prediction."""
+  aux_safe_stride_coef: float = 0.04
+  """Lightweight SafeStride trend loss; precise control comes from shape/ratchet."""
   stair_shape_huber_delta: float = 0.05
   """Huber transition point for shape prediction normalized to [0, 1]."""
   safe_stride_huber_delta: float = 0.05
   """Huber transition point for safe-stride prediction, in meters."""
-  safe_stride_width_loss_coef: float = 2.0
+  safe_stride_width_loss_coef: float = 1.0
   """Weight for independently normalized SafeStride width regression."""
-  safe_stride_lower_shortfall_coef: float = 1.5
+  safe_stride_lower_shortfall_coef: float = 1.2
   """Extra SafeStride loss multiplier when the estimate is too short."""
-  safe_stride_interval_coverage_loss_coef: float = 0.75
-  """Weight for keeping predicted SafeStride bounds covering the target interval."""
+  safe_stride_interval_coverage_loss_coef: float = 0.0
+  """Disabled by default; broad interval coverage can fight collision-tightening."""
   safe_stride_interval_coverage_margin: float = 0.01
   """Slack, in meters, before SafeStride interval coverage is penalized."""
-  safe_stride_confidence_loss_coef: float = 0.30
+  safe_stride_confidence_loss_coef: float = 0.10
   """Weight for SafeStride interval-confidence BCE inside the SafeStride loss."""
-  safe_stride_std_floor_loss_coef: float = 0.10
-  """Weight for preserving SafeStride prediction dynamic range."""
-  safe_stride_centered_loss_coef: float = 0.05
-  """Weight for centered SafeStride regression after removing batch mean."""
+  safe_stride_std_floor_loss_coef: float = 0.0
+  """Disabled by default; no longer force SafeStride variance after anti-collapse."""
+  safe_stride_centered_loss_coef: float = 0.0
+  """Disabled by default; SafeStride is now a coarse trend, not the precise head."""
   safe_stride_std_floor_ratio: float = 0.70
   """Minimum desired SafeStride prediction std as a fraction of label std."""
-  safe_stride_deployable_hint_loss_coef: float = 0.50
-  """Weight for one-sided lower-bound hints from foot-event summary."""
+  safe_stride_deployable_hint_loss_coef: float = 0.0
+  """Disabled by default; ratchet hints train same-foot stride instead."""
   safe_stride_deployable_hint_margin: float = 0.02
   """Slack, in meters, before foot-event lower-bound hints are penalized."""
   same_foot_stride_deployable_hint_loss_coef: float = 0.35
@@ -239,21 +239,21 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
   event_label_window_steps: int = 4,
   aux_stair_coef: float = 0.05,
   aux_stair_pos_weight: float = 3.0,
-  aux_future_collision_risk_coef: float = 0.03,
-  aux_future_safe_landing_quality_coef: float = 0.03,
-  aux_stair_shape_coef: float = 0.03,
-  aux_safe_stride_coef: float = 0.08,
+  aux_future_collision_risk_coef: float = 0.0,
+  aux_future_safe_landing_quality_coef: float = 0.0,
+  aux_stair_shape_coef: float = 0.05,
+  aux_safe_stride_coef: float = 0.04,
   stair_shape_huber_delta: float = 0.05,
   safe_stride_huber_delta: float = 0.05,
-  safe_stride_width_loss_coef: float = 2.0,
-  safe_stride_lower_shortfall_coef: float = 1.5,
-  safe_stride_interval_coverage_loss_coef: float = 0.75,
+  safe_stride_width_loss_coef: float = 1.0,
+  safe_stride_lower_shortfall_coef: float = 1.2,
+  safe_stride_interval_coverage_loss_coef: float = 0.0,
   safe_stride_interval_coverage_margin: float = 0.01,
-  safe_stride_confidence_loss_coef: float = 0.30,
-  safe_stride_std_floor_loss_coef: float = 0.10,
-  safe_stride_centered_loss_coef: float = 0.05,
+  safe_stride_confidence_loss_coef: float = 0.10,
+  safe_stride_std_floor_loss_coef: float = 0.0,
+  safe_stride_centered_loss_coef: float = 0.0,
   safe_stride_std_floor_ratio: float = 0.70,
-  safe_stride_deployable_hint_loss_coef: float = 0.50,
+  safe_stride_deployable_hint_loss_coef: float = 0.0,
   safe_stride_deployable_hint_margin: float = 0.02,
   same_foot_stride_deployable_hint_loss_coef: float = 0.35,
   same_foot_stride_deployable_hint_margin: float = 0.02,
@@ -508,21 +508,21 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
   event_label_window_steps: int = 4,
   aux_stair_coef: float = 0.05,
   aux_stair_pos_weight: float = 3.0,
-  aux_future_collision_risk_coef: float = 0.03,
-  aux_future_safe_landing_quality_coef: float = 0.03,
-  aux_stair_shape_coef: float = 0.03,
-  aux_safe_stride_coef: float = 0.08,
+  aux_future_collision_risk_coef: float = 0.0,
+  aux_future_safe_landing_quality_coef: float = 0.0,
+  aux_stair_shape_coef: float = 0.05,
+  aux_safe_stride_coef: float = 0.04,
   stair_shape_huber_delta: float = 0.05,
   safe_stride_huber_delta: float = 0.05,
-  safe_stride_width_loss_coef: float = 2.0,
-  safe_stride_lower_shortfall_coef: float = 1.5,
-  safe_stride_interval_coverage_loss_coef: float = 0.75,
+  safe_stride_width_loss_coef: float = 1.0,
+  safe_stride_lower_shortfall_coef: float = 1.2,
+  safe_stride_interval_coverage_loss_coef: float = 0.0,
   safe_stride_interval_coverage_margin: float = 0.01,
-  safe_stride_confidence_loss_coef: float = 0.30,
-  safe_stride_std_floor_loss_coef: float = 0.10,
-  safe_stride_centered_loss_coef: float = 0.05,
+  safe_stride_confidence_loss_coef: float = 0.10,
+  safe_stride_std_floor_loss_coef: float = 0.0,
+  safe_stride_centered_loss_coef: float = 0.0,
   safe_stride_std_floor_ratio: float = 0.70,
-  safe_stride_deployable_hint_loss_coef: float = 0.50,
+  safe_stride_deployable_hint_loss_coef: float = 0.0,
   safe_stride_deployable_hint_margin: float = 0.02,
   same_foot_stride_deployable_hint_loss_coef: float = 0.35,
   same_foot_stride_deployable_hint_margin: float = 0.02,
@@ -731,7 +731,7 @@ def unitree_g1_blind_rough_target_navigation_semantic_v2_shadow_runner_cfg() -> 
   actor_cfg.shadow_semantic_enabled = True
   actor_cfg.actor_semantic_enabled = False
   actor_cfg.structured_safe_stride_enabled = True
-  actor_cfg.aux_stair_shape_coef = 0.03
+  actor_cfg.aux_stair_shape_coef = 0.05
   cfg.experiment_name = "g1_blind_rough_target_navigation_semantic_v2_shadow_teacherkl"
   cfg.load_optimizer_on_resume = False
   cfg.load_iteration_on_resume = False

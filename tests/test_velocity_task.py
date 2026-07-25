@@ -524,11 +524,11 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert actor_cfg.stair_off_threshold == 0.20
   assert actor_cfg.aux_stair_coef == 0.05
   assert actor_cfg.aux_stair_pos_weight == 3.0
-  assert actor_cfg.aux_future_collision_risk_coef == 0.03
-  assert actor_cfg.aux_future_safe_landing_quality_coef == 0.03
+  assert actor_cfg.aux_future_collision_risk_coef == 0.0
+  assert actor_cfg.aux_future_safe_landing_quality_coef == 0.0
   assert actor_cfg.future_horizon == 20
-  assert actor_cfg.aux_stair_shape_coef == 0.03
-  assert actor_cfg.aux_safe_stride_coef == 0.08
+  assert actor_cfg.aux_stair_shape_coef == 0.05
+  assert actor_cfg.aux_safe_stride_coef == 0.04
   assert actor_cfg.structured_safe_stride_enabled is True
   assert actor_cfg.dynamic_stair_shape_enabled is True
   assert actor_cfg.dynamic_safe_stride_enabled is True
@@ -536,15 +536,15 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert actor_cfg.safe_stride_phase_start == 91
   assert actor_cfg.stair_shape_huber_delta == 0.05
   assert actor_cfg.safe_stride_huber_delta == 0.05
-  assert actor_cfg.safe_stride_width_loss_coef == 2.0
-  assert actor_cfg.safe_stride_lower_shortfall_coef == 1.5
-  assert actor_cfg.safe_stride_interval_coverage_loss_coef == 0.75
+  assert actor_cfg.safe_stride_width_loss_coef == 1.0
+  assert actor_cfg.safe_stride_lower_shortfall_coef == 1.2
+  assert actor_cfg.safe_stride_interval_coverage_loss_coef == 0.0
   assert actor_cfg.safe_stride_interval_coverage_margin == 0.01
-  assert actor_cfg.safe_stride_confidence_loss_coef == 0.30
-  assert actor_cfg.safe_stride_std_floor_loss_coef == 0.10
-  assert actor_cfg.safe_stride_centered_loss_coef == 0.05
+  assert actor_cfg.safe_stride_confidence_loss_coef == 0.10
+  assert actor_cfg.safe_stride_std_floor_loss_coef == 0.0
+  assert actor_cfg.safe_stride_centered_loss_coef == 0.0
   assert actor_cfg.safe_stride_std_floor_ratio == 0.70
-  assert actor_cfg.safe_stride_deployable_hint_loss_coef == 0.50
+  assert actor_cfg.safe_stride_deployable_hint_loss_coef == 0.0
   assert actor_cfg.safe_stride_deployable_hint_margin == 0.02
   assert actor_cfg.same_foot_stride_deployable_hint_loss_coef == 0.35
   assert actor_cfg.same_foot_stride_deployable_hint_margin == 0.02
@@ -591,8 +591,8 @@ def test_semantic_v2_shadow_runner_trains_heads_without_resuming_optimizer() -> 
   assert actor_cfg.shadow_semantic_enabled is True
   assert actor_cfg.actor_semantic_enabled is False
   assert actor_cfg.structured_safe_stride_enabled is True
-  assert actor_cfg.aux_stair_shape_coef == 0.03
-  assert actor_cfg.aux_safe_stride_coef == 0.08
+  assert actor_cfg.aux_stair_shape_coef == 0.05
+  assert actor_cfg.aux_safe_stride_coef == 0.04
   assert actor_cfg.latent_dim == 24
   assert actor_cfg.state_latent_dim == 8
 
@@ -615,8 +615,8 @@ def test_semantic_v2_probe_freezes_policy_and_uses_dynamic_stride_input() -> Non
   assert actor_cfg.safe_stride_phase_dim == 2
   assert actor_cfg.safe_stride_phase_start == 91
   assert actor_cfg.aux_safe_stride_coef == 1.0
-  assert actor_cfg.safe_stride_width_loss_coef == 2.0
-  assert actor_cfg.safe_stride_interval_coverage_loss_coef == 0.75
+  assert actor_cfg.safe_stride_width_loss_coef == 1.0
+  assert actor_cfg.safe_stride_interval_coverage_loss_coef == 0.0
   assert actor_cfg.actor_semantic_enabled is False
   assert actor_cfg.aux_event_coef == 0.0
   assert actor_cfg.aux_stair_coef == 0.0
