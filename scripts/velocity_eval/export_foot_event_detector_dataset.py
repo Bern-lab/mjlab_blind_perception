@@ -6,7 +6,7 @@ import csv
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import numpy as np
 import torch
@@ -23,6 +23,7 @@ from scripts.velocity_eval.export_stair_probe_dataset import (
   _close_sequence_logger,
   _latent_obs,
   _tensor_extra,
+  input_feature_slices,
   input_obs_dim,
 )
 from scripts.velocity_eval.policy_io import (
@@ -34,7 +35,11 @@ from tqdm.auto import tqdm
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg
-from mjlab.tasks.velocity.mdp.observations import phase
+from mjlab.tasks.velocity.mdp.observations import (
+  _body_frame_foot_positions,
+  _get_leg_joint_info,
+  phase,
+)
 from mjlab.utils.lstm import reset_policy_state_from_step
 from mjlab.utils.torch import configure_torch_backends
 
@@ -53,6 +58,25 @@ FOOT_EVENT_LABEL_NAMES: tuple[str, ...] = (
   "right_toe_riser_hit",
 )
 
+FootEventDetectorObsSchema = Literal["v1", "footprint_v2"]
+
+FOOTPRINT_V2_EXTRA_FEATURE_GROUPS: tuple[tuple[str, int], ...] = (
+  ("left_heel_vel_body", 3),
+  ("right_heel_vel_body", 3),
+  ("left_heel_vel_delta", 3),
+  ("right_heel_vel_delta", 3),
+  ("left_sole_center_pos_body", 3),
+  ("right_sole_center_pos_body", 3),
+  ("left_sole_center_vel_body", 3),
+  ("right_sole_center_vel_body", 3),
+  ("left_sole_pitch_proxy", 1),
+  ("right_sole_pitch_proxy", 1),
+  ("command_lin_y", 1),
+  ("command_yaw_rate", 1),
+  ("action_delta_leg", 12),
+)
+"""Additional deployable kinematic inputs for the footprint/touchdown detector."""
+
 
 @dataclass(frozen=True)
 class ExportFootEventDetectorDatasetConfig:
@@ -68,10 +92,11 @@ class ExportFootEventDetectorDatasetConfig:
   device: str | None = None
   history_len: int = 16
   max_samples: int | None = None
+  input_schema: FootEventDetectorObsSchema = "v1"
   include_gait_phase: bool = True
   gait_period: float = 0.6
   command_name: str = "twist"
-  expected_obs_dim: int = 93
+  expected_obs_dim: int | None = None
   progress: bool = True
 
 
@@ -134,36 +159,230 @@ def foot_event_labels_from_env(
   )
 
 
-def foot_event_detector_obs_dim(*, include_gait_phase: bool) -> int:
+def _validate_input_schema(input_schema: str) -> FootEventDetectorObsSchema:
+  if input_schema not in ("v1", "footprint_v2"):
+    raise ValueError(
+      f"input_schema must be 'v1' or 'footprint_v2', got {input_schema!r}."
+    )
+  return cast(FootEventDetectorObsSchema, input_schema)
+
+
+def foot_event_detector_obs_dim(
+  *,
+  include_gait_phase: bool,
+  input_schema: FootEventDetectorObsSchema = "v1",
+) -> int:
   """Return deployable event-detector observation width."""
-  return input_obs_dim() + (2 if include_gait_phase else 0)
+  schema = _validate_input_schema(input_schema)
+  dim = input_obs_dim() + (2 if include_gait_phase else 0)
+  if schema == "footprint_v2":
+    dim += sum(width for _name, width in FOOTPRINT_V2_EXTRA_FEATURE_GROUPS)
+  return dim
+
+
+def resolve_foot_event_detector_obs_dim(
+  expected_obs_dim: int | None,
+  *,
+  include_gait_phase: bool,
+  input_schema: FootEventDetectorObsSchema,
+) -> int:
+  """Return the configured detector obs width, validating overrides."""
+  obs_dim = foot_event_detector_obs_dim(
+    include_gait_phase=include_gait_phase,
+    input_schema=input_schema,
+  )
+  if expected_obs_dim is not None and int(expected_obs_dim) != obs_dim:
+    raise ValueError(
+      f"expected_obs_dim={expected_obs_dim} does not match detector obs "
+      f"dimension {obs_dim} for input_schema={input_schema!r}."
+    )
+  return obs_dim
+
+
+def _command_column(
+  env: ManagerBasedRlEnv,
+  *,
+  command_name: str,
+  column: int,
+  dtype: torch.dtype,
+) -> torch.Tensor:
+  zeros = torch.zeros(env.num_envs, 1, dtype=dtype, device=env.device)
+  command_manager = getattr(env, "command_manager", None)
+  if command_manager is None:
+    return zeros
+  command = command_manager.get_command(command_name)
+  if not isinstance(command, torch.Tensor) or command.shape[-1] <= column:
+    return zeros
+  return command[:, column : column + 1].to(device=env.device, dtype=dtype)
+
+
+def _velocity_and_delta_from_cache(
+  env: ManagerBasedRlEnv,
+  *,
+  position: torch.Tensor,
+  position_key: str,
+  velocity_key: str,
+  reset_mask: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+  zeros = torch.zeros_like(position)
+  reset = (
+    torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    if reset_mask is None
+    else reset_mask.to(device=env.device, dtype=torch.bool)
+  ).reshape(env.num_envs)
+  if position_key not in env.extras:
+    env.extras[position_key] = position.detach().clone()
+    env.extras[velocity_key] = zeros.detach().clone()
+    return zeros, zeros
+
+  prev_position = env.extras[position_key].to(device=env.device, dtype=position.dtype)
+  velocity = (position - prev_position) / max(float(env.step_dt), 1.0e-6)
+  velocity = torch.where(reset[:, None], zeros, velocity)
+
+  prev_velocity_obj = env.extras.get(velocity_key)
+  if isinstance(prev_velocity_obj, torch.Tensor):
+    prev_velocity = prev_velocity_obj.to(device=env.device, dtype=position.dtype)
+    velocity_delta = torch.where(reset[:, None], zeros, velocity - prev_velocity)
+  else:
+    velocity_delta = zeros
+
+  env.extras[position_key] = position.detach().clone()
+  env.extras[velocity_key] = velocity.detach().clone()
+  return velocity, velocity_delta
+
+
+def _footprint_v2_extra_obs(
+  latent: torch.Tensor,
+  env: ManagerBasedRlEnv,
+  *,
+  command_name: str,
+  reset_mask: torch.Tensor | None,
+) -> torch.Tensor:
+  left_toe, right_toe, left_heel, right_heel = _body_frame_foot_positions(env)
+  left_center = 0.5 * (left_toe + left_heel)
+  right_center = 0.5 * (right_toe + right_heel)
+  left_heel_vel, left_heel_vel_delta = _velocity_and_delta_from_cache(
+    env,
+    position=left_heel,
+    position_key="foot_event_v2_prev_left_heel_pos_body",
+    velocity_key="foot_event_v2_prev_left_heel_vel_body",
+    reset_mask=reset_mask,
+  )
+  right_heel_vel, right_heel_vel_delta = _velocity_and_delta_from_cache(
+    env,
+    position=right_heel,
+    position_key="foot_event_v2_prev_right_heel_pos_body",
+    velocity_key="foot_event_v2_prev_right_heel_vel_body",
+    reset_mask=reset_mask,
+  )
+  left_center_vel, _left_center_vel_delta = _velocity_and_delta_from_cache(
+    env,
+    position=left_center,
+    position_key="foot_event_v2_prev_left_sole_center_pos_body",
+    velocity_key="foot_event_v2_prev_left_sole_center_vel_body",
+    reset_mask=reset_mask,
+  )
+  right_center_vel, _right_center_vel_delta = _velocity_and_delta_from_cache(
+    env,
+    position=right_center,
+    position_key="foot_event_v2_prev_right_sole_center_pos_body",
+    velocity_key="foot_event_v2_prev_right_sole_center_vel_body",
+    reset_mask=reset_mask,
+  )
+
+  left_sole = left_toe - left_heel
+  right_sole = right_toe - right_heel
+  left_sole_pitch = left_sole[:, 2:3] / left_sole.norm(dim=-1, keepdim=True).clamp_min(
+    1.0e-6
+  )
+  right_sole_pitch = right_sole[:, 2:3] / right_sole.norm(
+    dim=-1, keepdim=True
+  ).clamp_min(1.0e-6)
+
+  command_lin_y = _command_column(
+    env,
+    command_name=command_name,
+    column=1,
+    dtype=latent.dtype,
+  )
+  command_yaw_rate = _command_column(
+    env,
+    command_name=command_name,
+    column=2,
+    dtype=latent.dtype,
+  )
+
+  slices = input_feature_slices()
+  previous_action_leg = latent[:, slices["previous_action_leg"]]
+  current_action = env.action_manager.action
+  _leg_joint_indices, leg_action_indices, _default_joint_pos = _get_leg_joint_info(env)
+  current_action_leg = current_action[:, leg_action_indices].to(dtype=latent.dtype)
+  action_delta_leg = current_action_leg - previous_action_leg
+
+  return torch.cat(
+    (
+      left_heel_vel,
+      right_heel_vel,
+      left_heel_vel_delta,
+      right_heel_vel_delta,
+      left_center,
+      right_center,
+      left_center_vel,
+      right_center_vel,
+      left_sole_pitch,
+      right_sole_pitch,
+      command_lin_y,
+      command_yaw_rate,
+      action_delta_leg,
+    ),
+    dim=-1,
+  ).to(dtype=latent.dtype)
 
 
 def foot_event_detector_obs(
   obs: Any,
   env: ManagerBasedRlEnv,
   *,
+  input_schema: FootEventDetectorObsSchema = "v1",
   include_gait_phase: bool,
   gait_period: float,
   command_name: str,
+  reset_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
   """Return deployable detector input features for the current frame."""
+  schema = _validate_input_schema(input_schema)
   latent = _latent_obs(obs)
-  if not include_gait_phase:
-    return latent
-  gait_phase = phase(env, gait_period, command_name)
-  return torch.cat((latent, gait_phase), dim=-1)
+  parts = [latent]
+  if include_gait_phase:
+    parts.append(phase(env, gait_period, command_name))
+  if schema == "footprint_v2":
+    parts.append(
+      _footprint_v2_extra_obs(
+        latent,
+        env,
+        command_name=command_name,
+        reset_mask=reset_mask,
+      )
+    )
+  return torch.cat(parts, dim=-1)
 
 
 def foot_event_input_feature_groups(
   *,
   include_gait_phase: bool,
+  input_schema: FootEventDetectorObsSchema = "v1",
 ) -> list[dict[str, int | str]]:
   """Return detector input schema metadata."""
+  schema = _validate_input_schema(input_schema)
   groups = [{"name": name, "width": width} for name, width in INPUT_FEATURE_GROUPS]
   if include_gait_phase:
     groups.append({"name": "gait_phase_sin", "width": 1})
     groups.append({"name": "gait_phase_cos", "width": 1})
+  if schema == "footprint_v2":
+    groups.extend(
+      {"name": name, "width": width}
+      for name, width in FOOTPRINT_V2_EXTRA_FEATURE_GROUPS
+    )
   return groups
 
 
@@ -330,9 +549,15 @@ def write_dataset_outputs(
     "input_source": (
       "observations['latent'] / stair_latent_obs"
       + (" + gait_phase" if cfg.include_gait_phase else "")
+      + (
+        " + footprint_v2 deployable kinematics"
+        if cfg.input_schema == "footprint_v2"
+        else ""
+      )
     ),
     "input_feature_groups": foot_event_input_feature_groups(
-      include_gait_phase=cfg.include_gait_phase
+      include_gait_phase=cfg.include_gait_phase,
+      input_schema=cfg.input_schema,
     ),
     "label_names": list(FOOT_EVENT_LABEL_NAMES),
     "label_source": {
@@ -360,14 +585,11 @@ def run_export(task_id: str, cfg: ExportFootEventDetectorDatasetConfig) -> Path:
     raise ValueError("steps must be positive.")
   if cfg.history_len <= 0:
     raise ValueError("history_len must be positive.")
-  expected_obs_dim = foot_event_detector_obs_dim(
-    include_gait_phase=cfg.include_gait_phase
+  obs_dim = resolve_foot_event_detector_obs_dim(
+    cfg.expected_obs_dim,
+    include_gait_phase=cfg.include_gait_phase,
+    input_schema=cfg.input_schema,
   )
-  if cfg.expected_obs_dim != expected_obs_dim:
-    raise ValueError(
-      f"expected_obs_dim={cfg.expected_obs_dim} does not match detector obs "
-      f"dimension {expected_obs_dim}."
-    )
 
   configure_torch_backends()
   device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -392,6 +614,7 @@ def run_export(task_id: str, cfg: ExportFootEventDetectorDatasetConfig) -> Path:
     f"envs={cfg.num_envs}",
     f"steps={cfg.steps}",
     f"history_len={cfg.history_len}",
+    f"input_schema={cfg.input_schema}",
     f"include_gait_phase={cfg.include_gait_phase}",
     f"max_samples={cfg.max_samples}",
     f"device={device}",
@@ -403,7 +626,7 @@ def run_export(task_id: str, cfg: ExportFootEventDetectorDatasetConfig) -> Path:
   builder = FootEventDetectorDatasetBuilder(
     num_envs=cfg.num_envs,
     history_len=cfg.history_len,
-    obs_dim=cfg.expected_obs_dim,
+    obs_dim=obs_dim,
     max_samples=cfg.max_samples,
     device=device,
   )
@@ -422,14 +645,16 @@ def run_export(task_id: str, cfg: ExportFootEventDetectorDatasetConfig) -> Path:
       device=device,
     )
     obs = wrapped.get_observations()
+    reset_all = torch.ones(cfg.num_envs, dtype=torch.bool, device=device)
     latent = foot_event_detector_obs(
       obs,
       raw_env,
+      input_schema=cfg.input_schema,
       include_gait_phase=cfg.include_gait_phase,
       gait_period=cfg.gait_period,
       command_name=cfg.command_name,
+      reset_mask=reset_all,
     )
-    reset_all = torch.ones(cfg.num_envs, dtype=torch.bool, device=device)
     builder.push_observations(latent, reset_all)
 
     progress = tqdm(
@@ -450,9 +675,11 @@ def run_export(task_id: str, cfg: ExportFootEventDetectorDatasetConfig) -> Path:
       latent = foot_event_detector_obs(
         obs,
         raw_env,
+        input_schema=cfg.input_schema,
         include_gait_phase=cfg.include_gait_phase,
         gait_period=cfg.gait_period,
         command_name=cfg.command_name,
+        reset_mask=reset_mask,
       )
       builder.push_observations(latent, reset_mask)
 

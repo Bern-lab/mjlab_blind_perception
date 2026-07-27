@@ -18,10 +18,11 @@ import tyro
 from scripts.velocity_eval.export_foot_event_detector_dataset import (
   DEFAULT_STAGE2D_CHECKPOINT,
   FOOT_EVENT_LABEL_NAMES,
+  FootEventDetectorObsSchema,
   foot_event_detector_obs,
-  foot_event_detector_obs_dim,
   foot_event_input_feature_groups,
   foot_event_labels_from_env,
+  resolve_foot_event_detector_obs_dim,
 )
 from scripts.velocity_eval.export_stair_probe_dataset import (
   STAIR_CURRENT_GROUND_CONTACT_KEY,
@@ -37,6 +38,7 @@ from scripts.velocity_eval.policy_io import (
 )
 from scripts.velocity_eval.train_foot_event_detector import (
   FootEventDetectorGRU,
+  _event_start_frames_and_indices,
   compute_metrics,
   event_f1_for_label,
   export_detector_onnx,
@@ -50,6 +52,7 @@ from tqdm.auto import tqdm
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg
+from mjlab.tasks.velocity.mdp.observations import _world_frame_foot_positions
 from mjlab.utils.lstm import reset_policy_state_from_step
 from mjlab.utils.torch import configure_torch_backends
 
@@ -69,10 +72,11 @@ class OnlineFootEventDetectorConfig:
   seed: int = 42
   device: str | None = None
   history_len: int = 16
+  input_schema: FootEventDetectorObsSchema = "v1"
   include_gait_phase: bool = True
   gait_period: float = 0.6
   command_name: str = "twist"
-  expected_obs_dim: int = 93
+  expected_obs_dim: int | None = None
   val_env_fraction: float = 0.2
   train_buffer_capacity: int = 120_000
   val_buffer_capacity: int = 40_000
@@ -116,9 +120,14 @@ class OnlineFootEventDetectorConfig:
   tversky_alpha: float = 0.3
   tversky_beta: float = 0.7
   mine_false_positive_hard_negatives: bool = True
+  mine_false_positive_touchdown_hard_negatives: bool = True
   mine_false_negative_hard_positives: bool = True
   mine_false_negative_toe_hard_positives: bool = True
   hard_negative_mining_threshold: float = 0.5
+  hard_touchdown_false_positive_mining_threshold: float = 0.5
+  hard_touchdown_false_positive_mining_contact_threshold: float = 0.7
+  hard_touchdown_false_positive_mining_window_frames: int = 4
+  hard_touchdown_false_positive_mining_max_peaks: int = 4096
   hard_positive_mining_threshold: float = 0.5
   hard_toe_positive_mining_threshold: float = 0.5
   hard_negative_mining_window_frames: int = 8
@@ -191,6 +200,13 @@ class OnlineFootEventReplayBuffer:
     self.episode_id = torch.empty(capacity, dtype=torch.int64, device=device)
     self.frame_idx = torch.empty(capacity, dtype=torch.int64, device=device)
     self.env_id = torch.empty(capacity, dtype=torch.int64, device=device)
+    self.footprint_anchor_w = torch.empty(
+      capacity,
+      2,
+      3,
+      dtype=torch.float32,
+      device=device,
+    )
     self.stair_support = torch.empty(capacity, 2, dtype=torch.bool, device=device)
     self.support_fraction = torch.empty(
       capacity,
@@ -253,10 +269,13 @@ class OnlineFootEventReplayBuffer:
     env_id: torch.Tensor,
     stair_support: torch.Tensor,
     support_fraction: torch.Tensor,
+    footprint_anchor_w: torch.Tensor | None = None,
   ) -> torch.Tensor:
     n = int(obs_history.shape[0])
     if n == 0:
       return torch.empty(0, dtype=torch.int64, device=self.device)
+    if footprint_anchor_w is None:
+      footprint_anchor_w = torch.zeros(n, 2, 3, dtype=torch.float32, device=self.device)
     if n >= self.capacity:
       start = n - self.capacity
       obs_history = obs_history[start:]
@@ -267,6 +286,7 @@ class OnlineFootEventReplayBuffer:
       env_id = env_id[start:]
       stair_support = stair_support[start:]
       support_fraction = support_fraction[start:]
+      footprint_anchor_w = footprint_anchor_w[start:]
       n = self.capacity
 
     first = min(n, self.capacity - self._write_pos)
@@ -284,6 +304,7 @@ class OnlineFootEventReplayBuffer:
       env_id[:first],
       stair_support[:first],
       support_fraction[:first],
+      footprint_anchor_w[:first],
     )
     if second > 0:
       write_indices.append(torch.arange(0, second, device=self.device))
@@ -297,6 +318,7 @@ class OnlineFootEventReplayBuffer:
         env_id[first:],
         stair_support[first:],
         support_fraction[first:],
+        footprint_anchor_w[first:],
       )
     indices = torch.cat(write_indices, dim=0).to(dtype=torch.int64)
     self._retroactively_soften_previous_events(
@@ -325,6 +347,7 @@ class OnlineFootEventReplayBuffer:
     env_id: torch.Tensor,
     stair_support: torch.Tensor,
     support_fraction: torch.Tensor,
+    footprint_anchor_w: torch.Tensor,
   ) -> None:
     self.obs_history[slc].copy_(obs_history.detach())
     self.labels[slc].copy_(labels.detach())
@@ -332,6 +355,7 @@ class OnlineFootEventReplayBuffer:
     self.episode_id[slc].copy_(episode_id.detach())
     self.frame_idx[slc].copy_(frame_idx.detach())
     self.env_id[slc].copy_(env_id.detach())
+    self.footprint_anchor_w[slc].copy_(footprint_anchor_w.detach())
     self.stair_support[slc].copy_(stair_support.detach())
     self.support_fraction[slc].copy_(support_fraction.detach())
     event_negative = labels[:, 2:6].amax(dim=1) <= 0.5
@@ -565,6 +589,7 @@ class OnlineFootEventReplayBuffer:
       "episode_id": self.episode_id[:size].detach().cpu().numpy(),
       "frame_idx": self.frame_idx[:size].detach().cpu().numpy(),
       "env_id": self.env_id[:size].detach().cpu().numpy(),
+      "footprint_anchor_w": self.footprint_anchor_w[:size].detach().cpu().numpy(),
       "stair_support": self.stair_support[:size].detach().cpu().numpy(),
       "support_fraction": self.support_fraction[:size].detach().cpu().numpy(),
       "stair_hard_negative": self.stair_hard_negative[:size].detach().cpu().numpy(),
@@ -954,6 +979,193 @@ def _touchdown_group_metrics(
   return metrics
 
 
+def _current_footprint_anchor_w(env: ManagerBasedRlEnv) -> torch.Tensor:
+  """Return world-frame sole-center anchors that deployment would write."""
+  left_toe, right_toe, left_heel, right_heel = _world_frame_foot_positions(env)
+  return torch.stack(
+    (
+      0.5 * (left_toe + left_heel),
+      0.5 * (right_toe + right_heel),
+    ),
+    dim=1,
+  ).to(dtype=torch.float32)
+
+
+def _percentile_or_zero(values: list[float], quantile: float) -> float:
+  if not values:
+    return 0.0
+  return float(np.quantile(np.asarray(values, dtype=np.float32), quantile))
+
+
+def _mean_or_zero(values: list[float]) -> float:
+  if not values:
+    return 0.0
+  return float(np.mean(np.asarray(values, dtype=np.float32)))
+
+
+def _match_event_pairs_with_indices(
+  true_frames: np.ndarray,
+  true_indices: np.ndarray,
+  pred_frames: np.ndarray,
+  pred_indices: np.ndarray,
+  *,
+  tolerance_frames: int,
+) -> list[tuple[int, int]]:
+  """Greedily match prediction frames to true events and keep local indices."""
+  matched = np.zeros(true_frames.shape[0], dtype=np.bool_)
+  pairs: list[tuple[int, int]] = []
+  for pred_pos, pred_frame in enumerate(pred_frames):
+    candidates = np.nonzero(
+      (~matched) & (np.abs(true_frames - pred_frame) <= tolerance_frames)
+    )[0]
+    if candidates.size == 0:
+      continue
+    best = candidates[np.argmin(np.abs(true_frames[candidates] - pred_frame))]
+    matched[best] = True
+    pairs.append((int(true_indices[best]), int(pred_indices[pred_pos])))
+  return pairs
+
+
+def _summarize_touchdown_alignment(
+  *,
+  labels: np.ndarray,
+  probabilities: np.ndarray,
+  episode_id: np.ndarray,
+  frame_idx: np.ndarray,
+  footprint_anchor_w: np.ndarray | None,
+  thresholds_by_foot: tuple[float, float],
+  prefix: str,
+  valid_mask: np.ndarray | None,
+  contact_threshold: float,
+  contact_release_threshold: float,
+  cooldown_frames: int,
+  tolerance_frames: int,
+) -> dict[str, float]:
+  """Measure deployed touchdown trigger delay and resulting footprint error."""
+  metrics: dict[str, float] = {}
+  all_dt: list[float] = []
+  all_abs_dt: list[float] = []
+  all_xy_error: list[float] = []
+  all_z_error: list[float] = []
+  alignment_tolerance = max(int(tolerance_frames), int(cooldown_frames))
+
+  for foot_id, side in enumerate(("left", "right")):
+    label_index = 2 + foot_id
+    foot_dt: list[float] = []
+    foot_abs_dt: list[float] = []
+    foot_xy_error: list[float] = []
+    foot_z_error: list[float] = []
+    if valid_mask is None:
+      foot_valid_mask = np.ones(labels.shape[0], dtype=np.bool_)
+    elif valid_mask.ndim == 2:
+      foot_valid_mask = valid_mask[:, foot_id].astype(np.bool_)
+    else:
+      foot_valid_mask = valid_mask.astype(np.bool_)
+
+    for episode in np.unique(episode_id):
+      mask = (episode_id == episode) & foot_valid_mask
+      if not mask.any():
+        continue
+      local_labels = labels[mask]
+      local_probabilities = probabilities[mask]
+      local_frames = frame_idx[mask].astype(np.int64)
+      true_frames, true_indices = _event_start_frames_and_indices(
+        local_labels[:, label_index] > 0.5,
+        local_frames,
+      )
+      active = (
+        local_probabilities[:, label_index] >= float(thresholds_by_foot[foot_id])
+      ) & (local_probabilities[:, foot_id] >= float(contact_threshold))
+      pred_frames, pred_indices = _event_start_frames_and_indices(
+        active,
+        local_frames,
+        cooldown_frames=cooldown_frames,
+        release_values=local_probabilities[:, foot_id],
+        release_threshold=contact_release_threshold,
+      )
+      pairs = _match_event_pairs_with_indices(
+        true_frames,
+        true_indices,
+        pred_frames,
+        pred_indices,
+        tolerance_frames=alignment_tolerance,
+      )
+      if not pairs:
+        continue
+      local_anchor = (
+        footprint_anchor_w[mask, foot_id] if footprint_anchor_w is not None else None
+      )
+      for true_index, pred_index in pairs:
+        dt = float(local_frames[pred_index] - local_frames[true_index])
+        foot_dt.append(dt)
+        foot_abs_dt.append(abs(dt))
+        if local_anchor is not None:
+          delta = local_anchor[pred_index] - local_anchor[true_index]
+          foot_xy_error.append(float(np.linalg.norm(delta[:2])))
+          foot_z_error.append(float(abs(delta[2])))
+
+    all_dt.extend(foot_dt)
+    all_abs_dt.extend(foot_abs_dt)
+    all_xy_error.extend(foot_xy_error)
+    all_z_error.extend(foot_z_error)
+    metrics[f"{side}_{prefix}_timing_matched_count"] = float(len(foot_dt))
+    metrics[f"{side}_{prefix}_timing_signed_dt_frames_mean"] = _mean_or_zero(foot_dt)
+    metrics[f"{side}_{prefix}_timing_abs_dt_frames_p50"] = _percentile_or_zero(
+      foot_abs_dt,
+      0.50,
+    )
+    metrics[f"{side}_{prefix}_timing_abs_dt_frames_p90"] = _percentile_or_zero(
+      foot_abs_dt,
+      0.90,
+    )
+    if footprint_anchor_w is not None:
+      metrics[f"{side}_{prefix}_footprint_xy_error_m_p50"] = _percentile_or_zero(
+        foot_xy_error,
+        0.50,
+      )
+      metrics[f"{side}_{prefix}_footprint_xy_error_m_p90"] = _percentile_or_zero(
+        foot_xy_error,
+        0.90,
+      )
+      metrics[f"{side}_{prefix}_footprint_z_error_m_p50"] = _percentile_or_zero(
+        foot_z_error,
+        0.50,
+      )
+      metrics[f"{side}_{prefix}_footprint_z_error_m_p90"] = _percentile_or_zero(
+        foot_z_error,
+        0.90,
+      )
+
+  metrics[f"{prefix}_timing_matched_count"] = float(len(all_dt))
+  metrics[f"{prefix}_timing_signed_dt_frames_mean"] = _mean_or_zero(all_dt)
+  metrics[f"{prefix}_timing_abs_dt_frames_p50"] = _percentile_or_zero(
+    all_abs_dt,
+    0.50,
+  )
+  metrics[f"{prefix}_timing_abs_dt_frames_p90"] = _percentile_or_zero(
+    all_abs_dt,
+    0.90,
+  )
+  if footprint_anchor_w is not None:
+    metrics[f"{prefix}_footprint_xy_error_m_p50"] = _percentile_or_zero(
+      all_xy_error,
+      0.50,
+    )
+    metrics[f"{prefix}_footprint_xy_error_m_p90"] = _percentile_or_zero(
+      all_xy_error,
+      0.90,
+    )
+    metrics[f"{prefix}_footprint_z_error_m_p50"] = _percentile_or_zero(
+      all_z_error,
+      0.50,
+    )
+    metrics[f"{prefix}_footprint_z_error_m_p90"] = _percentile_or_zero(
+      all_z_error,
+      0.90,
+    )
+  return metrics
+
+
 def _deployment_event_metrics(
   *,
   labels: np.ndarray,
@@ -962,6 +1174,7 @@ def _deployment_event_metrics(
   frame_idx: np.ndarray,
   stair_support: np.ndarray,
   thresholds: np.ndarray,
+  footprint_anchor_w: np.ndarray | None = None,
   touchdown_contact_threshold: float,
   touchdown_contact_release_threshold: float,
   touchdown_cooldown_frames: int,
@@ -1218,6 +1431,66 @@ def _deployment_event_metrics(
       + 0.20 * metrics["high_recall_precision_guard"]
     )
   )
+  touchdown_thresholds = (
+    float(metrics["left_touchdown_deploy_high_recall_threshold"]),
+    float(metrics["right_touchdown_deploy_high_recall_threshold"]),
+  )
+  metrics.update(
+    _summarize_touchdown_alignment(
+      labels=labels,
+      probabilities=probabilities,
+      episode_id=episode_id,
+      frame_idx=frame_idx,
+      footprint_anchor_w=footprint_anchor_w,
+      thresholds_by_foot=touchdown_thresholds,
+      prefix="touchdown",
+      valid_mask=None,
+      contact_threshold=touchdown_contact_threshold,
+      contact_release_threshold=touchdown_contact_release_threshold,
+      cooldown_frames=touchdown_cooldown_frames,
+      tolerance_frames=event_tolerance_frames,
+    )
+  )
+  metrics.update(
+    _summarize_touchdown_alignment(
+      labels=labels,
+      probabilities=probabilities,
+      episode_id=episode_id,
+      frame_idx=frame_idx,
+      footprint_anchor_w=footprint_anchor_w,
+      thresholds_by_foot=touchdown_thresholds,
+      prefix="touchdown_stair",
+      valid_mask=stair_support,
+      contact_threshold=touchdown_contact_threshold,
+      contact_release_threshold=touchdown_contact_release_threshold,
+      cooldown_frames=touchdown_cooldown_frames,
+      tolerance_frames=event_tolerance_frames,
+    )
+  )
+  matched_count = metrics["touchdown_timing_matched_count"]
+  if matched_count <= 0.0:
+    timing_guard = 0.0
+    footprint_xy_guard = 0.0
+  else:
+    timing_guard = max(
+      0.0,
+      1.0
+      - metrics["touchdown_timing_abs_dt_frames_p90"]
+      / max(float(touchdown_cooldown_frames), 1.0),
+    )
+    footprint_xy_guard = 1.0
+    if footprint_anchor_w is not None:
+      footprint_xy_guard = max(
+        0.0,
+        1.0 - metrics["touchdown_footprint_xy_error_m_p90"] / 0.12,
+      )
+  metrics["touchdown_timing_guard"] = float(timing_guard)
+  if footprint_anchor_w is not None:
+    metrics["touchdown_footprint_xy_guard"] = float(footprint_xy_guard)
+  metrics["timing_guarded_footprint_score"] = float(
+    metrics["high_recall_footprint_score"]
+    * (0.70 * timing_guard + 0.30 * footprint_xy_guard)
+  )
   return metrics
 
 
@@ -1295,6 +1568,7 @@ def _evaluate_online(
       frame_idx=snapshot["frame_idx"].astype(np.int64),
       stair_support=snapshot["stair_support"].astype(np.bool_),
       thresholds=deployment_thresholds,
+      footprint_anchor_w=snapshot["footprint_anchor_w"].astype(np.float32),
       touchdown_contact_threshold=touchdown_contact_threshold,
       touchdown_contact_release_threshold=touchdown_contact_release_threshold,
       touchdown_cooldown_frames=touchdown_cooldown_frames,
@@ -1365,6 +1639,57 @@ def _mine_false_positive_hard_negatives(
     same_sequence = (episode_id == episode_id[peak]) & (env_id == env_id[peak])
     near_peak = np.abs(frame_idx - frame_idx[peak]) <= window_frames
     hard_mask |= same_sequence & near_peak & toe_negative
+  return buffer.mark_false_positive_hard_negatives(hard_mask)
+
+
+def _mine_false_positive_touchdown_hard_negatives(
+  model: FootEventDetectorGRU,
+  buffer: OnlineFootEventReplayBuffer,
+  *,
+  device: torch.device,
+  batch_size: int,
+  threshold: float,
+  contact_threshold: float,
+  window_frames: int,
+  max_peaks: int,
+) -> int:
+  """Replay likely false touchdown triggers around already-negative windows."""
+  if buffer.size == 0:
+    return 0
+  snapshot, probabilities = _predict_buffer_probabilities(
+    model,
+    buffer,
+    device=device,
+    batch_size=batch_size,
+  )
+  train_labels = snapshot["train_labels"].astype(np.float32)
+  touchdown_negative = train_labels[:, 2:4].max(axis=1) <= 0.0
+  left_fp = (
+    (probabilities[:, 2] >= threshold)
+    & (probabilities[:, 0] >= contact_threshold)
+    & touchdown_negative
+  )
+  right_fp = (
+    (probabilities[:, 3] >= threshold)
+    & (probabilities[:, 1] >= contact_threshold)
+    & touchdown_negative
+  )
+  peak_indices = np.nonzero(left_fp | right_fp)[0].astype(np.int64)
+  if peak_indices.shape[0] > max_peaks:
+    scores = np.maximum(
+      probabilities[peak_indices, 2] * probabilities[peak_indices, 0],
+      probabilities[peak_indices, 3] * probabilities[peak_indices, 1],
+    )
+    peak_indices = peak_indices[np.argsort(-scores)[:max_peaks]]
+
+  hard_mask = np.zeros(train_labels.shape[0], dtype=np.bool_)
+  episode_id = snapshot["episode_id"].astype(np.int64)
+  frame_idx = snapshot["frame_idx"].astype(np.int64)
+  env_id = snapshot["env_id"].astype(np.int64)
+  for peak in peak_indices:
+    same_sequence = (episode_id == episode_id[peak]) & (env_id == env_id[peak])
+    near_peak = np.abs(frame_idx - frame_idx[peak]) <= window_frames
+    hard_mask |= same_sequence & near_peak & touchdown_negative
   return buffer.mark_false_positive_hard_negatives(hard_mask)
 
 
@@ -1598,14 +1923,11 @@ def run_online_train(
     raise ValueError("steps must be positive.")
   if cfg.history_len <= 0:
     raise ValueError("history_len must be positive.")
-  expected_obs_dim = foot_event_detector_obs_dim(
-    include_gait_phase=cfg.include_gait_phase
+  obs_dim = resolve_foot_event_detector_obs_dim(
+    cfg.expected_obs_dim,
+    include_gait_phase=cfg.include_gait_phase,
+    input_schema=cfg.input_schema,
   )
-  if cfg.expected_obs_dim != expected_obs_dim:
-    raise ValueError(
-      f"expected_obs_dim={cfg.expected_obs_dim} does not match detector obs "
-      f"dimension {expected_obs_dim}."
-    )
   if not 0.0 < cfg.val_env_fraction < 1.0:
     raise ValueError("val_env_fraction must be in (0, 1).")
   if cfg.steps <= 0:
@@ -1640,6 +1962,12 @@ def run_online_train(
     raise ValueError("hard_negative_mining_window_frames must be non-negative.")
   if cfg.hard_negative_mining_max_peaks <= 0:
     raise ValueError("hard_negative_mining_max_peaks must be positive.")
+  if cfg.hard_touchdown_false_positive_mining_window_frames < 0:
+    raise ValueError(
+      "hard_touchdown_false_positive_mining_window_frames must be non-negative."
+    )
+  if cfg.hard_touchdown_false_positive_mining_max_peaks <= 0:
+    raise ValueError("hard_touchdown_false_positive_mining_max_peaks must be positive.")
   if cfg.hard_positive_mining_window_frames < 0:
     raise ValueError("hard_positive_mining_window_frames must be non-negative.")
   if cfg.hard_positive_mining_max_peaks <= 0:
@@ -1652,6 +1980,15 @@ def run_online_train(
     raise ValueError("toe_soft_positive_threshold must be in [0, 1].")
   if not 0.0 <= cfg.touchdown_soft_positive_threshold <= 1.0:
     raise ValueError("touchdown_soft_positive_threshold must be in [0, 1].")
+  mining_thresholds = (
+    cfg.hard_negative_mining_threshold,
+    cfg.hard_touchdown_false_positive_mining_threshold,
+    cfg.hard_touchdown_false_positive_mining_contact_threshold,
+    cfg.hard_positive_mining_threshold,
+    cfg.hard_toe_positive_mining_threshold,
+  )
+  if any(value < 0.0 or value > 1.0 for value in mining_thresholds):
+    raise ValueError("Hard mining thresholds must be in [0, 1].")
   if not 0.0 <= cfg.touchdown_recall_precision_floor <= 1.0:
     raise ValueError("touchdown_recall_precision_floor must be in [0, 1].")
   if not 0.0 <= cfg.toe_hit_recall_precision_floor <= 1.0:
@@ -1703,13 +2040,13 @@ def run_online_train(
   history_buffer = StairProbeHistoryBuffer(
     num_envs=cfg.num_envs,
     history_len=cfg.history_len,
-    obs_dim=cfg.expected_obs_dim,
+    obs_dim=obs_dim,
     device=device,
   )
   train_buffer = OnlineFootEventReplayBuffer(
     capacity=cfg.train_buffer_capacity,
     history_len=cfg.history_len,
-    obs_dim=cfg.expected_obs_dim,
+    obs_dim=obs_dim,
     label_dim=len(FOOT_EVENT_LABEL_NAMES),
     num_envs=cfg.num_envs,
     soft_touchdown_radius=cfg.soft_touchdown_radius,
@@ -1721,7 +2058,7 @@ def run_online_train(
   val_buffer = OnlineFootEventReplayBuffer(
     capacity=cfg.val_buffer_capacity,
     history_len=cfg.history_len,
-    obs_dim=cfg.expected_obs_dim,
+    obs_dim=obs_dim,
     label_dim=len(FOOT_EVENT_LABEL_NAMES),
     num_envs=cfg.num_envs,
     soft_touchdown_radius=cfg.soft_touchdown_radius,
@@ -1731,7 +2068,7 @@ def run_online_train(
     device=device,
   )
   model = FootEventDetectorGRU(
-    obs_dim=cfg.expected_obs_dim,
+    obs_dim=obs_dim,
     frame_hidden_dim=cfg.frame_hidden_dim,
     recurrent_hidden_dim=cfg.recurrent_hidden_dim,
     head_hidden_dim=cfg.head_hidden_dim,
@@ -1822,8 +2159,9 @@ def run_online_train(
     f"optimizer_weight_decay={optimizer_weight_decay}",
     f"baseline_metrics={cfg.baseline_metrics_file}",
     f"toe_hit_pos_weight={cfg.toe_hit_pos_weight}",
+    f"input_schema={cfg.input_schema}",
     f"include_gait_phase={cfg.include_gait_phase}",
-    f"obs_dim={cfg.expected_obs_dim}",
+    f"obs_dim={obs_dim}",
     f"toe_pos_fraction={cfg.toe_positive_fraction}",
     f"toe_soft_fraction={cfg.toe_soft_positive_fraction}",
     f"touchdown_pos_fraction={cfg.touchdown_positive_fraction}",
@@ -1850,9 +2188,11 @@ def run_online_train(
     latent = foot_event_detector_obs(
       obs,
       raw_env,
+      input_schema=cfg.input_schema,
       include_gait_phase=cfg.include_gait_phase,
       gait_period=cfg.gait_period,
       command_name=cfg.command_name,
+      reset_mask=torch.ones(cfg.num_envs, dtype=torch.bool, device=device),
     )
     history_buffer.push(
       latent, torch.ones(cfg.num_envs, dtype=torch.bool, device=device)
@@ -1876,9 +2216,11 @@ def run_online_train(
       latent = foot_event_detector_obs(
         obs,
         raw_env,
+        input_schema=cfg.input_schema,
         include_gait_phase=cfg.include_gait_phase,
         gait_period=cfg.gait_period,
         command_name=cfg.command_name,
+        reset_mask=reset_mask,
       )
       history_buffer.push(latent, reset_mask)
 
@@ -1897,6 +2239,7 @@ def run_online_train(
         radius2_value=cfg.soft_event_radius2_value,
       )
       stair_support, support_fraction = _current_metadata(raw_env)
+      footprint_anchor_w = _current_footprint_anchor_w(raw_env)
       full_history = history_buffer.valid_mask.all(dim=1)
       collect_mask = full_history & ~reset_mask
       episode_id = episode_counter * cfg.num_envs + env_ids
@@ -1921,6 +2264,7 @@ def run_online_train(
           env_id=ids,
           stair_support=stair_support[ids],
           support_fraction=support_fraction[ids],
+          footprint_anchor_w=footprint_anchor_w[ids],
         )
 
       current_contact = _tensor_extra(
@@ -2046,6 +2390,25 @@ def run_online_train(
             window_frames=cfg.hard_negative_mining_window_frames,
             max_peaks=cfg.hard_negative_mining_max_peaks,
           )
+        mined_touchdown_hard_negatives = 0
+        if (
+          cfg.mine_false_positive_touchdown_hard_negatives
+          and train_label_indices is None
+        ):
+          mined_touchdown_hard_negatives = (
+            _mine_false_positive_touchdown_hard_negatives(
+              model,
+              train_buffer,
+              device=device,
+              batch_size=cfg.batch_size,
+              threshold=cfg.hard_touchdown_false_positive_mining_threshold,
+              contact_threshold=(
+                cfg.hard_touchdown_false_positive_mining_contact_threshold
+              ),
+              window_frames=cfg.hard_touchdown_false_positive_mining_window_frames,
+              max_peaks=cfg.hard_touchdown_false_positive_mining_max_peaks,
+            )
+          )
         mined_hard_positives = 0
         if cfg.mine_false_negative_hard_positives:
           mined_hard_positives = _mine_false_negative_hard_positives(
@@ -2101,6 +2464,9 @@ def run_online_train(
             "train_samples": train_buffer.size,
             "val_samples": val_buffer.size,
             "mined_false_positive_hard_negatives": mined_hard_negatives,
+            "mined_false_positive_touchdown_hard_negatives": (
+              mined_touchdown_hard_negatives
+            ),
             "mined_false_negative_hard_positives": mined_hard_positives,
             "mined_false_negative_toe_hard_positives": mined_toe_hard_positives,
             "baseline_guard_passed": guard_passed,
@@ -2116,6 +2482,9 @@ def run_online_train(
           f"deploy_event_macro_f1={val_metrics['deploy_event_macro_f1']:.4f}",
           f"footprint_score={val_metrics['footprint_deploy_score']:.4f}",
           f"high_recall_score={val_metrics['high_recall_footprint_score']:.4f}",
+          f"timing_guarded_score={val_metrics['timing_guarded_footprint_score']:.4f}",
+          f"td_dt_p90={val_metrics['touchdown_timing_abs_dt_frames_p90']:.1f}",
+          f"td_xy_p90={val_metrics.get('touchdown_footprint_xy_error_m_p90', 0.0):.3f}",
           f"toe_guarded_score={val_metrics['toe_guarded_footprint_score']:.4f}",
           f"td_deploy_f1={val_metrics['touchdown_deploy_macro_f1']:.4f}",
           f"td_high_recall={val_metrics['touchdown_high_recall_macro_recall']:.4f}",
@@ -2126,6 +2495,7 @@ def run_online_train(
           f"toe_high_recall={val_metrics['toe_riser_high_recall_macro_recall']:.4f}",
           f"toe_high_precision={val_metrics['toe_riser_high_recall_macro_precision']:.4f}",
           f"mined_fp_hard={mined_hard_negatives}",
+          f"mined_td_fp_hard={mined_touchdown_hard_negatives}",
           f"mined_fn_hard={mined_hard_positives}",
           f"mined_toe_fn_hard={mined_toe_hard_positives}",
           f"baseline_guard={'pass' if guard_passed else 'fail'}",
@@ -2160,7 +2530,7 @@ def run_online_train(
       model,
       output_dir / "best.onnx",
       history_len=cfg.history_len,
-      obs_dim=cfg.expected_obs_dim,
+      obs_dim=obs_dim,
     )
   _write_label_audit(output_dir, train_buffer, val_buffer)
   best_val_metrics: dict[str, float] = {}
@@ -2184,7 +2554,8 @@ def run_online_train(
     "checkpoint_path": str(checkpoint_path),
     "label_names": list(FOOT_EVENT_LABEL_NAMES),
     "input_feature_groups": foot_event_input_feature_groups(
-      include_gait_phase=cfg.include_gait_phase
+      include_gait_phase=cfg.include_gait_phase,
+      input_schema=cfg.input_schema,
     ),
     "history": metrics_history,
     "best_step": best_step,
@@ -2224,7 +2595,7 @@ def run_online_train(
     },
     "model": {
       "type": "FootEventDetectorGRU",
-      "obs_dim": cfg.expected_obs_dim,
+      "obs_dim": obs_dim,
       "history_len": cfg.history_len,
       "output_dim": len(FOOT_EVENT_LABEL_NAMES),
       "toe_riser_only_output_layout": bool(cfg.toe_riser_only_model),

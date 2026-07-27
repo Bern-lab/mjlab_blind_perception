@@ -9,8 +9,13 @@ import torch
 from scripts.velocity_eval.export_foot_event_detector_dataset import (
   FOOT_EVENT_LABEL_NAMES,
   FootEventDetectorDatasetBuilder,
+  foot_event_detector_obs,
+  foot_event_detector_obs_dim,
+  foot_event_input_feature_groups,
   foot_event_labels_from_env,
+  resolve_foot_event_detector_obs_dim,
 )
+from scripts.velocity_eval.export_stair_probe_dataset import input_feature_slices
 from scripts.velocity_eval.train_foot_event_detector import (
   FootEventArrays,
   FootEventDetectorGRU,
@@ -32,8 +37,10 @@ from scripts.velocity_eval.train_foot_event_detector_online import (
   _configure_toe_riser_only_model,
   _deployment_event_metrics,
   _metric_improved,
+  _mine_false_positive_touchdown_hard_negatives,
 )
 
+from mjlab.tasks.velocity.mdp.observations import _G1_LEG_JOINT_NAMES
 from mjlab.tasks.velocity.mdp.stair_geometry import (
   STAIR_CURRENT_GROUND_CONTACT_KEY,
   STAIR_ENTRY_EVENT_KEY,
@@ -204,6 +211,123 @@ def test_foot_event_detector_forward_shape() -> None:
   logits = model(torch.zeros(5, 4, 91))
 
   assert logits.shape == (5, len(FOOT_EVENT_LABEL_NAMES))
+
+
+def test_footprint_v2_schema_adds_deployable_timing_features() -> None:
+  groups = foot_event_input_feature_groups(
+    include_gait_phase=True,
+    input_schema="footprint_v2",
+  )
+  names = [group["name"] for group in groups]
+  widths = [int(group["width"]) for group in groups]
+
+  assert foot_event_detector_obs_dim(include_gait_phase=True) == 93
+  assert sum(widths) == 133
+  assert (
+    resolve_foot_event_detector_obs_dim(
+      None,
+      include_gait_phase=True,
+      input_schema="footprint_v2",
+    )
+    == 133
+  )
+  assert names[-13:] == [
+    "left_heel_vel_body",
+    "right_heel_vel_body",
+    "left_heel_vel_delta",
+    "right_heel_vel_delta",
+    "left_sole_center_pos_body",
+    "right_sole_center_pos_body",
+    "left_sole_center_vel_body",
+    "right_sole_center_vel_body",
+    "left_sole_pitch_proxy",
+    "right_sole_pitch_proxy",
+    "command_lin_y",
+    "command_yaw_rate",
+    "action_delta_leg",
+  ]
+
+
+def test_footprint_v2_obs_computes_reset_safe_heel_and_action_features() -> None:
+  num_envs = 2
+  device = torch.device("cpu")
+  site_pos_w = torch.tensor(
+    [
+      [
+        [0.20, 0.10, 0.00],
+        [0.20, -0.10, 0.00],
+        [0.00, 0.10, -0.02],
+        [0.00, -0.10, -0.02],
+      ],
+      [
+        [0.30, 0.10, 0.01],
+        [0.30, -0.10, 0.01],
+        [0.10, 0.10, -0.01],
+        [0.10, -0.10, -0.01],
+      ],
+    ],
+    dtype=torch.float32,
+  )
+  robot = SimpleNamespace(
+    site_names=["left_toe", "right_toe", "left_heel", "right_heel"],
+    joint_names=list(_G1_LEG_JOINT_NAMES),
+    data=SimpleNamespace(
+      root_link_pos_w=torch.zeros(num_envs, 3),
+      root_link_quat_w=torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(num_envs, 1),
+      site_pos_w=site_pos_w,
+      default_joint_pos=torch.zeros(num_envs, len(_G1_LEG_JOINT_NAMES)),
+    ),
+  )
+  action = torch.zeros(num_envs, len(_G1_LEG_JOINT_NAMES))
+  action[:, 0] = 0.25
+  command = torch.tensor([[0.5, 0.2, -0.1], [0.3, -0.4, 0.6]])
+  env: Any = SimpleNamespace(
+    num_envs=num_envs,
+    device=device,
+    step_dt=0.02,
+    extras={},
+    scene={"robot": robot},
+    action_manager=SimpleNamespace(
+      action=action,
+      total_action_dim=len(_G1_LEG_JOINT_NAMES),
+    ),
+    command_manager=SimpleNamespace(get_command=lambda _name: command),
+  )
+  latent = torch.zeros(num_envs, 91)
+  latent[:, input_feature_slices()["previous_action_leg"].start] = 0.10
+
+  first = foot_event_detector_obs(
+    {"latent": latent},
+    cast(Any, env),
+    input_schema="footprint_v2",
+    include_gait_phase=False,
+    gait_period=0.6,
+    command_name="twist",
+    reset_mask=torch.ones(num_envs, dtype=torch.bool),
+  )
+  robot.data.site_pos_w = site_pos_w + torch.tensor([0.02, 0.0, 0.0])
+  second = foot_event_detector_obs(
+    {"latent": latent},
+    cast(Any, env),
+    input_schema="footprint_v2",
+    include_gait_phase=False,
+    gait_period=0.6,
+    command_name="twist",
+    reset_mask=torch.zeros(num_envs, dtype=torch.bool),
+  )
+
+  extra_start = 91
+  command_start = extra_start + 26
+  action_delta_start = extra_start + 28
+  assert first.shape == (num_envs, 131)
+  assert first[:, extra_start : extra_start + 6].abs().sum().item() == 0.0
+  torch.testing.assert_close(second[:, extra_start], torch.ones(num_envs))
+  torch.testing.assert_close(first[:, command_start], command[:, 1])
+  torch.testing.assert_close(first[:, command_start + 1], command[:, 2])
+  torch.testing.assert_close(
+    first[:, action_delta_start],
+    torch.full((num_envs,), 0.15),
+  )
 
 
 def test_torch_dataset_uses_last_history_frames() -> None:
@@ -632,6 +756,104 @@ def test_online_replay_buffer_marks_false_positive_hard_negatives() -> None:
   assert buffer.snapshot()["false_positive_hard_negative"].tolist() == [True, False]
 
 
+def test_online_replay_buffer_stores_footprint_anchor_w() -> None:
+  buffer = OnlineFootEventReplayBuffer(
+    capacity=4,
+    history_len=1,
+    obs_dim=2,
+    label_dim=len(FOOT_EVENT_LABEL_NAMES),
+    num_envs=2,
+    soft_touchdown_radius=1,
+    soft_toe_hit_radius=2,
+    soft_event_radius1_value=0.7,
+    soft_event_radius2_value=0.4,
+    device=torch.device("cpu"),
+  )
+  labels = torch.zeros(2, len(FOOT_EVENT_LABEL_NAMES))
+  footprint_anchor_w = torch.arange(12, dtype=torch.float32).reshape(2, 2, 3)
+
+  buffer.add(
+    obs_history=torch.zeros(2, 1, 2),
+    labels=labels,
+    train_labels=labels.clone(),
+    episode_id=torch.zeros(2, dtype=torch.int64),
+    frame_idx=torch.arange(2, dtype=torch.int64),
+    env_id=torch.arange(2, dtype=torch.int64),
+    stair_support=torch.zeros(2, 2, dtype=torch.bool),
+    support_fraction=torch.zeros(2, 2),
+    footprint_anchor_w=footprint_anchor_w,
+  )
+
+  np.testing.assert_allclose(
+    buffer.snapshot()["footprint_anchor_w"],
+    footprint_anchor_w.numpy(),
+  )
+
+
+def test_touchdown_false_positive_mining_marks_negative_windows() -> None:
+  class TouchdownFalsePositiveModel(torch.nn.Module):
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+      logits = torch.full(
+        (obs.shape[0], len(FOOT_EVENT_LABEL_NAMES)),
+        -10.0,
+        dtype=obs.dtype,
+        device=obs.device,
+      )
+      active_logit = torch.where(
+        obs[:, -1, 0] > 0.5,
+        torch.full((obs.shape[0],), 10.0, dtype=obs.dtype, device=obs.device),
+        torch.full((obs.shape[0],), -10.0, dtype=obs.dtype, device=obs.device),
+      )
+      logits[:, 0] = active_logit
+      logits[:, 2] = active_logit
+      return logits
+
+  buffer = OnlineFootEventReplayBuffer(
+    capacity=4,
+    history_len=1,
+    obs_dim=2,
+    label_dim=len(FOOT_EVENT_LABEL_NAMES),
+    num_envs=1,
+    soft_touchdown_radius=1,
+    soft_toe_hit_radius=2,
+    soft_event_radius1_value=0.7,
+    soft_event_radius2_value=0.4,
+    device=torch.device("cpu"),
+  )
+  labels = torch.zeros(4, len(FOOT_EVENT_LABEL_NAMES))
+  obs_history = torch.zeros(4, 1, 2)
+  obs_history[0, 0, 0] = 1.0
+  buffer.add(
+    obs_history=obs_history,
+    labels=labels,
+    train_labels=labels.clone(),
+    episode_id=torch.zeros(4, dtype=torch.int64),
+    frame_idx=torch.arange(4, dtype=torch.int64),
+    env_id=torch.zeros(4, dtype=torch.int64),
+    stair_support=torch.zeros(4, 2, dtype=torch.bool),
+    support_fraction=torch.zeros(4, 2),
+  )
+
+  added = _mine_false_positive_touchdown_hard_negatives(
+    cast(FootEventDetectorGRU, TouchdownFalsePositiveModel()),
+    buffer,
+    device=torch.device("cpu"),
+    batch_size=4,
+    threshold=0.5,
+    contact_threshold=0.5,
+    window_frames=1,
+    max_peaks=4,
+  )
+
+  assert added == 2
+  assert buffer.snapshot()["false_positive_hard_negative"].tolist() == [
+    True,
+    True,
+    False,
+    False,
+  ]
+
+
 def test_online_replay_buffer_marks_false_negative_hard_positives() -> None:
   buffer = OnlineFootEventReplayBuffer(
     capacity=4,
@@ -849,6 +1071,7 @@ def test_online_deployment_metrics_include_high_recall_score() -> None:
   labels = np.zeros((12, len(FOOT_EVENT_LABEL_NAMES)), dtype=np.float32)
   probabilities = np.zeros_like(labels)
   stair_support = np.zeros((12, 2), dtype=np.bool_)
+  footprint_anchor_w = np.zeros((12, 2, 3), dtype=np.float32)
 
   labels[[2, 8], 0] = 1.0
   labels[[3, 9], 1] = 1.0
@@ -874,6 +1097,7 @@ def test_online_deployment_metrics_include_high_recall_score() -> None:
     frame_idx=np.arange(labels.shape[0], dtype=np.int64),
     stair_support=stair_support,
     thresholds=np.array([0.3, 0.7], dtype=np.float32),
+    footprint_anchor_w=footprint_anchor_w,
     touchdown_contact_threshold=0.7,
     touchdown_contact_release_threshold=0.35,
     touchdown_cooldown_frames=0,
@@ -890,6 +1114,9 @@ def test_online_deployment_metrics_include_high_recall_score() -> None:
   assert metrics["touchdown_stair_high_recall_macro_recall"] == 1.0
   assert metrics["toe_riser_high_recall_macro_recall"] == 1.0
   assert metrics["high_recall_precision_guard"] == 1.0
+  assert metrics["touchdown_timing_abs_dt_frames_p90"] == 0.0
+  assert metrics["touchdown_footprint_xy_error_m_p90"] == 0.0
+  assert metrics["timing_guarded_footprint_score"] > 0.0
 
 
 def test_run_train_writes_metrics_and_best_checkpoint(tmp_path) -> None:
