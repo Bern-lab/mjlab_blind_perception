@@ -19,7 +19,7 @@ class DWAQPPOTeacherKL(PPOTeacherKL):
     self,
     *args: Any,
     dwaq_velocity_target_groups: Sequence[str] = ("dwaq_velocity_target",),
-    dwaq_beta: float = 1.0,
+    dwaq_beta: float = 0.01,
     dwaq_autoencoder_loss_coef: float = 1.0,
     dwaq_velocity_loss_coef: float = 1.0,
     dwaq_reconstruction_loss_coef: float = 1.0,
@@ -54,11 +54,6 @@ class DWAQPPOTeacherKL(PPOTeacherKL):
       return base_loss, log_dict
     if batch.observations is None:
       raise RuntimeError("DWAQ loss requires observations in the rollout batch.")
-    if batch.next_observations is None:
-      raise RuntimeError(
-        "DWAQ loss requires next observations. Configure "
-        "algorithm.next_observation_groups to include the actor observation group."
-      )
 
     get_dwaq_outputs = cast(
       Callable[..., dict[str, torch.Tensor]],
@@ -69,10 +64,6 @@ class DWAQPPOTeacherKL(PPOTeacherKL):
       get_actor_observation_raw,
     )
     observations = cast(TensorDict, batch.observations[:original_batch_size])
-    next_observations = cast(
-      TensorDict,
-      batch.next_observations[:original_batch_size],
-    )
     outputs = get_dwaq_outputs(observations, sample=True)
     vel_target = torch.cat(
       [
@@ -81,35 +72,14 @@ class DWAQPPOTeacherKL(PPOTeacherKL):
       ],
       dim=-1,
     ).detach()
-    decode_target = get_actor_observation(next_observations)
-    obs_normalizer = getattr(actor, "obs_normalizer", None)
-    if callable(obs_normalizer):
-      normalizer = cast(Callable[[torch.Tensor], torch.Tensor], obs_normalizer)
-      decode_target = normalizer(decode_target)
-    decode_target = decode_target.detach()
+    decode_target = get_actor_observation(observations).detach()
 
     decode = outputs["decode"]
     mean_latent = outputs["mean_latent"]
     logvar_latent = torch.clamp(outputs["logvar_latent"], min=-10.0, max=10.0)
-    dones = batch.dones[:original_batch_size] if batch.dones is not None else None
 
-    velocity_loss = F.mse_loss(outputs["mean_vel"], vel_target)
-    per_sample_reconstruction = (
-      F.mse_loss(
-        decode,
-        decode_target,
-        reduction="none",
-      )
-      .reshape(decode.shape[0], -1)
-      .mean(dim=-1)
-    )
-    valid_next = torch.ones_like(per_sample_reconstruction, dtype=torch.bool)
-    if dones is not None:
-      valid_next = ~dones.reshape(-1).bool()
-    if torch.any(valid_next):
-      reconstruction_loss = per_sample_reconstruction[valid_next].mean()
-    else:
-      reconstruction_loss = per_sample_reconstruction.mean() * 0.0
+    velocity_loss = F.mse_loss(outputs["code_vel"], vel_target)
+    reconstruction_loss = F.mse_loss(decode, decode_target)
     kl_divergence = (
       -0.5
       * (1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp())
@@ -128,8 +98,10 @@ class DWAQPPOTeacherKL(PPOTeacherKL):
         "dwaq_velocity": float(velocity_loss.detach().item()),
         "dwaq_reconstruction": float(reconstruction_loss.detach().item()),
         "dwaq_kl": float(kl_divergence.detach().item()),
-        "dwaq_reconstruction_valid_ratio": float(
-          valid_next.float().mean().detach().item()
+        "dwaq_latent_mean_abs": float(mean_latent.abs().mean().detach().item()),
+        "dwaq_latent_std": float(mean_latent.std(unbiased=False).detach().item()),
+        "dwaq_velocity_std": float(
+          outputs["mean_vel"].std(unbiased=False).detach().item()
         ),
       }
     )

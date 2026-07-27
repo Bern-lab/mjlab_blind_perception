@@ -140,14 +140,17 @@ def test_dwaq_actor_forward_and_cenet_outputs_match_g1dwaq_shapes() -> None:
   assert outputs["logvar_latent"].shape == (4, 5)
 
 
-def test_dwaq_velocity_code_uses_mean_when_sampling() -> None:
+def test_dwaq_velocity_code_samples_during_training_and_uses_mean_for_eval() -> None:
   obs = _make_obs()
   actor = _make_actor(obs)
+  torch.manual_seed(0)
 
   outputs = actor.get_dwaq_outputs(obs, sample=True)
+  eval_outputs = actor.get_dwaq_outputs(obs, sample=False)
 
-  assert torch.allclose(outputs["code_vel"], outputs["mean_vel"])
-  assert torch.allclose(outputs["logvar_vel"], torch.zeros_like(outputs["mean_vel"]))
+  assert outputs["logvar_vel"].shape == outputs["mean_vel"].shape
+  assert not torch.allclose(outputs["code_vel"], outputs["mean_vel"])
+  assert torch.allclose(eval_outputs["code_vel"], eval_outputs["mean_vel"])
 
 
 def test_dwaq_algorithm_adds_autoencoder_loss_and_required_groups() -> None:
@@ -173,7 +176,6 @@ def test_dwaq_algorithm_adds_autoencoder_loss_and_required_groups() -> None:
   )
   batch = RolloutStorage.Batch(
     observations=obs,
-    next_observations=obs.clone(),
     dones=torch.zeros(4, 1, dtype=torch.uint8),
   )
 
@@ -187,29 +189,20 @@ def test_dwaq_algorithm_adds_autoencoder_loss_and_required_groups() -> None:
   assert "dwaq_velocity_target" in alg.get_required_observation_groups()
 
 
-def test_dwaq_reconstructs_next_observation_and_masks_terminal() -> None:
+def test_dwaq_reconstructs_current_observation_like_g1dwaq_lab() -> None:
   obs = _make_obs(num_envs=4, actor_dim=2)
-  obs["actor"] = torch.zeros(4, 2)
-  obs["dwaq_velocity_target"] = torch.zeros(4, 3)
-  next_obs = obs.clone()
-  next_obs["actor"] = torch.tensor(
+  obs["actor"] = torch.tensor(
     [
       [1.0, 1.0],
       [2.0, 2.0],
       [3.0, 3.0],
-      [100.0, 100.0],
+      [4.0, 4.0],
     ]
   )
+  obs["dwaq_velocity_target"] = torch.zeros(4, 3)
   actor = _make_fixed_actor(obs)
   actor.set_fixed_outputs(
-    decode=torch.tensor(
-      [
-        [1.0, 1.0],
-        [2.0, 2.0],
-        [3.0, 3.0],
-        [999.0, 999.0],
-      ]
-    ),
+    decode=obs["actor"].clone(),
     mean_vel=torch.zeros(4, 3),
     mean_latent=torch.zeros(4, 5),
     logvar_latent=torch.zeros(4, 5),
@@ -236,14 +229,13 @@ def test_dwaq_reconstructs_next_observation_and_masks_terminal() -> None:
   )
   batch = RolloutStorage.Batch(
     observations=obs,
-    next_observations=next_obs,
     dones=torch.tensor([[0], [0], [0], [1]], dtype=torch.uint8),
   )
 
   _loss, logs = alg._compute_additional_loss(batch, 4, ())
 
   assert logs["dwaq_reconstruction"] == 0.0
-  assert logs["dwaq_reconstruction_valid_ratio"] == 0.75
+  assert "dwaq_reconstruction_valid_ratio" not in logs
 
 
 def test_dwaq_kl_is_batch_size_invariant() -> None:
@@ -280,7 +272,6 @@ def test_dwaq_kl_is_batch_size_invariant() -> None:
     )
     batch = RolloutStorage.Batch(
       observations=obs,
-      next_observations=obs.clone(),
       dones=torch.zeros(num_envs, 1, dtype=torch.uint8),
     )
     _loss, logs = alg._compute_additional_loss(batch, num_envs, ())
@@ -320,7 +311,8 @@ def test_dwaq_ablation_is_the_only_registered_task_and_keeps_env_contract() -> N
   assert actor_cfg.velocity_dim == 3
   assert actor_cfg.latent_dim == 16
   assert algorithm_cfg.dwaq_velocity_target_groups == ("dwaq_velocity_target",)
-  assert algorithm_cfg.next_observation_groups == ("actor",)
+  assert algorithm_cfg.dwaq_beta == 0.01
+  assert not hasattr(algorithm_cfg, "next_observation_groups")
   assert rl_cfg.obs_groups == {
     "actor": ("actor",),
     "dwaq_history": ("dwaq_history",),
