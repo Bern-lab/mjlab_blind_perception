@@ -61,6 +61,68 @@ def _make_actor(obs: TensorDict) -> DWAQMLPModel:
   )
 
 
+class _FixedOutputDWAQActor(DWAQMLPModel):
+  fixed_decode: torch.Tensor
+  fixed_mean_vel: torch.Tensor
+  fixed_mean_latent: torch.Tensor
+  fixed_logvar_latent: torch.Tensor
+
+  def set_fixed_outputs(
+    self,
+    *,
+    decode: torch.Tensor,
+    mean_vel: torch.Tensor,
+    mean_latent: torch.Tensor,
+    logvar_latent: torch.Tensor,
+  ) -> None:
+    self.fixed_decode = decode
+    self.fixed_mean_vel = mean_vel
+    self.fixed_mean_latent = mean_latent
+    self.fixed_logvar_latent = logvar_latent
+
+  def get_dwaq_outputs(
+    self,
+    obs: TensorDict,
+    sample: bool | None = None,
+  ) -> dict[str, torch.Tensor]:
+    del sample
+    batch_size = obs.batch_size[0]
+    mean_vel = self.fixed_mean_vel[:batch_size]
+    mean_latent = self.fixed_mean_latent[:batch_size]
+    code = torch.cat((mean_vel, mean_latent), dim=-1)
+    return {
+      "code": code,
+      "code_vel": mean_vel,
+      "decode": self.fixed_decode[:batch_size],
+      "mean_vel": mean_vel,
+      "logvar_vel": torch.zeros_like(mean_vel),
+      "mean_latent": mean_latent,
+      "logvar_latent": self.fixed_logvar_latent[:batch_size],
+    }
+
+
+def _make_fixed_actor(obs: TensorDict) -> _FixedOutputDWAQActor:
+  return _FixedOutputDWAQActor(
+    obs=obs,
+    obs_groups={"actor": ["actor"], "dwaq_history": ["dwaq_history"]},
+    obs_set="actor",
+    output_dim=3,
+    hidden_dims=(32, 16),
+    activation="elu",
+    obs_normalization=False,
+    distribution_cfg={
+      "class_name": "GaussianDistribution",
+      "init_std": 1.0,
+      "std_type": "scalar",
+    },
+    encoder_hidden_dims=(12, 7),
+    decoder_hidden_dims=(9,),
+    velocity_dim=3,
+    latent_dim=5,
+    cenet_out_dim=8,
+  )
+
+
 def test_dwaq_actor_forward_and_cenet_outputs_match_g1dwaq_shapes() -> None:
   obs = _make_obs()
   actor = _make_actor(obs)
@@ -76,6 +138,16 @@ def test_dwaq_actor_forward_and_cenet_outputs_match_g1dwaq_shapes() -> None:
   assert outputs["decode"].shape == (4, 8)
   assert outputs["mean_latent"].shape == (4, 5)
   assert outputs["logvar_latent"].shape == (4, 5)
+
+
+def test_dwaq_velocity_code_uses_mean_when_sampling() -> None:
+  obs = _make_obs()
+  actor = _make_actor(obs)
+
+  outputs = actor.get_dwaq_outputs(obs, sample=True)
+
+  assert torch.allclose(outputs["code_vel"], outputs["mean_vel"])
+  assert torch.allclose(outputs["logvar_vel"], torch.zeros_like(outputs["mean_vel"]))
 
 
 def test_dwaq_algorithm_adds_autoencoder_loss_and_required_groups() -> None:
@@ -99,7 +171,11 @@ def test_dwaq_algorithm_adds_autoencoder_loss_and_required_groups() -> None:
     num_mini_batches=2,
     device="cpu",
   )
-  batch = RolloutStorage.Batch(observations=obs)
+  batch = RolloutStorage.Batch(
+    observations=obs,
+    next_observations=obs.clone(),
+    dones=torch.zeros(4, 1, dtype=torch.uint8),
+  )
 
   loss, logs = alg._compute_additional_loss(batch, 4, ())
 
@@ -109,6 +185,109 @@ def test_dwaq_algorithm_adds_autoencoder_loss_and_required_groups() -> None:
   assert logs["dwaq_reconstruction"] >= 0.0
   assert "dwaq_history" in alg.get_required_observation_groups()
   assert "dwaq_velocity_target" in alg.get_required_observation_groups()
+
+
+def test_dwaq_reconstructs_next_observation_and_masks_terminal() -> None:
+  obs = _make_obs(num_envs=4, actor_dim=2)
+  obs["actor"] = torch.zeros(4, 2)
+  obs["dwaq_velocity_target"] = torch.zeros(4, 3)
+  next_obs = obs.clone()
+  next_obs["actor"] = torch.tensor(
+    [
+      [1.0, 1.0],
+      [2.0, 2.0],
+      [3.0, 3.0],
+      [100.0, 100.0],
+    ]
+  )
+  actor = _make_fixed_actor(obs)
+  actor.set_fixed_outputs(
+    decode=torch.tensor(
+      [
+        [1.0, 1.0],
+        [2.0, 2.0],
+        [3.0, 3.0],
+        [999.0, 999.0],
+      ]
+    ),
+    mean_vel=torch.zeros(4, 3),
+    mean_latent=torch.zeros(4, 5),
+    logvar_latent=torch.zeros(4, 5),
+  )
+  critic = MLPModel(
+    obs=obs,
+    obs_groups={"critic": ["critic"]},
+    obs_set="critic",
+    output_dim=1,
+    hidden_dims=(16,),
+    activation="elu",
+    obs_normalization=False,
+  )
+  storage = RolloutStorage("rl", 4, 2, obs, [3], "cpu")
+  alg = DWAQPPOTeacherKL(
+    actor,
+    critic,
+    storage,
+    teacher_kl_cfg={"enabled": False},
+    num_mini_batches=1,
+    dwaq_beta=0.0,
+    dwaq_velocity_loss_coef=0.0,
+    device="cpu",
+  )
+  batch = RolloutStorage.Batch(
+    observations=obs,
+    next_observations=next_obs,
+    dones=torch.tensor([[0], [0], [0], [1]], dtype=torch.uint8),
+  )
+
+  _loss, logs = alg._compute_additional_loss(batch, 4, ())
+
+  assert logs["dwaq_reconstruction"] == 0.0
+  assert logs["dwaq_reconstruction_valid_ratio"] == 0.75
+
+
+def test_dwaq_kl_is_batch_size_invariant() -> None:
+  def compute_kl(num_envs: int) -> float:
+    obs = _make_obs(num_envs=num_envs, actor_dim=2)
+    obs["actor"] = torch.zeros(num_envs, 2)
+    obs["dwaq_velocity_target"] = torch.zeros(num_envs, 3)
+    actor = _make_fixed_actor(obs)
+    actor.set_fixed_outputs(
+      decode=torch.zeros(num_envs, 2),
+      mean_vel=torch.zeros(num_envs, 3),
+      mean_latent=torch.ones(num_envs, 5),
+      logvar_latent=torch.zeros(num_envs, 5),
+    )
+    critic = MLPModel(
+      obs=obs,
+      obs_groups={"critic": ["critic"]},
+      obs_set="critic",
+      output_dim=1,
+      hidden_dims=(16,),
+      activation="elu",
+      obs_normalization=False,
+    )
+    storage = RolloutStorage("rl", num_envs, 2, obs, [3], "cpu")
+    alg = DWAQPPOTeacherKL(
+      actor,
+      critic,
+      storage,
+      teacher_kl_cfg={"enabled": False},
+      num_mini_batches=1,
+      dwaq_velocity_loss_coef=0.0,
+      dwaq_reconstruction_loss_coef=0.0,
+      device="cpu",
+    )
+    batch = RolloutStorage.Batch(
+      observations=obs,
+      next_observations=obs.clone(),
+      dones=torch.zeros(num_envs, 1, dtype=torch.uint8),
+    )
+    _loss, logs = alg._compute_additional_loss(batch, num_envs, ())
+    return logs["dwaq_kl"]
+
+  assert compute_kl(2) == compute_kl(4)
+  assert compute_kl(2) == 2.5
 
 
 def test_dwaq_ablation_is_the_only_registered_task_and_keeps_env_contract() -> None:
@@ -141,6 +320,7 @@ def test_dwaq_ablation_is_the_only_registered_task_and_keeps_env_contract() -> N
   assert actor_cfg.velocity_dim == 3
   assert actor_cfg.latent_dim == 16
   assert algorithm_cfg.dwaq_velocity_target_groups == ("dwaq_velocity_target",)
+  assert algorithm_cfg.next_observation_groups == ("actor",)
   assert rl_cfg.obs_groups == {
     "actor": ("actor",),
     "dwaq_history": ("dwaq_history",),

@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import torch
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from tensordict import TensorDict
 
 from rsl_rl.modules import HiddenState
@@ -32,6 +32,9 @@ class RolloutStorage:
             """Initialize an empty transition container."""
             self.observations: TensorDict | None = None
             """Observations at the current step."""
+
+            self.next_observations: TensorDict | None = None
+            """Observations after applying the transition action."""
 
             self.actions: torch.Tensor | None = None
             """Actions taken at the current step."""
@@ -74,6 +77,7 @@ class RolloutStorage:
         def __init__(
             self,
             observations: TensorDict | None = None,
+            next_observations: TensorDict | None = None,
             actions: torch.Tensor | None = None,
             values: torch.Tensor | None = None,
             advantages: torch.Tensor | None = None,
@@ -88,6 +92,9 @@ class RolloutStorage:
             """Initialize a batch container over rollout data."""
             self.observations: TensorDict | None = observations
             """Batch of observations."""
+
+            self.next_observations: TensorDict | None = next_observations
+            """Batch of observations after applying the transition action."""
 
             # For reinforcement learning
             self.actions: torch.Tensor | None = actions
@@ -130,6 +137,7 @@ class RolloutStorage:
         obs: TensorDict,
         actions_shape: tuple[int, ...] | list[int],
         device: str = "cpu",
+        next_observation_groups: Sequence[str] | None = None,
     ) -> None:
         """Allocate rollout buffers for a specific training mode and batch shape."""
         self.training_type = training_type
@@ -144,6 +152,26 @@ class RolloutStorage:
             batch_size=[num_transitions_per_env, num_envs],
             device=self.device,
         )
+        self.next_observation_groups = tuple(next_observation_groups or ())
+        self.next_observations = None
+        if self.next_observation_groups:
+            unknown_groups = set(self.next_observation_groups) - set(obs.keys())
+            if unknown_groups:
+                raise ValueError(
+                    f"next_observation_groups contains groups not present in obs: {sorted(unknown_groups)}"
+                )
+            self.next_observations = TensorDict(
+                {
+                    key: torch.zeros(
+                        num_transitions_per_env,
+                        *obs[key].shape,
+                        device=device,
+                    )
+                    for key in self.next_observation_groups
+                },
+                batch_size=[num_transitions_per_env, num_envs],
+                device=self.device,
+            )
         self.rewards = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
         self.actions = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
         self.dones = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device).byte()
@@ -175,6 +203,13 @@ class RolloutStorage:
 
         # Core
         self.observations[self.step].copy_(transition.observations)
+        if self.next_observations is not None:
+            if transition.next_observations is None:
+                raise RuntimeError(
+                    "RolloutStorage was configured to store next observations, but the transition did not provide them."
+                )
+            for key in self.next_observation_groups:
+                self.next_observations[key][self.step].copy_(transition.next_observations[key])
         self.actions[self.step].copy_(transition.actions)  # type: ignore
         self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
         self.dones[self.step].copy_(transition.dones.view(-1, 1))
@@ -229,11 +264,13 @@ class RolloutStorage:
 
         # Flatten the data
         observations = self.observations.flatten(0, 1)
+        next_observations = self.next_observations.flatten(0, 1) if self.next_observations is not None else None
         actions = self.actions.flatten(0, 1)
         values = self.values.flatten(0, 1)
         returns = self.returns.flatten(0, 1)
         old_actions_log_prob = self.actions_log_prob.flatten(0, 1)
         advantages = self.advantages.flatten(0, 1)
+        dones = self.dones.flatten(0, 1)
         old_distribution_params = tuple(p.flatten(0, 1) for p in self.distribution_params)  # type: ignore
 
         for epoch in range(num_epochs):
@@ -246,12 +283,14 @@ class RolloutStorage:
                 # Yield the mini-batch
                 yield RolloutStorage.Batch(
                     observations=observations[batch_idx],  # type: ignore
+                    next_observations=(next_observations[batch_idx] if next_observations is not None else None),
                     actions=actions[batch_idx],
                     values=values[batch_idx],
                     advantages=advantages[batch_idx],
                     returns=returns[batch_idx],
                     old_actions_log_prob=old_actions_log_prob[batch_idx],
                     old_distribution_params=tuple(p[batch_idx] for p in old_distribution_params),
+                    dones=dones[batch_idx],
                 )
 
     # For reinforcement learning with recurrent networks
@@ -262,6 +301,12 @@ class RolloutStorage:
         if self.training_type != "rl":
             raise ValueError("This function is only available for reinforcement learning training.")
         padded_obs_trajectories, trajectory_masks = split_and_pad_trajectories(self.observations, self.dones)
+        padded_next_obs_trajectories = None
+        if self.next_observations is not None:
+            padded_next_obs_trajectories, _ = split_and_pad_trajectories(
+                self.next_observations,
+                self.dones,
+            )
         padded_dones, _ = split_and_pad_trajectories(self.dones, self.dones)
         mini_batch_size = self.num_envs // num_mini_batches
 
@@ -316,6 +361,11 @@ class RolloutStorage:
                 # Yield the mini-batch
                 yield RolloutStorage.Batch(
                     observations=padded_obs_trajectories[:, first_traj:last_traj],  # type: ignore
+                    next_observations=(
+                        padded_next_obs_trajectories[:, first_traj:last_traj]
+                        if padded_next_obs_trajectories is not None
+                        else None
+                    ),
                     actions=self.actions[:, start:stop],
                     values=self.values[:, start:stop],
                     advantages=self.advantages[:, start:stop],

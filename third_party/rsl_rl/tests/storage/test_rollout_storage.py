@@ -115,6 +115,51 @@ class TestMiniBatchGenerator:
                 "Actions and values should index the same transitions"
             )
 
+    def test_next_observations_and_dones_follow_minibatch_indices(self) -> None:
+        """Optional next observations should stay aligned with each transition."""
+        obs = make_obs(NUM_ENVS, OBS_DIM)
+        storage = RolloutStorage(
+            "rl",
+            NUM_ENVS,
+            NUM_STEPS,
+            obs,
+            [NUM_ACTIONS],
+            next_observation_groups=("policy",),
+        )
+
+        for step in range(NUM_STEPS):
+            t = RolloutStorage.Transition()
+            t.observations = TensorDict(
+                {"policy": torch.full((NUM_ENVS, OBS_DIM), float(step))},
+                batch_size=[NUM_ENVS],
+            )
+            t.next_observations = TensorDict(
+                {"policy": torch.full((NUM_ENVS, OBS_DIM), float(step) + 0.5)},
+                batch_size=[NUM_ENVS],
+            )
+            t.hidden_states = (None, None)
+            t.actions = torch.full((NUM_ENVS, NUM_ACTIONS), float(step))
+            t.values = torch.full((NUM_ENVS, 1), float(step) * 10.0)
+            t.actions_log_prob = torch.full((NUM_ENVS,), float(step) * 0.1)
+            t.distribution_params = (
+                torch.full((NUM_ENVS, NUM_ACTIONS), float(step)),
+                torch.ones(NUM_ENVS, NUM_ACTIONS),
+            )
+            t.rewards = torch.full((NUM_ENVS,), float(step) * 100.0)
+            t.dones = torch.full((NUM_ENVS,), step % 2, dtype=torch.uint8)
+            storage.add_transition(t)
+
+        storage.returns = torch.randn_like(storage.returns)
+        storage.advantages = torch.randn_like(storage.advantages)
+
+        for batch in storage.mini_batch_generator(2, num_epochs=1):
+            action_ids = batch.actions[:, 0]
+            next_ids = batch.next_observations["policy"][:, 0]
+            done_ids = batch.dones[:, 0].float()
+
+            assert torch.allclose(next_ids, action_ids + 0.5)
+            assert torch.allclose(done_ids, action_ids.remainder(2.0))
+
 
 class TestRecurrentMiniBatchGenerator:
     """Tests for ``recurrent_mini_batch_generator`` — trajectory counting, env/trajectory alignment."""

@@ -338,6 +338,8 @@ class RslRlPpoDwaqTeacherKLAlgorithmCfg(RslRlPpoTeacherKLAlgorithmCfg):
   """Algorithm class name resolved by RSL-RL."""
   dwaq_velocity_target_groups: Tuple[str, ...] = ("dwaq_velocity_target",)
   """Observation groups containing the privileged velocity target."""
+  next_observation_groups: Tuple[str, ...] = ("actor",)
+  """Observation groups stored after env.step for DWAQ next-observation loss."""
   dwaq_beta: float = 1.0
   """Beta multiplier for DWAQ latent KL divergence."""
   dwaq_autoencoder_loss_coef: float = 1.0
@@ -345,7 +347,7 @@ class RslRlPpoDwaqTeacherKLAlgorithmCfg(RslRlPpoTeacherKLAlgorithmCfg):
   dwaq_velocity_loss_coef: float = 1.0
   """Coefficient for supervised velocity-estimation MSE."""
   dwaq_reconstruction_loss_coef: float = 1.0
-  """Coefficient for current-observation reconstruction MSE."""
+  """Coefficient for next-observation reconstruction MSE."""
 
 
 @dataclass

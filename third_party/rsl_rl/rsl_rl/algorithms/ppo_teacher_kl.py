@@ -3128,6 +3128,7 @@ class PPOTeacherKL(PPO):
 
         # Resolve symmetry config if used
         algorithm_cfg = resolve_symmetry_config(algorithm_cfg, env)
+        next_observation_groups = tuple(algorithm_cfg.pop("next_observation_groups", ()))
 
         # Initialize the student actor, critic, and frozen teacher actor
         actor: MLPModel = actor_class(obs, obs_groups, "actor", env.num_actions, **actor_cfg).to(device)
@@ -3148,7 +3149,15 @@ class PPOTeacherKL(PPO):
             print("Teacher guidance disabled: training with PPO loss only.")
 
         # Initialize the storage
-        storage = RolloutStorage("rl", env.num_envs, cfg["num_steps_per_env"], obs, [env.num_actions], device)
+        storage = RolloutStorage(
+            "rl",
+            env.num_envs,
+            cfg["num_steps_per_env"],
+            obs,
+            [env.num_actions],
+            device,
+            next_observation_groups=next_observation_groups,
+        )
 
         # Initialize the algorithm. The teacher is intentionally assigned after construction so it is not part of the
         # PPO optimizer created by the parent class.

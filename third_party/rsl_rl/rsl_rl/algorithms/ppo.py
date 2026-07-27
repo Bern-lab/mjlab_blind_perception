@@ -129,6 +129,7 @@ class PPO:
         self, obs: TensorDict, rewards: torch.Tensor, dones: torch.Tensor, extras: dict[str, torch.Tensor]
     ) -> None:
         """Record one environment step and update the normalizers."""
+        self.transition.next_observations = obs
         # Update the normalizers
         if not getattr(self, "freeze_normalization_updates", False):
             self.actor.update_normalization(obs)
@@ -468,6 +469,7 @@ class PPO:
 
         # Resolve symmetry config if used
         cfg["algorithm"] = resolve_symmetry_config(cfg["algorithm"], env)
+        next_observation_groups = tuple(cfg["algorithm"].pop("next_observation_groups", ()))
 
         # Initialize the policy
         actor: MLPModel = actor_class(obs, cfg["obs_groups"], "actor", env.num_actions, **cfg["actor"]).to(device)
@@ -478,7 +480,15 @@ class PPO:
         print(f"Critic Model: {critic}")
 
         # Initialize the storage
-        storage = RolloutStorage("rl", env.num_envs, cfg["num_steps_per_env"], obs, [env.num_actions], device)
+        storage = RolloutStorage(
+            "rl",
+            env.num_envs,
+            cfg["num_steps_per_env"],
+            obs,
+            [env.num_actions],
+            device,
+            next_observation_groups=next_observation_groups,
+        )
 
         # Initialize the algorithm
         alg: PPO = alg_class(actor, critic, storage, device=device, **cfg["algorithm"], multi_gpu_cfg=cfg["multi_gpu"])

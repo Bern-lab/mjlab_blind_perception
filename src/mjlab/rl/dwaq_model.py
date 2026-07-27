@@ -126,7 +126,6 @@ class DWAQMLPModel(MLPModel):
     self.encode_mean_latent = nn.Linear(encoder_out_dim, self.dwaq_latent_dim)
     self.encode_logvar_latent = nn.Linear(encoder_out_dim, self.dwaq_latent_dim)
     self.encode_mean_vel = nn.Linear(encoder_out_dim, self.velocity_dim)
-    self.encode_logvar_vel = nn.Linear(encoder_out_dim, self.velocity_dim)
     self.decoder = _mlp_layers(
       self.cenet_out_dim,
       decoder_hidden_dims,
@@ -201,13 +200,12 @@ class DWAQMLPModel(MLPModel):
     mean_latent = self.encode_mean_latent(encoded)
     logvar_latent = self.encode_logvar_latent(encoded)
     mean_vel = self.encode_mean_vel(encoded)
-    logvar_vel = self.encode_logvar_vel(encoded)
+    logvar_vel = torch.zeros_like(mean_vel)
     if sample:
       code_latent = self.reparameterise(mean_latent, logvar_latent)
-      code_vel = self.reparameterise(mean_vel, logvar_vel)
     else:
       code_latent = mean_latent
-      code_vel = mean_vel
+    code_vel = mean_vel
     code = torch.cat((code_vel, code_latent), dim=-1)
     decode = self.decoder(code)
     return (
