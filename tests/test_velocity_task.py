@@ -535,6 +535,8 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert actor_cfg.safe_stride_phase_dim == 2
   assert actor_cfg.safe_stride_phase_start == 91
   assert actor_cfg.stair_shape_huber_delta == 0.05
+  assert actor_cfg.stair_shape_same_foot_loss_coef == 2.0
+  assert actor_cfg.stair_shape_riser_loss_coef == 0.5
   assert actor_cfg.safe_stride_huber_delta == 0.05
   assert actor_cfg.safe_stride_width_loss_coef == 1.0
   assert actor_cfg.safe_stride_lower_shortfall_coef == 1.2
@@ -546,7 +548,7 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert actor_cfg.safe_stride_std_floor_ratio == 0.70
   assert actor_cfg.safe_stride_deployable_hint_loss_coef == 0.0
   assert actor_cfg.safe_stride_deployable_hint_margin == 0.02
-  assert actor_cfg.same_foot_stride_deployable_hint_loss_coef == 0.35
+  assert actor_cfg.same_foot_stride_deployable_hint_loss_coef == 0.60
   assert actor_cfg.same_foot_stride_deployable_hint_margin == 0.02
   assert actor_cfg.safe_stride_min == 0.10
   assert actor_cfg.safe_stride_max == 0.55

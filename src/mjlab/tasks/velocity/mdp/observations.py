@@ -984,6 +984,9 @@ class FootEventMemoryObs:
       float(params.get("ratchet_collision_margin_m", 0.02)),
       0.0,
     )
+    self.ratchet_collision_min_confidence = float(
+      params.get("ratchet_collision_min_confidence", 0.45)
+    )
     self.ratchet_min_interval_width_m = max(
       float(params.get("ratchet_min_interval_width_m", 0.04)),
       1.0e-6,
@@ -1081,6 +1084,16 @@ class FootEventMemoryObs:
     self.ratchet_confidence = torch.zeros_like(self.ratchet_lower_s)
     self.ratchet_age_s = torch.zeros_like(self.ratchet_lower_s)
     self.ratchet_flat_pair_steps = torch.zeros_like(self.ratchet_safe_no_hit_steps)
+    self.ratchet_collision_candidate = torch.zeros_like(self.ratchet_active)
+    self.ratchet_collision_accepted = torch.zeros_like(self.ratchet_active)
+    self.ratchet_collision_soft_upper = torch.zeros_like(self.ratchet_active)
+    self.ratchet_collision_rejected = torch.zeros_like(self.ratchet_active)
+    self.ratchet_collision_rejected_low_confidence = torch.zeros_like(
+      self.ratchet_active
+    )
+    self.ratchet_collision_soft_below_lower = torch.zeros_like(self.ratchet_active)
+    self.ratchet_collision_soft_too_narrow = torch.zeros_like(self.ratchet_active)
+    self.ratchet_soft_upper_active = torch.zeros_like(self.ratchet_active)
 
   def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
     ids = self._env_ids(env_ids)
@@ -1113,6 +1126,14 @@ class FootEventMemoryObs:
     self.ratchet_confidence[ids] = 0.0
     self.ratchet_age_s[ids] = 0.0
     self.ratchet_flat_pair_steps[ids] = 0
+    self.ratchet_collision_candidate[ids] = False
+    self.ratchet_collision_accepted[ids] = False
+    self.ratchet_collision_soft_upper[ids] = False
+    self.ratchet_collision_rejected[ids] = False
+    self.ratchet_collision_rejected_low_confidence[ids] = False
+    self.ratchet_collision_soft_below_lower[ids] = False
+    self.ratchet_collision_soft_too_narrow[ids] = False
+    self.ratchet_soft_upper_active[ids] = False
 
   def __call__(self, env: ManagerBasedRlEnv, **_: Any) -> torch.Tensor:
     root_pos_w, root_quat_w = _root_pose_from_env(env)
@@ -1603,11 +1624,13 @@ class FootEventMemoryObs:
 
     toe_relation_valid = toe_features[:, 6] > 0.5
     toe_delta_s = toe_features[:, 7].clamp_min(0.0)
-    toe_evidence_candidate = (
+    toe_relation_candidate = (
       new_toe_mark_any & toe_relation_valid & (toe_delta_s >= self.ratchet_min_stride_m)
     )
-    toe_evidence = toe_evidence_candidate & (self.ratchet_active | forward_up_step)
-    has_evidence = forward_up_step | toe_evidence
+    toe_context_candidate = toe_relation_candidate & (
+      self.ratchet_active | forward_up_step
+    )
+    toe_confident = toe_features[:, 1] >= self.ratchet_collision_min_confidence
 
     stride_evidence = torch.where(
       forward_up_step,
@@ -1642,9 +1665,22 @@ class FootEventMemoryObs:
       self.ratchet_max_stride_m,
     )
     old_interval_confirmed = self.ratchet_active & self.ratchet_interval_confirmed
+    old_soft_upper_active = (
+      self.ratchet_active & self.ratchet_soft_upper_active & ~old_interval_confirmed
+    )
     old_upper = torch.where(old_interval_confirmed, self.ratchet_upper_s, max_stride)
     old_stride_upper = torch.where(
       old_interval_confirmed,
+      self.ratchet_same_foot_stride_upper_s,
+      max_stride,
+    )
+    old_soft_upper = torch.where(
+      old_soft_upper_active,
+      self.ratchet_upper_s,
+      max_stride,
+    )
+    old_soft_stride_upper = torch.where(
+      old_soft_upper_active,
       self.ratchet_same_foot_stride_upper_s,
       max_stride,
     )
@@ -1656,6 +1692,19 @@ class FootEventMemoryObs:
       self.ratchet_min_stride_m,
       self.ratchet_max_stride_m,
     )
+    min_interval_width = min(
+      self.ratchet_min_interval_width_m,
+      max(self.ratchet_max_stride_m - self.ratchet_min_stride_m, 1.0e-6),
+    )
+    min_width_t = torch.full_like(new_lower, min_interval_width)
+    toe_evidence = (
+      toe_context_candidate
+      & toe_confident
+      & (collision_upper >= new_lower + min_width_t)
+      & (collision_stride >= new_stride_lower)
+    )
+    soft_upper_evidence = toe_context_candidate & toe_confident & ~toe_evidence
+    has_evidence = forward_up_step | toe_evidence | soft_upper_evidence
     new_upper_candidate = torch.where(
       toe_evidence,
       torch.minimum(old_upper, collision_upper),
@@ -1666,44 +1715,66 @@ class FootEventMemoryObs:
       torch.minimum(old_stride_upper, collision_stride),
       old_stride_upper,
     )
-    min_interval_width = min(
-      self.ratchet_min_interval_width_m,
-      max(self.ratchet_max_stride_m - self.ratchet_min_stride_m, 1.0e-6),
+    new_soft_upper_candidate = torch.where(
+      soft_upper_evidence,
+      torch.minimum(old_soft_upper, collision_upper),
+      old_soft_upper,
     )
-    min_width_t = torch.full_like(new_lower, min_interval_width)
-    lower_ceiling = (new_upper_candidate - min_width_t).clamp(
-      self.ratchet_min_stride_m,
-      self.ratchet_max_stride_m,
-    )
-    new_lower = torch.where(
-      toe_evidence,
-      torch.minimum(new_lower, lower_ceiling),
-      new_lower,
-    )
-    new_stride_lower = torch.where(
-      toe_evidence,
-      torch.minimum(new_stride_lower, new_stride_upper_candidate),
-      new_stride_lower,
+    new_soft_stride_upper_candidate = torch.where(
+      soft_upper_evidence,
+      torch.minimum(old_soft_stride_upper, collision_stride),
+      old_soft_stride_upper,
     )
     new_interval_confirmed = old_interval_confirmed | (
       toe_evidence
       & torch.isfinite(new_upper_candidate)
       & (new_upper_candidate > self.ratchet_min_stride_m)
     )
+    new_soft_upper_active = (
+      old_soft_upper_active | soft_upper_evidence
+    ) & ~new_interval_confirmed
     new_upper = torch.where(
       new_interval_confirmed,
       torch.maximum(new_upper_candidate, new_lower + min_width_t),
-      torch.zeros_like(new_upper_candidate),
+      torch.where(
+        new_soft_upper_active,
+        new_soft_upper_candidate,
+        torch.zeros_like(new_upper_candidate),
+      ),
     ).clamp(0.0, self.ratchet_max_stride_m)
     new_stride_upper = torch.where(
       new_interval_confirmed,
       torch.maximum(new_stride_upper_candidate, new_stride_lower),
-      torch.zeros_like(new_stride_upper_candidate),
+      torch.where(
+        new_soft_upper_active,
+        new_soft_stride_upper_candidate,
+        torch.zeros_like(new_stride_upper_candidate),
+      ),
     ).clamp(0.0, self.ratchet_max_stride_m)
     new_collision_upper = torch.where(
-      toe_evidence,
+      toe_evidence | soft_upper_evidence,
       collision_upper,
       self.ratchet_collision_upper_s,
+    )
+    collision_below_lower = (collision_upper < new_lower) | (
+      collision_stride < new_stride_lower
+    )
+    collision_too_narrow = (
+      (collision_upper < new_lower + min_width_t)
+      | (collision_stride < new_stride_lower)
+    ) & ~collision_below_lower
+    self.ratchet_collision_candidate = toe_context_candidate
+    self.ratchet_collision_accepted = toe_evidence
+    self.ratchet_collision_soft_upper = soft_upper_evidence
+    self.ratchet_collision_rejected_low_confidence = (
+      toe_context_candidate & ~toe_confident
+    )
+    self.ratchet_collision_rejected = self.ratchet_collision_rejected_low_confidence
+    self.ratchet_collision_soft_below_lower = (
+      soft_upper_evidence & collision_below_lower
+    )
+    self.ratchet_collision_soft_too_narrow = (
+      soft_upper_evidence & collision_too_narrow
     )
 
     old_probe = torch.where(
@@ -1716,6 +1787,9 @@ class FootEventMemoryObs:
       torch.maximum(new_lower, new_stride_lower) + self.ratchet_probe_increment_m,
     )
     interval_center = 0.5 * (new_lower + new_upper)
+    soft_upper_target = (
+      new_soft_stride_upper_candidate - self.ratchet_collision_margin_m
+    ).clamp(self.ratchet_min_stride_m, self.ratchet_max_stride_m)
     open_target = torch.where(
       forward_up_step,
       grow_probe,
@@ -1724,9 +1798,13 @@ class FootEventMemoryObs:
     new_probe = torch.where(
       new_interval_confirmed,
       interval_center,
-      open_target,
+      torch.where(new_soft_upper_active, soft_upper_target, open_target),
     )
-    new_probe = torch.maximum(new_probe, new_lower).clamp(
+    new_probe = torch.where(
+      new_soft_upper_active,
+      new_probe,
+      torch.maximum(new_probe, new_lower),
+    ).clamp(
       self.ratchet_min_stride_m,
       self.ratchet_max_stride_m,
     )
@@ -1747,19 +1825,19 @@ class FootEventMemoryObs:
       self.ratchet_last_forward_up_height,
     )
     new_no_hit_steps = torch.where(
-      forward_up_step & ~toe_evidence,
+      forward_up_step & ~(toe_evidence | soft_upper_evidence),
       self.ratchet_safe_no_hit_steps + 1,
       self.ratchet_safe_no_hit_steps,
     )
     new_no_hit_steps = torch.where(
-      toe_evidence,
+      toe_evidence | soft_upper_evidence,
       torch.zeros_like(new_no_hit_steps),
       new_no_hit_steps,
     )
     evidence_confidence = torch.maximum(
       torch.where(forward_up_step, step_score, torch.zeros_like(step_score)),
       torch.where(
-        toe_evidence,
+        toe_evidence | soft_upper_evidence,
         toe_features[:, 1].clamp(0.0, 1.0),
         torch.zeros_like(step_score),
       ),
@@ -1801,7 +1879,7 @@ class FootEventMemoryObs:
       torch.zeros_like(new_probe),
     )
     self.ratchet_upper_s = torch.where(
-      active & new_interval_confirmed,
+      active & (new_interval_confirmed | new_soft_upper_active),
       new_upper,
       torch.zeros_like(new_upper),
     )
@@ -1816,7 +1894,7 @@ class FootEventMemoryObs:
       torch.zeros_like(new_stride_lower),
     )
     self.ratchet_same_foot_stride_upper_s = torch.where(
-      active & new_interval_confirmed,
+      active & (new_interval_confirmed | new_soft_upper_active),
       new_stride_upper,
       torch.zeros_like(new_stride_upper),
     )
@@ -1841,6 +1919,7 @@ class FootEventMemoryObs:
       torch.zeros_like(new_no_hit_steps),
     )
     self.ratchet_interval_confirmed = active & new_interval_confirmed
+    self.ratchet_soft_upper_active = active & new_soft_upper_active
     self.ratchet_confidence = torch.where(
       active,
       new_confidence,
@@ -1854,7 +1933,7 @@ class FootEventMemoryObs:
     )
 
   def _ratchet_features(self, toe_features: torch.Tensor) -> torch.Tensor:
-    """Expose the deployable same-foot stride interval as summary cues."""
+    """Expose ratchet lower/probe plus confirmed or soft collision upper cues."""
     features = torch.zeros(
       self.num_envs,
       FOOT_EVENT_RATCHET_DIM,
@@ -2226,6 +2305,30 @@ class FootEventMemoryObs:
     log["Metrics/foot_event_ratchet_toe_confirm_ratio"] = log[
       "Metrics/foot_event_ratchet_interval_confirmed_ratio"
     ]
+    log["Metrics/foot_event_ratchet_collision_candidate_ratio"] = (
+      self.ratchet_collision_candidate.float().mean()
+    )
+    log["Metrics/foot_event_ratchet_collision_accepted_ratio"] = (
+      self.ratchet_collision_accepted.float().mean()
+    )
+    log["Metrics/foot_event_ratchet_collision_soft_upper_ratio"] = (
+      self.ratchet_collision_soft_upper.float().mean()
+    )
+    log["Metrics/foot_event_ratchet_collision_rejected_ratio"] = (
+      self.ratchet_collision_rejected.float().mean()
+    )
+    log["Metrics/foot_event_ratchet_collision_low_conf_rejected_ratio"] = (
+      self.ratchet_collision_rejected_low_confidence.float().mean()
+    )
+    log["Metrics/foot_event_ratchet_collision_below_lower_soft_ratio"] = (
+      self.ratchet_collision_soft_below_lower.float().mean()
+    )
+    log["Metrics/foot_event_ratchet_collision_too_narrow_soft_ratio"] = (
+      self.ratchet_collision_soft_too_narrow.float().mean()
+    )
+    log["Metrics/foot_event_ratchet_soft_upper_active_ratio"] = (
+      self.ratchet_soft_upper_active.float().mean()
+    )
     log["Metrics/foot_event_ratchet_collision_upper_mean"] = (
       self.ratchet_collision_upper_s * ratchet_active_f
     ).sum() / ratchet_denom

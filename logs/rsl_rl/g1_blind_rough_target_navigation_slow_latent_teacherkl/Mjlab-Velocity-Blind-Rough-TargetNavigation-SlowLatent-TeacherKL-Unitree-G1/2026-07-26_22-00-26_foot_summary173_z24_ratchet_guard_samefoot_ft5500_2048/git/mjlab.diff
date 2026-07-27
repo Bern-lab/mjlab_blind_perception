@@ -1,0 +1,540 @@
+--- git commit ---
+51980f37f19f4a8f10441081b76577b2cf4723ce
+
+
+--- git status ---
+On branch exp/stage2c-sparse-events
+Your branch is up to date with 'origin/exp/stage2c-sparse-events'.
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   src/mjlab/rl/config.py
+	modified:   src/mjlab/rl/slow_latent_model.py
+	modified:   src/mjlab/tasks/velocity/config/g1/blind_rough_slow_latent_env_cfg.py
+	modified:   src/mjlab/tasks/velocity/config/g1/rl_cfg.py
+	modified:   src/mjlab/tasks/velocity/mdp/observations.py
+	modified:   tests/test_foot_event_memory_obs.py
+	modified:   tests/test_slow_latent_model.py
+	modified:   tests/test_velocity_task.py
+	modified:   third_party/rsl_rl/rsl_rl/algorithms/ppo_teacher_kl.py
+
+no changes added to commit (use "git add" and/or "git commit -a") 
+
+
+--- git diff ---
+diff --git a/src/mjlab/rl/config.py b/src/mjlab/rl/config.py
+index 32796aa4..2d083617 100644
+--- a/src/mjlab/rl/config.py
++++ b/src/mjlab/rl/config.py
+@@ -132,6 +132,10 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
+   """Weight for the Event-to-layer2 minimum-safe-stride Huber loss."""
+   stair_shape_huber_delta: float = 0.05
+   """Huber transition point for stair geometry labels normalized to [0, 1]."""
++  stair_shape_same_foot_loss_coef: float = 1.0
++  """Relative shape-loss weight for the actionable same-foot stride head."""
++  stair_shape_riser_loss_coef: float = 1.0
++  """Relative shape-loss weight for the riser-height head."""
+   safe_stride_huber_delta: float = 0.05
+   """Huber transition point for safe-stride labels, in meters."""
+   safe_stride_width_loss_coef: float = 1.0
+diff --git a/src/mjlab/rl/slow_latent_model.py b/src/mjlab/rl/slow_latent_model.py
+index 44dd31ab..1bad251c 100644
+--- a/src/mjlab/rl/slow_latent_model.py
++++ b/src/mjlab/rl/slow_latent_model.py
+@@ -86,6 +86,8 @@ class LSTMSlowLatentMLPModel(MLPModel):
+     aux_stair_shape_coef: float = 0.0,
+     aux_safe_stride_coef: float = 0.0,
+     stair_shape_huber_delta: float = 0.05,
++    stair_shape_same_foot_loss_coef: float = 1.0,
++    stair_shape_riser_loss_coef: float = 1.0,
+     safe_stride_huber_delta: float = 0.05,
+     safe_stride_width_loss_coef: float = 1.0,
+     safe_stride_lower_shortfall_coef: float = 1.0,
+@@ -331,6 +333,8 @@ class LSTMSlowLatentMLPModel(MLPModel):
+     self.aux_stair_shape_coef = float(aux_stair_shape_coef)
+     self.aux_safe_stride_coef = float(aux_safe_stride_coef)
+     self.stair_shape_huber_delta = float(stair_shape_huber_delta)
++    self.stair_shape_same_foot_loss_coef = float(stair_shape_same_foot_loss_coef)
++    self.stair_shape_riser_loss_coef = float(stair_shape_riser_loss_coef)
+     self.safe_stride_huber_delta = float(safe_stride_huber_delta)
+     self.safe_stride_width_loss_coef = float(safe_stride_width_loss_coef)
+     self.safe_stride_lower_shortfall_coef = float(safe_stride_lower_shortfall_coef)
+@@ -354,6 +358,10 @@ class LSTMSlowLatentMLPModel(MLPModel):
+     self.same_foot_stride_deployable_hint_margin = float(
+       same_foot_stride_deployable_hint_margin
+     )
++    if self.stair_shape_same_foot_loss_coef < 0.0:
++      raise ValueError("stair_shape_same_foot_loss_coef must be non-negative.")
++    if self.stair_shape_riser_loss_coef < 0.0:
++      raise ValueError("stair_shape_riser_loss_coef must be non-negative.")
+     if self.safe_stride_width_loss_coef < 0.0:
+       raise ValueError("safe_stride_width_loss_coef must be non-negative.")
+     if self.safe_stride_lower_shortfall_coef < 1.0:
+@@ -656,7 +664,8 @@ class LSTMSlowLatentMLPModel(MLPModel):
+       self.same_foot_stride_max,
+     )
+     confirmed = ratchet[..., 6:7] > 0.5
+-    open_target = torch.maximum(probe, lower)
++    open_base = torch.maximum(probe, lower)
++    open_target = torch.maximum(open_base, torch.minimum(target, open_base + 0.05))
+     closed_target = 0.5 * (lower + torch.maximum(upper, lower))
+     ratchet_target = torch.where(confirmed, closed_target, open_target)
+     return torch.where(active, ratchet_target, target)
+@@ -1893,7 +1902,8 @@ class _OnnxStairLatentModel(nn.Module):
+       self.same_foot_stride_max,
+     )
+     confirmed = ratchet[..., 6:7] > 0.5
+-    open_target = torch.maximum(probe, lower)
++    open_base = torch.maximum(probe, lower)
++    open_target = torch.maximum(open_base, torch.minimum(target, open_base + 0.05))
+     closed_target = 0.5 * (lower + torch.maximum(upper, lower))
+     return torch.where(
+       active, torch.where(confirmed, closed_target, open_target), target
+diff --git a/src/mjlab/tasks/velocity/config/g1/blind_rough_slow_latent_env_cfg.py b/src/mjlab/tasks/velocity/config/g1/blind_rough_slow_latent_env_cfg.py
+index ccc92529..9ce5af92 100644
+--- a/src/mjlab/tasks/velocity/config/g1/blind_rough_slow_latent_env_cfg.py
++++ b/src/mjlab/tasks/velocity/config/g1/blind_rough_slow_latent_env_cfg.py
+@@ -721,6 +721,7 @@ def _configure_latent_observations(
+         "ratchet_flat_height_threshold_m": 0.02,
+         "ratchet_probe_increment_m": 0.025,
+         "ratchet_collision_margin_m": 0.02,
++        "ratchet_collision_min_confidence": 0.45,
+         "ratchet_min_interval_width_m": 0.04,
+         "ratchet_min_stride_m": params.rewards.toe_stair_min_safe_stride,
+         "ratchet_max_stride_m": params.rewards.toe_stair_max_tracking_stride,
+diff --git a/src/mjlab/tasks/velocity/config/g1/rl_cfg.py b/src/mjlab/tasks/velocity/config/g1/rl_cfg.py
+index f6eec122..ac3a2568 100644
+--- a/src/mjlab/tasks/velocity/config/g1/rl_cfg.py
++++ b/src/mjlab/tasks/velocity/config/g1/rl_cfg.py
+@@ -102,6 +102,10 @@ class G1SlowLatentPolicyModelParams:
+   """Lightweight SafeStride trend loss; precise control comes from shape/ratchet."""
+   stair_shape_huber_delta: float = 0.05
+   """Huber transition point for shape prediction normalized to [0, 1]."""
++  stair_shape_same_foot_loss_coef: float = 2.0
++  """Give the actionable next same-foot stride more capacity than riser height."""
++  stair_shape_riser_loss_coef: float = 0.5
++  """Keep height supervised, but stop the easy riser head from dominating shape loss."""
+   safe_stride_huber_delta: float = 0.05
+   """Huber transition point for safe-stride prediction, in meters."""
+   safe_stride_width_loss_coef: float = 1.0
+@@ -124,7 +128,7 @@ class G1SlowLatentPolicyModelParams:
+   """Disabled by default; ratchet hints train same-foot stride instead."""
+   safe_stride_deployable_hint_margin: float = 0.02
+   """Slack, in meters, before foot-event lower-bound hints are penalized."""
+-  same_foot_stride_deployable_hint_loss_coef: float = 0.35
++  same_foot_stride_deployable_hint_loss_coef: float = 0.60
+   """Weight for ratchet-guided same-foot stride hints inside shape loss."""
+   same_foot_stride_deployable_hint_margin: float = 0.02
+   """Slack, in meters, before open same-foot stride hints are penalized."""
+@@ -244,6 +248,8 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
+   aux_stair_shape_coef: float = 0.05,
+   aux_safe_stride_coef: float = 0.04,
+   stair_shape_huber_delta: float = 0.05,
++  stair_shape_same_foot_loss_coef: float = 2.0,
++  stair_shape_riser_loss_coef: float = 0.5,
+   safe_stride_huber_delta: float = 0.05,
+   safe_stride_width_loss_coef: float = 1.0,
+   safe_stride_lower_shortfall_coef: float = 1.2,
+@@ -255,7 +261,7 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
+   safe_stride_std_floor_ratio: float = 0.70,
+   safe_stride_deployable_hint_loss_coef: float = 0.0,
+   safe_stride_deployable_hint_margin: float = 0.02,
+-  same_foot_stride_deployable_hint_loss_coef: float = 0.35,
++  same_foot_stride_deployable_hint_loss_coef: float = 0.60,
+   same_foot_stride_deployable_hint_margin: float = 0.02,
+   safe_stride_min: float = 0.10,
+   safe_stride_max: float = 0.55,
+@@ -312,6 +318,8 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
+     aux_stair_shape_coef=aux_stair_shape_coef,
+     aux_safe_stride_coef=aux_safe_stride_coef,
+     stair_shape_huber_delta=stair_shape_huber_delta,
++    stair_shape_same_foot_loss_coef=stair_shape_same_foot_loss_coef,
++    stair_shape_riser_loss_coef=stair_shape_riser_loss_coef,
+     safe_stride_huber_delta=safe_stride_huber_delta,
+     safe_stride_width_loss_coef=safe_stride_width_loss_coef,
+     safe_stride_lower_shortfall_coef=safe_stride_lower_shortfall_coef,
+@@ -513,6 +521,8 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
+   aux_stair_shape_coef: float = 0.05,
+   aux_safe_stride_coef: float = 0.04,
+   stair_shape_huber_delta: float = 0.05,
++  stair_shape_same_foot_loss_coef: float = 2.0,
++  stair_shape_riser_loss_coef: float = 0.5,
+   safe_stride_huber_delta: float = 0.05,
+   safe_stride_width_loss_coef: float = 1.0,
+   safe_stride_lower_shortfall_coef: float = 1.2,
+@@ -524,7 +534,7 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
+   safe_stride_std_floor_ratio: float = 0.70,
+   safe_stride_deployable_hint_loss_coef: float = 0.0,
+   safe_stride_deployable_hint_margin: float = 0.02,
+-  same_foot_stride_deployable_hint_loss_coef: float = 0.35,
++  same_foot_stride_deployable_hint_loss_coef: float = 0.60,
+   same_foot_stride_deployable_hint_margin: float = 0.02,
+   safe_stride_min: float = 0.10,
+   safe_stride_max: float = 0.55,
+@@ -596,6 +606,8 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
+     aux_stair_shape_coef = model_params.aux_stair_shape_coef
+     aux_safe_stride_coef = model_params.aux_safe_stride_coef
+     stair_shape_huber_delta = model_params.stair_shape_huber_delta
++    stair_shape_same_foot_loss_coef = model_params.stair_shape_same_foot_loss_coef
++    stair_shape_riser_loss_coef = model_params.stair_shape_riser_loss_coef
+     safe_stride_huber_delta = model_params.safe_stride_huber_delta
+     safe_stride_width_loss_coef = model_params.safe_stride_width_loss_coef
+     safe_stride_lower_shortfall_coef = model_params.safe_stride_lower_shortfall_coef
+@@ -674,6 +686,8 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
+     aux_stair_shape_coef=aux_stair_shape_coef,
+     aux_safe_stride_coef=aux_safe_stride_coef,
+     stair_shape_huber_delta=stair_shape_huber_delta,
++    stair_shape_same_foot_loss_coef=stair_shape_same_foot_loss_coef,
++    stair_shape_riser_loss_coef=stair_shape_riser_loss_coef,
+     safe_stride_huber_delta=safe_stride_huber_delta,
+     safe_stride_width_loss_coef=safe_stride_width_loss_coef,
+     safe_stride_lower_shortfall_coef=safe_stride_lower_shortfall_coef,
+diff --git a/src/mjlab/tasks/velocity/mdp/observations.py b/src/mjlab/tasks/velocity/mdp/observations.py
+index 454764d0..ff4ff0a6 100644
+--- a/src/mjlab/tasks/velocity/mdp/observations.py
++++ b/src/mjlab/tasks/velocity/mdp/observations.py
+@@ -984,6 +984,9 @@ class FootEventMemoryObs:
+       float(params.get("ratchet_collision_margin_m", 0.02)),
+       0.0,
+     )
++    self.ratchet_collision_min_confidence = float(
++      params.get("ratchet_collision_min_confidence", 0.45)
++    )
+     self.ratchet_min_interval_width_m = max(
+       float(params.get("ratchet_min_interval_width_m", 0.04)),
+       1.0e-6,
+@@ -1081,6 +1084,9 @@ class FootEventMemoryObs:
+     self.ratchet_confidence = torch.zeros_like(self.ratchet_lower_s)
+     self.ratchet_age_s = torch.zeros_like(self.ratchet_lower_s)
+     self.ratchet_flat_pair_steps = torch.zeros_like(self.ratchet_safe_no_hit_steps)
++    self.ratchet_collision_candidate = torch.zeros_like(self.ratchet_active)
++    self.ratchet_collision_accepted = torch.zeros_like(self.ratchet_active)
++    self.ratchet_collision_rejected = torch.zeros_like(self.ratchet_active)
+ 
+   def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+     ids = self._env_ids(env_ids)
+@@ -1113,6 +1119,9 @@ class FootEventMemoryObs:
+     self.ratchet_confidence[ids] = 0.0
+     self.ratchet_age_s[ids] = 0.0
+     self.ratchet_flat_pair_steps[ids] = 0
++    self.ratchet_collision_candidate[ids] = False
++    self.ratchet_collision_accepted[ids] = False
++    self.ratchet_collision_rejected[ids] = False
+ 
+   def __call__(self, env: ManagerBasedRlEnv, **_: Any) -> torch.Tensor:
+     root_pos_w, root_quat_w = _root_pose_from_env(env)
+@@ -1603,11 +1612,13 @@ class FootEventMemoryObs:
+ 
+     toe_relation_valid = toe_features[:, 6] > 0.5
+     toe_delta_s = toe_features[:, 7].clamp_min(0.0)
+-    toe_evidence_candidate = (
++    toe_relation_candidate = (
+       new_toe_mark_any & toe_relation_valid & (toe_delta_s >= self.ratchet_min_stride_m)
+     )
+-    toe_evidence = toe_evidence_candidate & (self.ratchet_active | forward_up_step)
+-    has_evidence = forward_up_step | toe_evidence
++    toe_context_candidate = toe_relation_candidate & (
++      self.ratchet_active | forward_up_step
++    )
++    toe_confident = toe_features[:, 1] >= self.ratchet_collision_min_confidence
+ 
+     stride_evidence = torch.where(
+       forward_up_step,
+@@ -1656,34 +1667,27 @@ class FootEventMemoryObs:
+       self.ratchet_min_stride_m,
+       self.ratchet_max_stride_m,
+     )
+-    new_upper_candidate = torch.where(
+-      toe_evidence,
+-      torch.minimum(old_upper, collision_upper),
+-      old_upper,
+-    )
+-    new_stride_upper_candidate = torch.where(
+-      toe_evidence,
+-      torch.minimum(old_stride_upper, collision_stride),
+-      old_stride_upper,
+-    )
+     min_interval_width = min(
+       self.ratchet_min_interval_width_m,
+       max(self.ratchet_max_stride_m - self.ratchet_min_stride_m, 1.0e-6),
+     )
+     min_width_t = torch.full_like(new_lower, min_interval_width)
+-    lower_ceiling = (new_upper_candidate - min_width_t).clamp(
+-      self.ratchet_min_stride_m,
+-      self.ratchet_max_stride_m,
++    toe_evidence = (
++      toe_context_candidate
++      & toe_confident
++      & (collision_upper >= new_lower + min_width_t)
++      & (collision_stride >= new_stride_lower)
+     )
+-    new_lower = torch.where(
++    has_evidence = forward_up_step | toe_evidence
++    new_upper_candidate = torch.where(
+       toe_evidence,
+-      torch.minimum(new_lower, lower_ceiling),
+-      new_lower,
++      torch.minimum(old_upper, collision_upper),
++      old_upper,
+     )
+-    new_stride_lower = torch.where(
++    new_stride_upper_candidate = torch.where(
+       toe_evidence,
+-      torch.minimum(new_stride_lower, new_stride_upper_candidate),
+-      new_stride_lower,
++      torch.minimum(old_stride_upper, collision_stride),
++      old_stride_upper,
+     )
+     new_interval_confirmed = old_interval_confirmed | (
+       toe_evidence
+@@ -1705,6 +1709,9 @@ class FootEventMemoryObs:
+       collision_upper,
+       self.ratchet_collision_upper_s,
+     )
++    self.ratchet_collision_candidate = toe_context_candidate
++    self.ratchet_collision_accepted = toe_evidence
++    self.ratchet_collision_rejected = toe_context_candidate & ~toe_evidence
+ 
+     old_probe = torch.where(
+       self.ratchet_active,
+@@ -2226,6 +2233,15 @@ class FootEventMemoryObs:
+     log["Metrics/foot_event_ratchet_toe_confirm_ratio"] = log[
+       "Metrics/foot_event_ratchet_interval_confirmed_ratio"
+     ]
++    log["Metrics/foot_event_ratchet_collision_candidate_ratio"] = (
++      self.ratchet_collision_candidate.float().mean()
++    )
++    log["Metrics/foot_event_ratchet_collision_accepted_ratio"] = (
++      self.ratchet_collision_accepted.float().mean()
++    )
++    log["Metrics/foot_event_ratchet_collision_rejected_ratio"] = (
++      self.ratchet_collision_rejected.float().mean()
++    )
+     log["Metrics/foot_event_ratchet_collision_upper_mean"] = (
+       self.ratchet_collision_upper_s * ratchet_active_f
+     ).sum() / ratchet_denom
+diff --git a/tests/test_foot_event_memory_obs.py b/tests/test_foot_event_memory_obs.py
+index 3573db38..f371d1bf 100644
+--- a/tests/test_foot_event_memory_obs.py
++++ b/tests/test_foot_event_memory_obs.py
+@@ -562,6 +562,116 @@ def test_foot_event_memory_ratchet_closes_interval_from_same_foot_toe_hit() -> N
+   torch.testing.assert_close(term.ratchet_collision_upper_s[0], torch.tensor(0.34))
+ 
+ 
++def test_foot_event_memory_ratchet_rejects_collision_below_safe_lower() -> None:
++  env = _make_env()
++  term = FootEventMemoryObs(
++    SimpleNamespace(
++      params={
++        "memory_len": 6,
++        "noise_enabled": False,
++        "age_norm_s": 1.0,
++        "stance_age_norm_s": 1.0,
++        "ratchet_min_interval_width_m": 0.04,
++      }
++    ),
++    env,
++  )
++
++  term.ratchet_active[0] = True
++  term.ratchet_lower_s[0] = 0.30
++  term.ratchet_probe_target_s[0] = 0.45
++  term.ratchet_same_foot_stride_lower_s[0] = 0.30
++  term.ratchet_last_forward_up_stride[0] = 0.30
++  term.ratchet_confidence[0] = 0.4
++
++  term.toe_valid[0, 0] = True
++  toe = term.toe_marks[0, 0]
++  toe[0] = 1.0
++  toe[1] = 1.0
++  toe[4] = 0.6
++  toe[5] = 0.05
++  toe[9] = 0.33
++
++  term.footprint_valid[0, 0] = True
++  footprint = term.footprints[0, 0]
++  footprint[0] = 1.0
++  footprint[1] = 1.0
++  footprint[3] = 1.0
++  footprint[5] = 1.0
++  footprint[6] = 0.20
++  footprint[10] = 0.05
++
++  summary = term._compute_event_summary(
++    update_ratchet=True,
++    new_footprint_any=torch.tensor([False]),
++    new_toe_mark_any=torch.tensor([True]),
++    step_dt=0.02,
++  )[0]
++  ratchet = summary[FOOT_EVENT_RATCHET_START:]
++
++  torch.testing.assert_close(ratchet[0], torch.tensor(1.0))
++  torch.testing.assert_close(ratchet[1], torch.tensor(0.30))
++  torch.testing.assert_close(ratchet[2], torch.tensor(0.45))
++  torch.testing.assert_close(ratchet[3], torch.tensor(0.0))
++  torch.testing.assert_close(ratchet[5], torch.tensor(0.30))
++  torch.testing.assert_close(ratchet[6], torch.tensor(0.0))
++  assert term.ratchet_collision_candidate[0].item() is True
++  assert term.ratchet_collision_accepted[0].item() is False
++  assert term.ratchet_collision_rejected[0].item() is True
++
++
++def test_foot_event_memory_ratchet_rejects_low_confidence_toe_hit() -> None:
++  env = _make_env()
++  term = FootEventMemoryObs(
++    SimpleNamespace(
++      params={
++        "memory_len": 6,
++        "noise_enabled": False,
++        "age_norm_s": 1.0,
++        "stance_age_norm_s": 1.0,
++        "ratchet_collision_min_confidence": 0.45,
++      }
++    ),
++    env,
++  )
++
++  term.ratchet_active[0] = True
++  term.ratchet_lower_s[0] = 0.25
++  term.ratchet_probe_target_s[0] = 0.45
++  term.ratchet_same_foot_stride_lower_s[0] = 0.25
++
++  term.toe_valid[0, 0] = True
++  toe = term.toe_marks[0, 0]
++  toe[0] = 1.0
++  toe[1] = 1.0
++  toe[4] = 0.2
++  toe[9] = 0.41
++
++  term.footprint_valid[0, 0] = True
++  footprint = term.footprints[0, 0]
++  footprint[0] = 1.0
++  footprint[1] = 1.0
++  footprint[3] = 1.0
++  footprint[5] = 1.0
++  footprint[6] = 0.20
++  footprint[10] = 0.05
++
++  summary = term._compute_event_summary(
++    update_ratchet=True,
++    new_footprint_any=torch.tensor([False]),
++    new_toe_mark_any=torch.tensor([True]),
++    step_dt=0.02,
++  )[0]
++  ratchet = summary[FOOT_EVENT_RATCHET_START:]
++
++  torch.testing.assert_close(ratchet[0], torch.tensor(1.0))
++  torch.testing.assert_close(ratchet[6], torch.tensor(0.0))
++  torch.testing.assert_close(ratchet[3], torch.tensor(0.0))
++  assert term.ratchet_collision_candidate[0].item() is True
++  assert term.ratchet_collision_accepted[0].item() is False
++  assert term.ratchet_collision_rejected[0].item() is True
++
++
+ def test_foot_event_memory_ratchet_ignores_toe_hit_without_upstair_context() -> None:
+   env = _make_env()
+   term = FootEventMemoryObs(
+diff --git a/tests/test_slow_latent_model.py b/tests/test_slow_latent_model.py
+index bf2654f2..b6112dee 100644
+--- a/tests/test_slow_latent_model.py
++++ b/tests/test_slow_latent_model.py
+@@ -282,19 +282,19 @@ def test_shadow_semantic_actor_stride_target_uses_ratchet_hint() -> None:
+     structured_safe_stride_enabled=True,
+     shadow_semantic_enabled=True,
+   )
+-  batch = 2
++  batch = 3
+   event_prob = torch.zeros(batch, 1)
+   stair_prob = torch.zeros(batch, 1)
+   gate = torch.zeros(batch, 5)
+-  stair_shape = torch.tensor([[0.20, 0.12], [0.70, 0.12]])
++  stair_shape = torch.tensor([[0.50, 0.12], [0.70, 0.12], [0.70, 0.12]])
+   safe_stride_interval = torch.full((batch, 2), 0.20)
+   safe_stride_confidence = torch.zeros(batch, 1)
+   latent_obs = torch.zeros(batch, 80)
+   latent_obs[:, 70] = 1.0
+-  latent_obs[:, 72] = torch.tensor([0.45, 0.60])
++  latent_obs[:, 72] = torch.tensor([0.45, 0.45, 0.60])
+   latent_obs[:, 75] = 0.30
+-  latent_obs[:, 76] = torch.tensor([0.0, 1.0])
+-  latent_obs[:, 77] = torch.tensor([0.0, 0.50])
++  latent_obs[:, 76] = torch.tensor([0.0, 0.0, 1.0])
++  latent_obs[:, 77] = torch.tensor([0.0, 0.0, 0.50])
+ 
+   semantic = model._build_shadow_semantic(
+     event_prob,
+@@ -309,7 +309,8 @@ def test_shadow_semantic_actor_stride_target_uses_ratchet_hint() -> None:
+   stride_range = model.same_foot_stride_max - model.same_foot_stride_min
+   expected = torch.tensor(
+     [
+-      (0.45 - model.same_foot_stride_min) / stride_range,
++      (0.50 - model.same_foot_stride_min) / stride_range,
++      (0.50 - model.same_foot_stride_min) / stride_range,
+       (0.40 - model.same_foot_stride_min) / stride_range,
+     ]
+   )
+diff --git a/tests/test_velocity_task.py b/tests/test_velocity_task.py
+index a8119f19..efad3f90 100644
+--- a/tests/test_velocity_task.py
++++ b/tests/test_velocity_task.py
+@@ -535,6 +535,8 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
+   assert actor_cfg.safe_stride_phase_dim == 2
+   assert actor_cfg.safe_stride_phase_start == 91
+   assert actor_cfg.stair_shape_huber_delta == 0.05
++  assert actor_cfg.stair_shape_same_foot_loss_coef == 2.0
++  assert actor_cfg.stair_shape_riser_loss_coef == 0.5
+   assert actor_cfg.safe_stride_huber_delta == 0.05
+   assert actor_cfg.safe_stride_width_loss_coef == 1.0
+   assert actor_cfg.safe_stride_lower_shortfall_coef == 1.2
+@@ -546,7 +548,7 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
+   assert actor_cfg.safe_stride_std_floor_ratio == 0.70
+   assert actor_cfg.safe_stride_deployable_hint_loss_coef == 0.0
+   assert actor_cfg.safe_stride_deployable_hint_margin == 0.02
+-  assert actor_cfg.same_foot_stride_deployable_hint_loss_coef == 0.35
++  assert actor_cfg.same_foot_stride_deployable_hint_loss_coef == 0.60
+   assert actor_cfg.same_foot_stride_deployable_hint_margin == 0.02
+   assert actor_cfg.safe_stride_min == 0.10
+   assert actor_cfg.safe_stride_max == 0.55
+diff --git a/third_party/rsl_rl/rsl_rl/algorithms/ppo_teacher_kl.py b/third_party/rsl_rl/rsl_rl/algorithms/ppo_teacher_kl.py
+index 1fdbcc90..416510eb 100644
+--- a/third_party/rsl_rl/rsl_rl/algorithms/ppo_teacher_kl.py
++++ b/third_party/rsl_rl/rsl_rl/algorithms/ppo_teacher_kl.py
+@@ -2118,13 +2118,18 @@ class PPOTeacherKL(PPO):
+                 ),
+                 float(getattr(self.actor, "riser_height_max", 0.25)),
+             ])
++            shape_component_weights = shape_labels.new_tensor([
++                float(getattr(self.actor, "stair_shape_same_foot_loss_coef", 1.0)),
++                float(getattr(self.actor, "stair_shape_riser_loss_coef", 1.0)),
++            ]).clamp_min(0.0)
++            weighted_shape_loss_valid = shape_loss_valid * shape_component_weights
+             if self.geometry_probe_only:
+                 shape_loss_raw = shape_predictions.new_zeros(())
+                 for component_index in range(2):
+                     shape_loss_raw = shape_loss_raw + self._compute_normalized_stair_shape_loss(
+                         shape_predictions[..., component_index : component_index + 1],
+                         shape_loss_labels[..., component_index : component_index + 1],
+-                        shape_loss_valid[..., component_index : component_index + 1],
++                        weighted_shape_loss_valid[..., component_index : component_index + 1],
+                         shape_lower_bounds[component_index : component_index + 1],
+                         shape_upper_bounds[component_index : component_index + 1],
+                         huber_delta,
+@@ -2133,7 +2138,7 @@ class PPOTeacherKL(PPO):
+                 shape_loss_raw = self._compute_normalized_stair_shape_loss(
+                     shape_predictions,
+                     shape_loss_labels,
+-                    shape_loss_valid,
++                    weighted_shape_loss_valid,
+                     shape_lower_bounds,
+                     shape_upper_bounds,
+                     huber_delta,
+@@ -2200,6 +2205,8 @@ class PPOTeacherKL(PPO):
+             logs["slow_latent_shape_huber"] = normalized_shape_huber
+             logs["slow_latent_shape_normalized_huber"] = normalized_shape_huber
+             logs["slow_latent_shape_loss"] = self._distributed_mean_scalar(shape_loss).item()
++            logs["slow_latent_stair_shape_same_foot_loss_coef"] = float(shape_component_weights[0].item())
++            logs["slow_latent_stair_shape_riser_loss_coef"] = float(shape_component_weights[1].item())
+             if same_foot_hint_coef != 0.0:
+                 logs["slow_latent_same_foot_stride_deployable_hint_loss_coef"] = same_foot_hint_coef
+                 logs["slow_latent_same_foot_stride_deployable_hint_huber"] = self._distributed_mean_scalar(

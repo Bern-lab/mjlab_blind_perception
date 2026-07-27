@@ -132,6 +132,10 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """Weight for the Event-to-layer2 minimum-safe-stride Huber loss."""
   stair_shape_huber_delta: float = 0.05
   """Huber transition point for stair geometry labels normalized to [0, 1]."""
+  stair_shape_same_foot_loss_coef: float = 1.0
+  """Relative shape-loss weight for the actionable same-foot stride head."""
+  stair_shape_riser_loss_coef: float = 1.0
+  """Relative shape-loss weight for the riser-height head."""
   safe_stride_huber_delta: float = 0.05
   """Huber transition point for safe-stride labels, in meters."""
   safe_stride_width_loss_coef: float = 1.0

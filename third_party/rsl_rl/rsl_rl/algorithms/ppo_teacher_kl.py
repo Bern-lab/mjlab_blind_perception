@@ -2118,13 +2118,18 @@ class PPOTeacherKL(PPO):
                 ),
                 float(getattr(self.actor, "riser_height_max", 0.25)),
             ])
+            shape_component_weights = shape_labels.new_tensor([
+                float(getattr(self.actor, "stair_shape_same_foot_loss_coef", 1.0)),
+                float(getattr(self.actor, "stair_shape_riser_loss_coef", 1.0)),
+            ]).clamp_min(0.0)
+            weighted_shape_loss_valid = shape_loss_valid * shape_component_weights
             if self.geometry_probe_only:
                 shape_loss_raw = shape_predictions.new_zeros(())
                 for component_index in range(2):
                     shape_loss_raw = shape_loss_raw + self._compute_normalized_stair_shape_loss(
                         shape_predictions[..., component_index : component_index + 1],
                         shape_loss_labels[..., component_index : component_index + 1],
-                        shape_loss_valid[..., component_index : component_index + 1],
+                        weighted_shape_loss_valid[..., component_index : component_index + 1],
                         shape_lower_bounds[component_index : component_index + 1],
                         shape_upper_bounds[component_index : component_index + 1],
                         huber_delta,
@@ -2133,7 +2138,7 @@ class PPOTeacherKL(PPO):
                 shape_loss_raw = self._compute_normalized_stair_shape_loss(
                     shape_predictions,
                     shape_loss_labels,
-                    shape_loss_valid,
+                    weighted_shape_loss_valid,
                     shape_lower_bounds,
                     shape_upper_bounds,
                     huber_delta,
@@ -2200,6 +2205,8 @@ class PPOTeacherKL(PPO):
             logs["slow_latent_shape_huber"] = normalized_shape_huber
             logs["slow_latent_shape_normalized_huber"] = normalized_shape_huber
             logs["slow_latent_shape_loss"] = self._distributed_mean_scalar(shape_loss).item()
+            logs["slow_latent_stair_shape_same_foot_loss_coef"] = float(shape_component_weights[0].item())
+            logs["slow_latent_stair_shape_riser_loss_coef"] = float(shape_component_weights[1].item())
             if same_foot_hint_coef != 0.0:
                 logs["slow_latent_same_foot_stride_deployable_hint_loss_coef"] = same_foot_hint_coef
                 logs["slow_latent_same_foot_stride_deployable_hint_huber"] = self._distributed_mean_scalar(

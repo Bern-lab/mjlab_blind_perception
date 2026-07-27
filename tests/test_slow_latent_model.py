@@ -282,19 +282,21 @@ def test_shadow_semantic_actor_stride_target_uses_ratchet_hint() -> None:
     structured_safe_stride_enabled=True,
     shadow_semantic_enabled=True,
   )
-  batch = 2
+  batch = 4
   event_prob = torch.zeros(batch, 1)
   stair_prob = torch.zeros(batch, 1)
   gate = torch.zeros(batch, 5)
-  stair_shape = torch.tensor([[0.20, 0.12], [0.70, 0.12]])
+  stair_shape = torch.tensor(
+    [[0.50, 0.12], [0.70, 0.12], [0.70, 0.12], [0.70, 0.12]]
+  )
   safe_stride_interval = torch.full((batch, 2), 0.20)
   safe_stride_confidence = torch.zeros(batch, 1)
   latent_obs = torch.zeros(batch, 80)
   latent_obs[:, 70] = 1.0
-  latent_obs[:, 72] = torch.tensor([0.45, 0.60])
-  latent_obs[:, 75] = 0.30
-  latent_obs[:, 76] = torch.tensor([0.0, 1.0])
-  latent_obs[:, 77] = torch.tensor([0.0, 0.50])
+  latent_obs[:, 72] = torch.tensor([0.45, 0.45, 0.60, 0.36])
+  latent_obs[:, 75] = torch.tensor([0.30, 0.30, 0.30, 0.50])
+  latent_obs[:, 76] = torch.tensor([0.0, 0.0, 1.0, 0.0])
+  latent_obs[:, 77] = torch.tensor([0.0, 0.0, 0.50, 0.38])
 
   semantic = model._build_shadow_semantic(
     event_prob,
@@ -309,8 +311,10 @@ def test_shadow_semantic_actor_stride_target_uses_ratchet_hint() -> None:
   stride_range = model.same_foot_stride_max - model.same_foot_stride_min
   expected = torch.tensor(
     [
-      (0.45 - model.same_foot_stride_min) / stride_range,
+      (0.50 - model.same_foot_stride_min) / stride_range,
+      (0.50 - model.same_foot_stride_min) / stride_range,
       (0.40 - model.same_foot_stride_min) / stride_range,
+      (0.36 - model.same_foot_stride_min) / stride_range,
     ]
   )
   torch.testing.assert_close(semantic[:, 14], expected)

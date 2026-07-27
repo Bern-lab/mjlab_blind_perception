@@ -721,6 +721,7 @@ def _configure_latent_observations(
         "ratchet_flat_height_threshold_m": 0.02,
         "ratchet_probe_increment_m": 0.025,
         "ratchet_collision_margin_m": 0.02,
+        "ratchet_collision_min_confidence": 0.45,
         "ratchet_min_interval_width_m": 0.04,
         "ratchet_min_stride_m": params.rewards.toe_stair_min_safe_stride,
         "ratchet_max_stride_m": params.rewards.toe_stair_max_tracking_stride,

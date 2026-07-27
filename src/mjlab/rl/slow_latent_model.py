@@ -86,6 +86,8 @@ class LSTMSlowLatentMLPModel(MLPModel):
     aux_stair_shape_coef: float = 0.0,
     aux_safe_stride_coef: float = 0.0,
     stair_shape_huber_delta: float = 0.05,
+    stair_shape_same_foot_loss_coef: float = 1.0,
+    stair_shape_riser_loss_coef: float = 1.0,
     safe_stride_huber_delta: float = 0.05,
     safe_stride_width_loss_coef: float = 1.0,
     safe_stride_lower_shortfall_coef: float = 1.0,
@@ -331,6 +333,8 @@ class LSTMSlowLatentMLPModel(MLPModel):
     self.aux_stair_shape_coef = float(aux_stair_shape_coef)
     self.aux_safe_stride_coef = float(aux_safe_stride_coef)
     self.stair_shape_huber_delta = float(stair_shape_huber_delta)
+    self.stair_shape_same_foot_loss_coef = float(stair_shape_same_foot_loss_coef)
+    self.stair_shape_riser_loss_coef = float(stair_shape_riser_loss_coef)
     self.safe_stride_huber_delta = float(safe_stride_huber_delta)
     self.safe_stride_width_loss_coef = float(safe_stride_width_loss_coef)
     self.safe_stride_lower_shortfall_coef = float(safe_stride_lower_shortfall_coef)
@@ -354,6 +358,10 @@ class LSTMSlowLatentMLPModel(MLPModel):
     self.same_foot_stride_deployable_hint_margin = float(
       same_foot_stride_deployable_hint_margin
     )
+    if self.stair_shape_same_foot_loss_coef < 0.0:
+      raise ValueError("stair_shape_same_foot_loss_coef must be non-negative.")
+    if self.stair_shape_riser_loss_coef < 0.0:
+      raise ValueError("stair_shape_riser_loss_coef must be non-negative.")
     if self.safe_stride_width_loss_coef < 0.0:
       raise ValueError("safe_stride_width_loss_coef must be non-negative.")
     if self.safe_stride_lower_shortfall_coef < 1.0:
@@ -651,14 +659,22 @@ class LSTMSlowLatentMLPModel(MLPModel):
       self.same_foot_stride_min,
       self.same_foot_stride_max,
     )
-    upper = ratchet[..., 7:8].clamp(
+    upper_raw = ratchet[..., 7:8]
+    upper = upper_raw.clamp(
       self.same_foot_stride_min,
       self.same_foot_stride_max,
     )
     confirmed = ratchet[..., 6:7] > 0.5
-    open_target = torch.maximum(probe, lower)
+    soft_cap = active & ~confirmed & (upper_raw > 0.0)
+    open_base = torch.maximum(probe, lower)
+    open_target = torch.maximum(open_base, torch.minimum(target, open_base + 0.05))
     closed_target = 0.5 * (lower + torch.maximum(upper, lower))
-    ratchet_target = torch.where(confirmed, closed_target, open_target)
+    soft_target = torch.minimum(probe, upper)
+    ratchet_target = torch.where(
+      confirmed,
+      closed_target,
+      torch.where(soft_cap, soft_target, open_target),
+    )
     return torch.where(active, ratchet_target, target)
 
   def _build_shadow_semantic(
@@ -1888,15 +1904,25 @@ class _OnnxStairLatentModel(nn.Module):
       self.same_foot_stride_min,
       self.same_foot_stride_max,
     )
-    upper = ratchet[..., 7:8].clamp(
+    upper_raw = ratchet[..., 7:8]
+    upper = upper_raw.clamp(
       self.same_foot_stride_min,
       self.same_foot_stride_max,
     )
     confirmed = ratchet[..., 6:7] > 0.5
-    open_target = torch.maximum(probe, lower)
+    soft_cap = active & ~confirmed & (upper_raw > 0.0)
+    open_base = torch.maximum(probe, lower)
+    open_target = torch.maximum(open_base, torch.minimum(target, open_base + 0.05))
     closed_target = 0.5 * (lower + torch.maximum(upper, lower))
+    soft_target = torch.minimum(probe, upper)
     return torch.where(
-      active, torch.where(confirmed, closed_target, open_target), target
+      active,
+      torch.where(
+        confirmed,
+        closed_target,
+        torch.where(soft_cap, soft_target, open_target),
+      ),
+      target,
     )
 
   def _build_actor_semantic(

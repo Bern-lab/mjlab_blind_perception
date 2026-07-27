@@ -102,6 +102,10 @@ class G1SlowLatentPolicyModelParams:
   """Lightweight SafeStride trend loss; precise control comes from shape/ratchet."""
   stair_shape_huber_delta: float = 0.05
   """Huber transition point for shape prediction normalized to [0, 1]."""
+  stair_shape_same_foot_loss_coef: float = 2.0
+  """Give the actionable next same-foot stride more capacity than riser height."""
+  stair_shape_riser_loss_coef: float = 0.5
+  """Keep height supervised, but stop the easy riser head from dominating shape loss."""
   safe_stride_huber_delta: float = 0.05
   """Huber transition point for safe-stride prediction, in meters."""
   safe_stride_width_loss_coef: float = 1.0
@@ -124,7 +128,7 @@ class G1SlowLatentPolicyModelParams:
   """Disabled by default; ratchet hints train same-foot stride instead."""
   safe_stride_deployable_hint_margin: float = 0.02
   """Slack, in meters, before foot-event lower-bound hints are penalized."""
-  same_foot_stride_deployable_hint_loss_coef: float = 0.35
+  same_foot_stride_deployable_hint_loss_coef: float = 0.60
   """Weight for ratchet-guided same-foot stride hints inside shape loss."""
   same_foot_stride_deployable_hint_margin: float = 0.02
   """Slack, in meters, before open same-foot stride hints are penalized."""
@@ -244,6 +248,8 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
   aux_stair_shape_coef: float = 0.05,
   aux_safe_stride_coef: float = 0.04,
   stair_shape_huber_delta: float = 0.05,
+  stair_shape_same_foot_loss_coef: float = 2.0,
+  stair_shape_riser_loss_coef: float = 0.5,
   safe_stride_huber_delta: float = 0.05,
   safe_stride_width_loss_coef: float = 1.0,
   safe_stride_lower_shortfall_coef: float = 1.2,
@@ -255,7 +261,7 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
   safe_stride_std_floor_ratio: float = 0.70,
   safe_stride_deployable_hint_loss_coef: float = 0.0,
   safe_stride_deployable_hint_margin: float = 0.02,
-  same_foot_stride_deployable_hint_loss_coef: float = 0.35,
+  same_foot_stride_deployable_hint_loss_coef: float = 0.60,
   same_foot_stride_deployable_hint_margin: float = 0.02,
   safe_stride_min: float = 0.10,
   safe_stride_max: float = 0.55,
@@ -312,6 +318,8 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
     aux_stair_shape_coef=aux_stair_shape_coef,
     aux_safe_stride_coef=aux_safe_stride_coef,
     stair_shape_huber_delta=stair_shape_huber_delta,
+    stair_shape_same_foot_loss_coef=stair_shape_same_foot_loss_coef,
+    stair_shape_riser_loss_coef=stair_shape_riser_loss_coef,
     safe_stride_huber_delta=safe_stride_huber_delta,
     safe_stride_width_loss_coef=safe_stride_width_loss_coef,
     safe_stride_lower_shortfall_coef=safe_stride_lower_shortfall_coef,
@@ -513,6 +521,8 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
   aux_stair_shape_coef: float = 0.05,
   aux_safe_stride_coef: float = 0.04,
   stair_shape_huber_delta: float = 0.05,
+  stair_shape_same_foot_loss_coef: float = 2.0,
+  stair_shape_riser_loss_coef: float = 0.5,
   safe_stride_huber_delta: float = 0.05,
   safe_stride_width_loss_coef: float = 1.0,
   safe_stride_lower_shortfall_coef: float = 1.2,
@@ -524,7 +534,7 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
   safe_stride_std_floor_ratio: float = 0.70,
   safe_stride_deployable_hint_loss_coef: float = 0.0,
   safe_stride_deployable_hint_margin: float = 0.02,
-  same_foot_stride_deployable_hint_loss_coef: float = 0.35,
+  same_foot_stride_deployable_hint_loss_coef: float = 0.60,
   same_foot_stride_deployable_hint_margin: float = 0.02,
   safe_stride_min: float = 0.10,
   safe_stride_max: float = 0.55,
@@ -596,6 +606,8 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
     aux_stair_shape_coef = model_params.aux_stair_shape_coef
     aux_safe_stride_coef = model_params.aux_safe_stride_coef
     stair_shape_huber_delta = model_params.stair_shape_huber_delta
+    stair_shape_same_foot_loss_coef = model_params.stair_shape_same_foot_loss_coef
+    stair_shape_riser_loss_coef = model_params.stair_shape_riser_loss_coef
     safe_stride_huber_delta = model_params.safe_stride_huber_delta
     safe_stride_width_loss_coef = model_params.safe_stride_width_loss_coef
     safe_stride_lower_shortfall_coef = model_params.safe_stride_lower_shortfall_coef
@@ -674,6 +686,8 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
     aux_stair_shape_coef=aux_stair_shape_coef,
     aux_safe_stride_coef=aux_safe_stride_coef,
     stair_shape_huber_delta=stair_shape_huber_delta,
+    stair_shape_same_foot_loss_coef=stair_shape_same_foot_loss_coef,
+    stair_shape_riser_loss_coef=stair_shape_riser_loss_coef,
     safe_stride_huber_delta=safe_stride_huber_delta,
     safe_stride_width_loss_coef=safe_stride_width_loss_coef,
     safe_stride_lower_shortfall_coef=safe_stride_lower_shortfall_coef,
