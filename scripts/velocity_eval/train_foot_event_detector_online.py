@@ -33,8 +33,10 @@ from scripts.velocity_eval.export_stair_probe_dataset import (
   _tensor_extra,
 )
 from scripts.velocity_eval.policy_io import (
+  get_clip_actions,
   load_inference_policy,
   resolve_checkpoint_path,
+  resolve_inference_agent_cfg,
 )
 from scripts.velocity_eval.train_foot_event_detector import (
   FootEventDetectorGRU,
@@ -91,6 +93,7 @@ class OnlineFootEventDetectorConfig:
   init_detector_checkpoint: str | None = None
   toe_only_finetune: bool = False
   toe_riser_only_model: bool = False
+  footprint_only_model: bool = False
   frame_hidden_dim: int = 128
   recurrent_hidden_dim: int = 64
   head_hidden_dim: int = 32
@@ -848,6 +851,35 @@ def _configure_toe_riser_only_model(
     )
 
 
+def _configure_footprint_only_model(
+  model: FootEventDetectorGRU,
+  *,
+  dummy_logit: float = -20.0,
+) -> None:
+  """Train contact/touchdown outputs while forcing toe-riser logits off."""
+  for parameter in model.parameters():
+    parameter.requires_grad_(True)
+
+  output_layer = _detector_output_layer(model)
+  with torch.no_grad():
+    output_layer.weight[4:6].zero_()
+    if output_layer.bias is not None:
+      output_layer.bias[4:6].fill_(float(dummy_logit))
+
+  weight_mask = torch.ones_like(output_layer.weight)
+  weight_mask[4:6] = 0.0
+  output_layer.weight.register_hook(
+    lambda grad: grad * weight_mask.to(device=grad.device, dtype=grad.dtype)
+  )
+
+  if output_layer.bias is not None:
+    bias_mask = torch.ones_like(output_layer.bias)
+    bias_mask[4:6] = 0.0
+    output_layer.bias.register_hook(
+      lambda grad: grad * bias_mask.to(device=grad.device, dtype=grad.dtype)
+    )
+
+
 def _load_detector_checkpoint(
   model: FootEventDetectorGRU,
   checkpoint_path: str | Path,
@@ -1402,6 +1434,7 @@ def _deployment_event_metrics(
     / max(float(touchdown_recall_precision_floor), 1.0e-6),
     1.0,
   )
+  touchdown_only_precision_guard = 0.55 * touchdown_guard + 0.45 * stair_guard
   toe_guard = min(
     metrics["toe_riser_high_recall_macro_precision"]
     / max(float(toe_hit_recall_precision_floor), 1.0e-6),
@@ -1412,6 +1445,14 @@ def _deployment_event_metrics(
   )
   metrics["toe_riser_high_recall_score"] = float(
     metrics["toe_riser_high_recall_macro_recall"] * toe_guard
+  )
+  metrics["touchdown_high_recall_score"] = float(
+    stair_count_factor
+    * (
+      0.45 * metrics["touchdown_high_recall_macro_recall"]
+      + 0.35 * metrics["touchdown_stair_high_recall_macro_recall"]
+      + 0.20 * touchdown_only_precision_guard
+    )
   )
   metrics["high_recall_footprint_score"] = float(
     stair_count_factor
@@ -1487,6 +1528,10 @@ def _deployment_event_metrics(
   metrics["touchdown_timing_guard"] = float(timing_guard)
   if footprint_anchor_w is not None:
     metrics["touchdown_footprint_xy_guard"] = float(footprint_xy_guard)
+  metrics["touchdown_timing_guarded_score"] = float(
+    metrics["touchdown_high_recall_score"]
+    * (0.70 * timing_guard + 0.30 * footprint_xy_guard)
+  )
   metrics["timing_guarded_footprint_score"] = float(
     metrics["high_recall_footprint_score"]
     * (0.70 * timing_guard + 0.30 * footprint_xy_guard)
@@ -1511,6 +1556,7 @@ def _evaluate_online(
   touchdown_recall_precision_floor: float,
   toe_hit_recall_precision_floor: float,
   selection_min_stair_touchdown_events: int,
+  train_label_indices: tuple[int, ...] | None = None,
 ) -> dict[str, float]:
   snapshot = buffer.snapshot()
   labels = snapshot["labels"].astype(np.float32)
@@ -1527,16 +1573,23 @@ def _evaluate_online(
         device=device,
       )
       label = torch.as_tensor(labels[start:end], dtype=torch.float32, device=device)
-      logits = model(obs)
+      full_logits = model(obs)
+      logits = full_logits
+      loss_pos_weight = pos_weight
+      if train_label_indices is not None:
+        label_indices = list(train_label_indices)
+        logits = full_logits[:, label_indices]
+        label = label[:, label_indices]
+        loss_pos_weight = pos_weight[label_indices]
       loss = F.binary_cross_entropy_with_logits(
         logits,
         label,
-        pos_weight=pos_weight,
+        pos_weight=loss_pos_weight,
       )
       count = int(end - start)
       total_loss += float(loss.item()) * count
       total_count += count
-      probabilities.append(torch.sigmoid(logits).cpu().numpy().astype(np.float32))
+      probabilities.append(torch.sigmoid(full_logits).cpu().numpy().astype(np.float32))
   probability_array = np.concatenate(probabilities, axis=0)
   val_loss = total_loss / max(float(total_count), 1.0)
   metrics = compute_metrics(
@@ -1938,9 +1991,15 @@ def run_online_train(
     raise ValueError("early_stop_patience_evals must be non-negative.")
   if cfg.early_stop_min_delta < 0.0:
     raise ValueError("early_stop_min_delta must be non-negative.")
-  if cfg.toe_only_finetune and cfg.toe_riser_only_model:
+  exclusive_output_modes = (
+    cfg.toe_only_finetune,
+    cfg.toe_riser_only_model,
+    cfg.footprint_only_model,
+  )
+  if sum(bool(value) for value in exclusive_output_modes) > 1:
     raise ValueError(
-      "toe_only_finetune and toe_riser_only_model are mutually exclusive."
+      "toe_only_finetune, toe_riser_only_model, and footprint_only_model are "
+      "mutually exclusive."
     )
   if cfg.toe_only_finetune and cfg.init_detector_checkpoint is None:
     raise ValueError("toe_only_finetune requires init_detector_checkpoint.")
@@ -2035,8 +2094,12 @@ def run_online_train(
     wandb_run_path=cfg.wandb_run_path,
     wandb_checkpoint_name=cfg.wandb_checkpoint_name,
   )
+  agent_cfg = resolve_inference_agent_cfg(
+    checkpoint_path=checkpoint_path,
+    agent_cfg=agent_cfg,
+  )
   raw_env = ManagerBasedRlEnv(cfg=env_cfg, device=str(device), render_mode=None)
-  wrapped = RslRlVecEnvWrapper(raw_env, clip_actions=agent_cfg.clip_actions)
+  wrapped = RslRlVecEnvWrapper(raw_env, clip_actions=get_clip_actions(agent_cfg))
   history_buffer = StairProbeHistoryBuffer(
     num_envs=cfg.num_envs,
     history_len=cfg.history_len,
@@ -2087,13 +2150,18 @@ def run_online_train(
   if cfg.toe_riser_only_model:
     _configure_toe_riser_only_model(model)
     train_label_indices = (4, 5)
+  if cfg.footprint_only_model:
+    _configure_footprint_only_model(model)
+    train_label_indices = (0, 1, 2, 3)
   trainable_parameters = [
     parameter for parameter in model.parameters() if parameter.requires_grad
   ]
   if not trainable_parameters:
     raise RuntimeError("No trainable detector parameters were configured.")
   optimizer_weight_decay = (
-    0.0 if (cfg.toe_only_finetune or cfg.toe_riser_only_model) else cfg.weight_decay
+    0.0
+    if (cfg.toe_only_finetune or cfg.toe_riser_only_model or cfg.footprint_only_model)
+    else cfg.weight_decay
   )
   optimizer = torch.optim.AdamW(
     trainable_parameters,
@@ -2162,6 +2230,7 @@ def run_online_train(
     f"input_schema={cfg.input_schema}",
     f"include_gait_phase={cfg.include_gait_phase}",
     f"obs_dim={obs_dim}",
+    f"footprint_only_model={cfg.footprint_only_model}",
     f"toe_pos_fraction={cfg.toe_positive_fraction}",
     f"toe_soft_fraction={cfg.toe_soft_positive_fraction}",
     f"touchdown_pos_fraction={cfg.touchdown_positive_fraction}",
@@ -2370,6 +2439,7 @@ def run_online_train(
           selection_min_stair_touchdown_events=(
             cfg.selection_min_stair_touchdown_events
           ),
+          train_label_indices=train_label_indices,
         )
         if selection_metric not in val_metrics:
           available = ", ".join(sorted(val_metrics))
@@ -2483,11 +2553,13 @@ def run_online_train(
           f"footprint_score={val_metrics['footprint_deploy_score']:.4f}",
           f"high_recall_score={val_metrics['high_recall_footprint_score']:.4f}",
           f"timing_guarded_score={val_metrics['timing_guarded_footprint_score']:.4f}",
+          f"td_timing_score={val_metrics['touchdown_timing_guarded_score']:.4f}",
           f"td_dt_p90={val_metrics['touchdown_timing_abs_dt_frames_p90']:.1f}",
           f"td_xy_p90={val_metrics.get('touchdown_footprint_xy_error_m_p90', 0.0):.3f}",
           f"toe_guarded_score={val_metrics['toe_guarded_footprint_score']:.4f}",
           f"td_deploy_f1={val_metrics['touchdown_deploy_macro_f1']:.4f}",
           f"td_high_recall={val_metrics['touchdown_high_recall_macro_recall']:.4f}",
+          f"td_stair_events={val_metrics['touchdown_stair_deploy_true_event_count']:.0f}",
           "td_stair_high_recall="
           f"{val_metrics['touchdown_stair_high_recall_macro_recall']:.4f}",
           f"td_fallback_recall={val_metrics['touchdown_contact_fallback_macro_recall']:.4f}",
@@ -2599,6 +2671,7 @@ def run_online_train(
       "history_len": cfg.history_len,
       "output_dim": len(FOOT_EVENT_LABEL_NAMES),
       "toe_riser_only_output_layout": bool(cfg.toe_riser_only_model),
+      "footprint_only_output_layout": bool(cfg.footprint_only_model),
       "frame_hidden_dim": cfg.frame_hidden_dim,
       "recurrent_hidden_dim": cfg.recurrent_hidden_dim,
       "head_hidden_dim": cfg.head_hidden_dim,

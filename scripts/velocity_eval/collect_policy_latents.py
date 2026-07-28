@@ -12,9 +12,11 @@ import torch.nn as nn
 import tyro
 from scripts.velocity_eval.eval_terrains import apply_eval_overrides, get_terrain_set
 from scripts.velocity_eval.policy_io import (
+  get_clip_actions,
   load_inference_policy,
   make_timestamped_policy_output_dir,
   resolve_checkpoint_path,
+  resolve_inference_agent_cfg,
 )
 
 from mjlab.envs import ManagerBasedRlEnv
@@ -145,7 +147,7 @@ def _collect_for_terrain(
   )
 
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
-  wrapped = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+  wrapped = RslRlVecEnvWrapper(env, clip_actions=get_clip_actions(agent_cfg))
 
   try:
     policy, _runner = load_inference_policy(
@@ -226,6 +228,10 @@ def run_collect_latents(
     checkpoint_file=cfg.checkpoint_file,
     wandb_run_path=cfg.wandb_run_path,
     wandb_checkpoint_name=cfg.wandb_checkpoint_name,
+  )
+  agent_cfg = resolve_inference_agent_cfg(
+    checkpoint_path=checkpoint_path,
+    agent_cfg=agent_cfg,
   )
   output_path = _resolve_output_path(
     cfg=cfg,

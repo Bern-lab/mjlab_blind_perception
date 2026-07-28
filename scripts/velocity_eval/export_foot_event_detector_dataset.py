@@ -21,14 +21,16 @@ from scripts.velocity_eval.export_stair_probe_dataset import (
   TOE_RISER_NEW_HIT_KEY,
   StairProbeHistoryBuffer,
   _close_sequence_logger,
-  _latent_obs,
   _tensor_extra,
   input_feature_slices,
   input_obs_dim,
+  stage2a_base_latent_obs,
 )
 from scripts.velocity_eval.policy_io import (
+  get_clip_actions,
   load_inference_policy,
   resolve_checkpoint_path,
+  resolve_inference_agent_cfg,
 )
 from tqdm.auto import tqdm
 
@@ -351,7 +353,7 @@ def foot_event_detector_obs(
 ) -> torch.Tensor:
   """Return deployable detector input features for the current frame."""
   schema = _validate_input_schema(input_schema)
-  latent = _latent_obs(obs)
+  latent = stage2a_base_latent_obs(obs)
   parts = [latent]
   if include_gait_phase:
     parts.append(phase(env, gait_period, command_name))
@@ -607,6 +609,10 @@ def run_export(task_id: str, cfg: ExportFootEventDetectorDatasetConfig) -> Path:
     wandb_run_path=cfg.wandb_run_path,
     wandb_checkpoint_name=cfg.wandb_checkpoint_name,
   )
+  agent_cfg = resolve_inference_agent_cfg(
+    checkpoint_path=checkpoint_path,
+    agent_cfg=agent_cfg,
+  )
   print(
     "[Stage 2D] Export detector dataset:",
     f"task={task_id}",
@@ -622,7 +628,7 @@ def run_export(task_id: str, cfg: ExportFootEventDetectorDatasetConfig) -> Path:
   )
 
   raw_env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=None)
-  wrapped = RslRlVecEnvWrapper(raw_env, clip_actions=agent_cfg.clip_actions)
+  wrapped = RslRlVecEnvWrapper(raw_env, clip_actions=get_clip_actions(agent_cfg))
   builder = FootEventDetectorDatasetBuilder(
     num_envs=cfg.num_envs,
     history_len=cfg.history_len,

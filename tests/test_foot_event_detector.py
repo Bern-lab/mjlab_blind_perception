@@ -33,6 +33,7 @@ from scripts.velocity_eval.train_foot_event_detector import (
 from scripts.velocity_eval.train_foot_event_detector_online import (
   OnlineFootEventReplayBuffer,
   _baseline_guard_passed,
+  _configure_footprint_only_model,
   _configure_toe_only_finetune,
   _configure_toe_riser_only_model,
   _deployment_event_metrics,
@@ -285,6 +286,7 @@ def test_footprint_v2_obs_computes_reset_safe_heel_and_action_features() -> None
     num_envs=num_envs,
     device=device,
     step_dt=0.02,
+    episode_length_buf=torch.arange(num_envs),
     extras={},
     scene={"robot": robot},
     action_manager=SimpleNamespace(
@@ -328,6 +330,24 @@ def test_footprint_v2_obs_computes_reset_safe_heel_and_action_features() -> None
     first[:, action_delta_start],
     torch.full((num_envs,), 0.15),
   )
+
+  slow_latent = torch.cat(
+    (latent, torch.full((num_envs, 82), 7.0, dtype=torch.float32)),
+    dim=-1,
+  )
+  slow_latent_obs = foot_event_detector_obs(
+    {"latent": slow_latent},
+    cast(Any, env),
+    input_schema="footprint_v2",
+    include_gait_phase=True,
+    gait_period=0.6,
+    command_name="twist",
+    reset_mask=torch.ones(num_envs, dtype=torch.bool),
+  )
+  assert slow_latent_obs.shape == (num_envs, 133)
+  torch.testing.assert_close(slow_latent_obs[:, :91], latent)
+  assert slow_latent_obs[:, 91:93].abs().max().item() <= 1.0
+  assert slow_latent_obs[:, 93:].abs().max().item() < 7.0
 
 
 def test_torch_dataset_uses_last_history_frames() -> None:
@@ -1016,6 +1036,44 @@ def test_toe_riser_only_model_keeps_standard_output_layout() -> None:
   assert not torch.allclose(output_layer.weight[4:6], before_toe_weight)
 
 
+def test_footprint_only_model_forces_toe_outputs_off() -> None:
+  model = FootEventDetectorGRU(
+    obs_dim=3,
+    frame_hidden_dim=8,
+    recurrent_hidden_dim=8,
+    head_hidden_dim=6,
+  )
+  _configure_footprint_only_model(model, dummy_logit=-20.0)
+  output_layer = model.head[-1]
+  assert isinstance(output_layer, torch.nn.Linear)
+  assert output_layer.bias is not None
+  before_toe_weight = output_layer.weight[4:6].detach().clone()
+  before_toe_bias = output_layer.bias[4:6].detach().clone()
+  before_footprint_weight = output_layer.weight[:4].detach().clone()
+  optimizer = torch.optim.AdamW(
+    [parameter for parameter in model.parameters() if parameter.requires_grad],
+    lr=0.1,
+    weight_decay=0.0,
+  )
+
+  obs = torch.randn(5, 4, 3)
+  logits = model(obs)
+  assert logits.shape == (5, len(FOOT_EVENT_LABEL_NAMES))
+  assert torch.allclose(logits[:, 4:6], torch.full_like(logits[:, 4:6], -20.0))
+  loss = logits[:, :4].sum()
+  optimizer.zero_grad(set_to_none=True)
+  loss.backward()
+  optimizer.step()
+
+  logits_after = model(torch.randn(5, 4, 3))
+  assert torch.allclose(
+    logits_after[:, 4:6], torch.full_like(logits_after[:, 4:6], -20.0)
+  )
+  assert torch.allclose(output_layer.weight[4:6], before_toe_weight)
+  assert torch.allclose(output_layer.bias[4:6], before_toe_bias)
+  assert not torch.allclose(output_layer.weight[:4], before_footprint_weight)
+
+
 def test_baseline_guard_requires_toe_gain_without_touchdown_regression() -> None:
   baseline = {
     "touchdown_high_recall_macro_recall": 0.84,
@@ -1062,6 +1120,7 @@ def test_score_metric_is_higher_better() -> None:
   assert metric_is_higher_better("footprint_deploy_score")
   assert metric_is_higher_better("high_recall_footprint_score")
   assert metric_is_higher_better("toe_guarded_footprint_score")
+  assert metric_is_higher_better("touchdown_timing_guarded_score")
   assert metric_is_higher_better("toe_riser_high_recall_score")
   assert metric_is_higher_better("touchdown_high_recall_macro_recall")
   assert not metric_is_higher_better("val_loss")
@@ -1110,12 +1169,14 @@ def test_online_deployment_metrics_include_high_recall_score() -> None:
 
   assert metrics["high_recall_footprint_score"] > 0.0
   assert metrics["toe_guarded_footprint_score"] > 0.0
+  assert metrics["touchdown_high_recall_score"] > 0.0
   assert metrics["toe_riser_high_recall_score"] == 1.0
   assert metrics["touchdown_stair_high_recall_macro_recall"] == 1.0
   assert metrics["toe_riser_high_recall_macro_recall"] == 1.0
   assert metrics["high_recall_precision_guard"] == 1.0
   assert metrics["touchdown_timing_abs_dt_frames_p90"] == 0.0
   assert metrics["touchdown_footprint_xy_error_m_p90"] == 0.0
+  assert metrics["touchdown_timing_guarded_score"] > 0.0
   assert metrics["timing_guarded_footprint_score"] > 0.0
 
 

@@ -23,10 +23,12 @@ from scripts.velocity_eval.eval_terrains import (
   get_terrain_set,
 )
 from scripts.velocity_eval.policy_io import (
+  get_clip_actions,
   get_policy_output_name,
   load_inference_policy,
   make_timestamped_policy_output_dir,
   resolve_checkpoint_path,
+  resolve_inference_agent_cfg,
 )
 
 from mjlab.envs import ManagerBasedRlEnv
@@ -166,7 +168,7 @@ def _run_batch(
   )
 
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
-  wrapped = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+  wrapped = RslRlVecEnvWrapper(env, clip_actions=get_clip_actions(agent_cfg))
 
   try:
     policy, _runner = load_inference_policy(
@@ -536,6 +538,10 @@ def run_eval_policy(task_id: str, cfg: EvalPolicyConfig) -> dict:
     wandb_run_path=cfg.wandb_run_path,
     wandb_checkpoint_name=cfg.wandb_checkpoint_name,
   )
+  agent_cfg = resolve_inference_agent_cfg(
+    checkpoint_path=checkpoint_path,
+    agent_cfg=agent_cfg,
+  )
   output_path = _resolve_output_path(
     cfg=cfg,
     task_id=task_id,
@@ -548,6 +554,7 @@ def run_eval_policy(task_id: str, cfg: EvalPolicyConfig) -> dict:
     checkpoint_path=checkpoint_path,
   )
 
+  terrain_summaries: list[dict] = []
   payload = {
     "task_id": task_id,
     "policy_output_name": policy_output_name,
@@ -570,7 +577,7 @@ def run_eval_policy(task_id: str, cfg: EvalPolicyConfig) -> dict:
       ),
     },
     "seed": cfg.seed,
-    "terrains": [],
+    "terrains": terrain_summaries,
   }
 
   batch_capacity = max(1, cfg.num_envs)
@@ -596,7 +603,7 @@ def run_eval_policy(task_id: str, cfg: EvalPolicyConfig) -> dict:
       remaining -= batch_size
       batch_index += 1
     summary = _summarize_batches(terrain, batches)
-    payload["terrains"].append(summary)
+    terrain_summaries.append(summary)
     print(
       "[INFO] "
       f"{terrain.name}: success={summary['success_rate']:.3f}, "

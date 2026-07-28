@@ -26,6 +26,7 @@ from scripts.velocity_eval.export_stair_probe_dataset import (
   privileged_footprint_features_from_tensors,
   privileged_footprint_obs_dim,
   sparse_foot_event_obs_dim,
+  stage2a_base_latent_obs,
 )
 
 
@@ -207,6 +208,17 @@ def test_export_schema_is_91_dim_and_has_no_forbidden_input_features(tmp_path) -
   loaded = np.load(path)
 
   assert loaded["obs_history"].shape[-1] == 91
+
+
+def test_stage2a_base_latent_obs_ignores_slow_latent_memory_feedback() -> None:
+  obs_dim = input_obs_dim()
+  base = torch.arange(obs_dim, dtype=torch.float32).reshape(1, obs_dim)
+  gait_and_memory = torch.full((1, 82), 7.0, dtype=torch.float32)
+
+  latent = stage2a_base_latent_obs({"latent": torch.cat((base, gait_and_memory), -1)})
+
+  assert latent.shape == (1, obs_dim)
+  torch.testing.assert_close(latent, base)
 
 
 def test_privileged_footprint_features_encode_partial_adjacent_support() -> None:

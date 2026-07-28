@@ -16,17 +16,22 @@ import torch
 import tyro
 from scripts.velocity_eval.eval_metrics import (
   EVENT_COUNT_NAMES,
+  LANDING_COUNT_NAMES,
+  LANDING_SUM_NAMES,
   LEVEL_EVENT_NAMES,
   MEAN_METRIC_NAMES,
   StairEventDetector,
+  StairLandingDetector,
   compute_velocity_metrics,
 )
 from scripts.velocity_eval.eval_terrains import EvalTerrainSpec, apply_eval_overrides
 from scripts.velocity_eval.policy_io import (
+  get_clip_actions,
   get_policy_output_name,
   load_inference_policy,
   make_timestamped_policy_output_dir,
   resolve_checkpoint_path,
+  resolve_inference_agent_cfg,
 )
 from tensordict import TensorDict
 
@@ -91,6 +96,13 @@ class GoalPyramidEvalConfig:
   yaw_rate_limit: float = 1.0
   heading_failure_angle_deg: float = 45.0
   heading_failure_grace_s: float = 0.25
+
+  toe_collision_free_count: float = 2.0
+  toe_collision_zero_score_count: float = 10.0
+  safe_pass_min_full_landing_ratio: float = 0.75
+  safe_pass_min_support_fraction: float = 0.80
+  safe_pass_max_low_support_ratio: float = 0.20
+  safe_pass_max_toe_riser_collision_count: float = 10.0
 
 
 @dataclass
@@ -399,7 +411,12 @@ def _empty_batch_tensors(
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
   metric_sums = {
     name: torch.zeros(num_envs, device=device)
-    for name in (*MEAN_METRIC_NAMES, *EVENT_COUNT_NAMES)
+    for name in (
+      *MEAN_METRIC_NAMES,
+      *EVENT_COUNT_NAMES,
+      *LANDING_COUNT_NAMES,
+      *LANDING_SUM_NAMES,
+    )
   }
   level_sums = {
     name: torch.zeros(num_envs, max_levels, device=device) for name in LEVEL_EVENT_NAMES
@@ -433,7 +450,7 @@ def _run_batch(
   )
 
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
-  wrapped = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+  wrapped = RslRlVecEnvWrapper(env, clip_actions=get_clip_actions(agent_cfg))
 
   try:
     policy, _runner = load_inference_policy(
@@ -444,6 +461,7 @@ def _run_batch(
       device=device,
     )
     detector = StairEventDetector(wrapped.unwrapped)
+    landing_detector = StairLandingDetector(wrapped.unwrapped)
     spawn = _spawn_on_pyramid_apron(
       wrapped.unwrapped,
       cfg,
@@ -462,10 +480,41 @@ def _run_batch(
     heading_failed = torch.zeros(batch_size, dtype=torch.bool, device=device)
     timeout_failed = torch.zeros(batch_size, dtype=torch.bool, device=device)
     max_heading_error = torch.zeros(batch_size, device=device)
+    max_height_progress = torch.zeros(batch_size, device=device)
+    max_goal_progress = torch.zeros(batch_size, device=device)
+    start_distance = torch.full(
+      (batch_size,),
+      _computed_start_distance(cfg),
+      device=device,
+      dtype=torch.float32,
+    )
 
     max_steps = wrapped.unwrapped.max_episode_length + 2
     for _step in range(max_steps):
       active = ~done_envs
+      asset = wrapped.unwrapped.scene["robot"]
+      estimated_support_z = asset.data.root_link_pos_w[:, 2] - spawn.nominal_root_height
+      bottom_z_w = spawn.top_z_w - float(cfg.stair_levels) * cfg.stair_height
+      height_progress = torch.clamp(
+        (estimated_support_z - bottom_z_w)
+        / max(float(cfg.stair_levels) * cfg.stair_height, 1.0e-6),
+        min=0.0,
+        max=1.0,
+      )
+      goal_distance = torch.norm(
+        asset.data.root_link_pos_w[:, :2] - spawn.goal_xy_w, dim=-1
+      )
+      goal_progress = torch.clamp(
+        (start_distance - goal_distance) / start_distance.clamp_min(1.0e-6),
+        min=0.0,
+        max=1.0,
+      )
+      max_height_progress = torch.where(
+        active, torch.maximum(max_height_progress, height_progress), max_height_progress
+      )
+      max_goal_progress = torch.where(
+        active, torch.maximum(max_goal_progress, goal_progress), max_goal_progress
+      )
       reached_now = _goal_reached(wrapped.unwrapped, cfg, spawn) & active
       if bool(reached_now.any().item()):
         success |= reached_now
@@ -481,6 +530,7 @@ def _run_batch(
           detector,
           terrain_height_m=cfg.stair_height,
           max_levels=cfg.stair_levels,
+          landing_detector=landing_detector,
         )
       for name, value in step_metrics.items():
         metric_sums[name] += torch.where(active, value, torch.zeros_like(value))
@@ -537,6 +587,12 @@ def _run_batch(
     event_counts = {
       name: metric_sums[name].detach().cpu().tolist() for name in EVENT_COUNT_NAMES
     }
+    landing_counts = {
+      name: metric_sums[name].detach().cpu().tolist() for name in LANDING_COUNT_NAMES
+    }
+    landing_sums = {
+      name: metric_sums[name].detach().cpu().tolist() for name in LANDING_SUM_NAMES
+    }
     level_counts = {
       name: level_sums[name].detach().cpu().tolist() for name in LEVEL_EVENT_NAMES
     }
@@ -548,9 +604,13 @@ def _run_batch(
       "timeout_failed": timeout_failed.detach().cpu().tolist(),
       "spawn_side": spawn.side_names,
       "max_heading_error_deg": torch.rad2deg(max_heading_error).detach().cpu().tolist(),
+      "max_height_progress_fraction": max_height_progress.detach().cpu().tolist(),
+      "max_goal_progress_fraction": max_goal_progress.detach().cpu().tolist(),
       "episode_length_steps": step_counts.detach().cpu().tolist(),
       "mean_metrics": mean_metrics,
       "event_counts": event_counts,
+      "landing_counts": landing_counts,
+      "landing_sums": landing_sums,
       "level_counts": level_counts,
       "step_dt": wrapped.unwrapped.step_dt,
     }
@@ -705,6 +765,10 @@ def run_goal_pyramid_play(task_id: str, cfg: GoalPyramidEvalConfig) -> None:
     wandb_run_path=cfg.wandb_run_path,
     wandb_checkpoint_name=cfg.wandb_checkpoint_name,
   )
+  agent_cfg = resolve_inference_agent_cfg(
+    checkpoint_path=checkpoint_path,
+    agent_cfg=agent_cfg,
+  )
 
   terrain = _make_goal_terrain(cfg)
   env_cfg = load_env_cfg(task_id, play=True)
@@ -726,7 +790,7 @@ def run_goal_pyramid_play(task_id: str, cfg: GoalPyramidEvalConfig) -> None:
   env_cfg.viewer.max_extra_envs = max(env_cfg.viewer.max_extra_envs, cfg.num_envs - 1)
 
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
-  wrapped = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+  wrapped = RslRlVecEnvWrapper(env, clip_actions=get_clip_actions(agent_cfg))
 
   try:
     policy, _runner = load_inference_policy(
@@ -792,23 +856,149 @@ def _average_values(values: list[float], mask: list[bool] | None = None) -> floa
   return float(sum(values) / len(values))
 
 
+def _ratio(numerator: float, denominator: float) -> float:
+  if denominator <= 0.0:
+    return 0.0
+  return float(numerator / denominator)
+
+
+def _quantile(values: list[float], q: float) -> float:
+  if not values:
+    return 0.0
+  sorted_values = sorted(values)
+  q = max(0.0, min(1.0, q))
+  position = q * (len(sorted_values) - 1)
+  lower = int(math.floor(position))
+  upper = int(math.ceil(position))
+  if lower == upper:
+    return float(sorted_values[lower])
+  weight = position - lower
+  return float(sorted_values[lower] * (1.0 - weight) + sorted_values[upper] * weight)
+
+
+def _collision_score(
+  mean_count: float, free_count: float, zero_score_count: float
+) -> float:
+  if mean_count <= free_count:
+    return 1.0
+  span = max(zero_score_count - free_count, 1.0e-6)
+  return float(max(0.0, min(1.0, 1.0 - (mean_count - free_count) / span)))
+
+
+def _paper_metrics(summary: dict) -> dict:
+  return {
+    "completion_rate": summary["success_rate"],
+    "height_progress_fraction": summary["mean_max_height_progress_fraction"],
+    "mean_success_time_s": summary["mean_success_time_s"],
+    "score_100": summary["score_100"],
+    "score_version": summary["score_version"],
+    "landing_index_100": summary["landing_index_100"],
+    "landing_linear_score_100": summary["landing_linear_score_100"],
+    "stair_safe_pass_rate": summary["stair_safe_pass_rate"],
+    "stair_landing_pass_rate": summary["stair_landing_pass_rate"],
+    "landing_support_fraction": summary["mean_stair_landing_support_fraction"],
+    "full_landing_ratio": summary["stair_full_landing_ratio"],
+    "episode_full_landing_ratio_p10": summary["episode_stair_full_landing_ratio_p10"],
+    "incomplete_landing_ratio": summary["stair_incomplete_landing_ratio"],
+    "partial_support_landing_ratio": summary["stair_partial_support_landing_ratio"],
+    "low_support_landing_ratio": summary["stair_low_support_landing_ratio"],
+    "toe_riser_contacts_per_episode": summary["toe_riser_collision_count"],
+    "toe_riser_contacts_over_free_per_episode": summary[
+      "toe_riser_collision_over_free_count"
+    ],
+  }
+
+
+def _score_policy(summary: dict, cfg: GoalPyramidEvalConfig) -> dict:
+  landing_completeness_ratio = 1.0 - summary["stair_incomplete_landing_ratio"]
+  low_support_safety_ratio = 1.0 - summary["stair_low_support_landing_ratio"]
+  full_landing_ratio = summary["stair_full_landing_ratio"]
+
+  completion_success = 15.0 * summary["success_rate"]
+  completion_progress = 5.0 * summary["mean_max_height_progress_fraction"]
+  landing_support = 15.0 * summary["mean_stair_landing_support_fraction"]
+  landing_full = 45.0 * full_landing_ratio
+  landing_full_consistency = 15.0 * full_landing_ratio * full_landing_ratio
+
+  toe_score = _collision_score(
+    summary["toe_riser_collision_count"],
+    cfg.toe_collision_free_count,
+    cfg.toe_collision_zero_score_count,
+  )
+  collision_toe = 5.0 * toe_score
+  landing_index = (
+    40.0 * summary["mean_stair_landing_support_fraction"]
+    + 40.0 * full_landing_ratio
+    + 15.0 * landing_completeness_ratio
+    + 5.0 * low_support_safety_ratio
+  )
+  landing_linear_score = (
+    20.0 * summary["success_rate"]
+    + 5.0 * summary["mean_max_height_progress_fraction"]
+    + 25.0 * summary["mean_stair_landing_support_fraction"]
+    + 30.0 * full_landing_ratio
+    + 10.0 * landing_completeness_ratio
+    + 5.0 * low_support_safety_ratio
+    + collision_toe
+  )
+  components = {
+    "completion_success": completion_success,
+    "completion_progress": completion_progress,
+    "landing_support": landing_support,
+    "landing_full_support": landing_full,
+    "landing_full_support_consistency": landing_full_consistency,
+    "collision_toe": collision_toe,
+  }
+  return {
+    "score_100": float(sum(components.values())),
+    "score_version": "goal_pyramid_full_support_v3",
+    "landing_index_100": float(landing_index),
+    "landing_linear_score_100": float(landing_linear_score),
+    "components": components,
+    "collision_subscores": {
+      "toe": toe_score,
+    },
+    "formula": {
+      "profile": "stair_full_support_v3",
+      "completion_success": "15 * success_rate",
+      "completion_progress": "5 * mean_max_height_progress_fraction",
+      "landing_support": "15 * mean_stair_landing_support_fraction",
+      "landing_full_support": "45 * stair_full_landing_ratio",
+      "landing_full_support_consistency": "15 * stair_full_landing_ratio^2",
+      "collision_toe": (
+        "5 * linear_score(mean_toe_collisions, "
+        f"free={cfg.toe_collision_free_count}, "
+        f"zero={cfg.toe_collision_zero_score_count})"
+      ),
+      "landing_index_100": (
+        "40 * mean_stair_landing_support_fraction "
+        "+ 40 * stair_full_landing_ratio "
+        "+ 15 * (1 - stair_incomplete_landing_ratio) "
+        "+ 5 * (1 - stair_low_support_landing_ratio)"
+      ),
+      "landing_linear_score_100": (
+        "20 * success_rate "
+        "+ 5 * mean_max_height_progress_fraction "
+        "+ 25 * mean_stair_landing_support_fraction "
+        "+ 30 * stair_full_landing_ratio "
+        "+ 10 * (1 - stair_incomplete_landing_ratio) "
+        "+ 5 * (1 - stair_low_support_landing_ratio) "
+        "+ collision_toe"
+      ),
+    },
+  }
+
+
 def _level_collision_table(summary: dict, cfg: GoalPyramidEvalConfig) -> list[dict]:
   toe = summary["toe_riser_collision_by_level_success_only"]
-  heel = summary["heel_riser_collision_by_level_success_only"]
-  lip = summary["foot_lip_collision_by_level_success_only"]
   rows = []
   for index in range(cfg.stair_levels):
     toe_count = float(toe[index])
-    heel_count = float(heel[index])
-    lip_count = float(lip[index])
     rows.append(
       {
         "level_low_to_high": index + 1,
         "height_m": float((index + 1) * cfg.stair_height),
         "toe_riser_collision_count": toe_count,
-        "heel_riser_collision_count": heel_count,
-        "foot_lip_collision_count": lip_count,
-        "total_riser_collision_count": toe_count + heel_count,
       }
     )
   return rows
@@ -823,6 +1013,12 @@ def _summarize_batches(cfg: GoalPyramidEvalConfig, batches: list[dict]) -> dict:
   lengths = [item for batch in batches for item in batch["episode_length_steps"]]
   heading_errors = [
     item for batch in batches for item in batch["max_heading_error_deg"]
+  ]
+  height_progress = [
+    item for batch in batches for item in batch["max_height_progress_fraction"]
+  ]
+  goal_progress = [
+    item for batch in batches for item in batch["max_goal_progress_fraction"]
   ]
   step_dt = batches[0]["step_dt"] if batches else 0.0
   episodes = max(1, len(success))
@@ -842,6 +1038,8 @@ def _summarize_batches(cfg: GoalPyramidEvalConfig, batches: list[dict]) -> dict:
     "mean_success_time_s": _average_values(
       [length * step_dt for length in lengths], success_mask
     ),
+    "mean_max_height_progress_fraction": _average_values(height_progress),
+    "mean_max_goal_progress_fraction": _average_values(goal_progress),
     "mean_max_heading_error_deg": _average_values(heading_errors),
     "spawn_side_counts": {
       side: int(sum(1 for item in spawn_sides if item == side)) for side in SIDE_NAMES
@@ -856,7 +1054,158 @@ def _summarize_batches(cfg: GoalPyramidEvalConfig, batches: list[dict]) -> dict:
 
   for name in EVENT_COUNT_NAMES:
     values = [v for batch in batches for v in batch["event_counts"][name]]
+    summary[f"{name}_count"] = _average_values(values)
     summary[f"{name}_count_success_only"] = _average_values(values, success_mask)
+
+  toe_counts = [
+    v for batch in batches for v in batch["event_counts"]["toe_riser_collision"]
+  ]
+  heel_counts = [
+    v for batch in batches for v in batch["event_counts"]["heel_riser_collision"]
+  ]
+  toe_count_mean = _average_values(toe_counts)
+  toe_count_success_mean = _average_values(toe_counts, success_mask)
+  riser_counts = [toe + heel for toe, heel in zip(toe_counts, heel_counts, strict=True)]
+  summary["riser_collision_count"] = _average_values(riser_counts)
+  summary["riser_collision_count_success_only"] = _average_values(
+    riser_counts,
+    success_mask,
+  )
+  summary["riser_collision_free_episode_rate"] = _average_values(
+    [float(count <= 0.0) for count in riser_counts]
+  )
+  summary["toe_collision_free_episode_rate"] = _average_values(
+    [float(count <= 0.0) for count in toe_counts]
+  )
+  summary["toe_riser_collision_over_free_count"] = max(
+    0.0,
+    toe_count_mean - cfg.toe_collision_free_count,
+  )
+  summary["toe_riser_collision_over_free_count_success_only"] = max(
+    0.0,
+    toe_count_success_mean - cfg.toe_collision_free_count,
+  )
+
+  landing_counts: dict[str, list[float]] = {}
+  landing_sums: dict[str, list[float]] = {}
+  for name in LANDING_COUNT_NAMES:
+    landing_counts[name] = [
+      v for batch in batches for v in batch["landing_counts"][name]
+    ]
+    summary[f"{name}_mean"] = _average_values(landing_counts[name])
+    summary[f"{name}_mean_success_only"] = _average_values(
+      landing_counts[name], success_mask
+    )
+  for name in LANDING_SUM_NAMES:
+    landing_sums[name] = [v for batch in batches for v in batch["landing_sums"][name]]
+    summary[f"{name}_mean"] = _average_values(landing_sums[name])
+    summary[f"{name}_mean_success_only"] = _average_values(
+      landing_sums[name], success_mask
+    )
+
+  landing_total = float(sum(landing_counts["stair_landing_count"]))
+  full_total = float(sum(landing_counts["stair_full_landing_count"]))
+  incomplete_total = float(sum(landing_counts["stair_incomplete_landing_count"]))
+  partial_total = float(sum(landing_counts["stair_partial_support_landing_count"]))
+  low_support_total = float(sum(landing_counts["stair_low_support_landing_count"]))
+  score_sum = float(sum(landing_sums["stair_landing_score_sum"]))
+  support_sum = float(sum(landing_sums["stair_landing_support_sum"]))
+  incomplete_landing_ratio = (
+    _ratio(incomplete_total, landing_total) if landing_total > 0.0 else 1.0
+  )
+  summary.update(
+    {
+      "stair_landing_count_total": landing_total,
+      "mean_stair_landing_count": _ratio(landing_total, len(success)),
+      "mean_stair_landing_score": _ratio(score_sum, landing_total),
+      "mean_stair_landing_support_fraction": _ratio(support_sum, landing_total),
+      "stair_full_landing_ratio": _ratio(full_total, landing_total),
+      "stair_incomplete_landing_ratio": incomplete_landing_ratio,
+      "stair_partial_support_landing_ratio": _ratio(partial_total, landing_total),
+      "stair_low_support_landing_ratio": _ratio(low_support_total, landing_total),
+      "incomplete_landing_behavior": {
+        "partial_support_ratio": _ratio(partial_total, landing_total),
+        "low_support_ratio": _ratio(low_support_total, landing_total),
+      },
+    }
+  )
+
+  episode_support_ratios: list[float] = []
+  episode_full_ratios: list[float] = []
+  episode_incomplete_ratios: list[float] = []
+  episode_low_support_ratios: list[float] = []
+  landing_pass_flags: list[bool] = []
+  safe_pass_flags: list[bool] = []
+  for idx, landing_count in enumerate(landing_counts["stair_landing_count"]):
+    full_ratio = _ratio(landing_counts["stair_full_landing_count"][idx], landing_count)
+    incomplete_ratio = _ratio(
+      landing_counts["stair_incomplete_landing_count"][idx],
+      landing_count,
+    )
+    low_support_ratio = _ratio(
+      landing_counts["stair_low_support_landing_count"][idx],
+      landing_count,
+    )
+    support_ratio = _ratio(
+      landing_sums["stair_landing_support_sum"][idx], landing_count
+    )
+    if landing_count <= 0.0:
+      incomplete_ratio = 1.0
+      low_support_ratio = 1.0
+
+    episode_support_ratios.append(support_ratio)
+    episode_full_ratios.append(full_ratio)
+    episode_incomplete_ratios.append(incomplete_ratio)
+    episode_low_support_ratios.append(low_support_ratio)
+
+    landing_pass = (
+      success_mask[idx]
+      and landing_count > 0.0
+      and full_ratio >= cfg.safe_pass_min_full_landing_ratio
+      and support_ratio >= cfg.safe_pass_min_support_fraction
+      and low_support_ratio <= cfg.safe_pass_max_low_support_ratio
+    )
+    safe_pass = (
+      landing_pass and toe_counts[idx] <= cfg.safe_pass_max_toe_riser_collision_count
+    )
+    landing_pass_flags.append(bool(landing_pass))
+    safe_pass_flags.append(bool(safe_pass))
+
+  summary.update(
+    {
+      "episode_stair_support_fraction_mean": _average_values(episode_support_ratios),
+      "episode_stair_support_fraction_p10": _quantile(episode_support_ratios, 0.10),
+      "episode_stair_support_fraction_p50": _quantile(episode_support_ratios, 0.50),
+      "episode_stair_support_fraction_p90": _quantile(episode_support_ratios, 0.90),
+      "episode_stair_full_landing_ratio_mean": _average_values(episode_full_ratios),
+      "episode_stair_full_landing_ratio_p10": _quantile(episode_full_ratios, 0.10),
+      "episode_stair_full_landing_ratio_p50": _quantile(episode_full_ratios, 0.50),
+      "episode_stair_full_landing_ratio_p90": _quantile(episode_full_ratios, 0.90),
+      "episode_stair_incomplete_landing_ratio_mean": _average_values(
+        episode_incomplete_ratios
+      ),
+      "episode_stair_low_support_landing_ratio_mean": _average_values(
+        episode_low_support_ratios
+      ),
+      "episode_stair_low_support_landing_ratio_p90": _quantile(
+        episode_low_support_ratios, 0.90
+      ),
+      "stair_landing_pass_count": int(sum(landing_pass_flags)),
+      "stair_landing_pass_rate": _average_values(
+        [float(item) for item in landing_pass_flags]
+      ),
+      "stair_safe_pass_count": int(sum(safe_pass_flags)),
+      "stair_safe_pass_rate": _average_values(
+        [float(item) for item in safe_pass_flags]
+      ),
+      "safe_pass_thresholds": {
+        "min_full_landing_ratio": cfg.safe_pass_min_full_landing_ratio,
+        "min_support_fraction": cfg.safe_pass_min_support_fraction,
+        "max_low_support_ratio": cfg.safe_pass_max_low_support_ratio,
+        "max_toe_riser_collision_count": (cfg.safe_pass_max_toe_riser_collision_count),
+      },
+    }
+  )
 
   for name in LEVEL_EVENT_NAMES:
     total = [0.0 for _ in range(cfg.stair_levels)]
@@ -876,6 +1225,15 @@ def _summarize_batches(cfg: GoalPyramidEvalConfig, batches: list[dict]) -> dict:
   summary["collision_by_stair_level_low_to_high_success_only"] = _level_collision_table(
     summary, cfg
   )
+  policy_score = _score_policy(summary, cfg)
+  summary["score_100"] = policy_score["score_100"]
+  summary["score_version"] = policy_score["score_version"]
+  summary["landing_index_100"] = policy_score["landing_index_100"]
+  summary["landing_linear_score_100"] = policy_score["landing_linear_score_100"]
+  summary["paper_metrics"] = _paper_metrics(summary)
+  summary["score_components"] = policy_score["components"]
+  summary["score_collision_subscores"] = policy_score["collision_subscores"]
+  summary["score_formula"] = policy_score["formula"]
   return summary
 
 
@@ -937,30 +1295,34 @@ def _write_table_image(payload: dict, output_path: Path) -> None:
   terrain = payload["terrain"]
   nav = payload["navigation"]
   summary_columns = [
-    "success %",
-    "fall %",
-    "dir fail %",
-    "timeout %",
-    "time s",
-    "succ time s",
+    "score",
+    "pass %",
+    "landing",
+    "succ %",
+    "height %",
+    "support",
+    "full %",
+    "full p10 %",
+    "incomp %",
+    "low %",
     "toe",
-    "heel",
-    "total",
-    "succ eps",
+    "toe>free",
   ]
-  toe = summary["toe_riser_collision_count_success_only"]
-  heel = summary["heel_riser_collision_count_success_only"]
+  toe = summary["toe_riser_collision_count"]
+  toe_over_free = summary["toe_riser_collision_over_free_count"]
   summary_values = [
+    summary["score_100"],
+    summary["stair_safe_pass_rate"] * 100.0,
+    summary["landing_index_100"],
     summary["success_rate"] * 100.0,
-    summary["fall_rate"] * 100.0,
-    summary["heading_failure_rate"] * 100.0,
-    summary["timeout_failure_rate"] * 100.0,
-    summary["mean_episode_length_s"],
-    summary["mean_success_time_s"],
+    summary["mean_max_height_progress_fraction"] * 100.0,
+    summary["mean_stair_landing_support_fraction"],
+    summary["stair_full_landing_ratio"] * 100.0,
+    summary["episode_stair_full_landing_ratio_p10"] * 100.0,
+    summary["stair_incomplete_landing_ratio"] * 100.0,
+    summary["stair_low_support_landing_ratio"] * 100.0,
     toe,
-    heel,
-    toe + heel,
-    summary["success_episodes"],
+    toe_over_free,
   ]
   summary_text = [
     [
@@ -968,12 +1330,14 @@ def _write_table_image(payload: dict, output_path: Path) -> None:
       f"{summary_values[1]:.0f}",
       f"{summary_values[2]:.0f}",
       f"{summary_values[3]:.0f}",
-      f"{summary_values[4]:.2f}",
+      f"{summary_values[4]:.0f}",
       f"{summary_values[5]:.2f}",
-      f"{summary_values[6]:.2f}",
-      f"{summary_values[7]:.2f}",
-      f"{summary_values[8]:.2f}",
+      f"{summary_values[6]:.0f}",
+      f"{summary_values[7]:.0f}",
+      f"{summary_values[8]:.0f}",
       f"{summary_values[9]:.0f}",
+      f"{summary_values[10]:.2f}",
+      f"{summary_values[11]:.2f}",
     ]
   ]
 
@@ -984,8 +1348,6 @@ def _write_table_image(payload: dict, output_path: Path) -> None:
         str(row["level_low_to_high"]),
         f"{row['height_m']:.2f}",
         f"{row['toe_riser_collision_count']:.2f}",
-        f"{row['heel_riser_collision_count']:.2f}",
-        f"{row['total_riser_collision_count']:.2f}",
       ]
     )
 
@@ -1029,16 +1391,28 @@ def _write_table_image(payload: dict, output_path: Path) -> None:
     elif col_idx == 0:
       value = summary_values[0]
       cell.set_facecolor("#d8f0dd" if value >= 80.0 else "#fff0c2")
-    elif col_idx in {1, 2, 3}:
+    elif col_idx == 1:
+      value = summary_values[col_idx]
+      cell.set_facecolor("#d8f0dd" if value >= 75.0 else "#fff0c2")
+    elif col_idx in {2, 3, 4}:
+      value = summary_values[col_idx]
+      cell.set_facecolor("#d8f0dd" if value >= 80.0 else "#fff0c2")
+    elif col_idx == 5:
+      value = summary_values[col_idx]
+      cell.set_facecolor("#d8f0dd" if value >= 0.8 else "#fff0c2")
+    elif col_idx in {6, 7}:
+      value = summary_values[col_idx]
+      cell.set_facecolor("#d8f0dd" if value >= 75.0 else "#fff0c2")
+    elif col_idx in {8, 9}:
       value = summary_values[col_idx]
       cell.set_facecolor("#f7d4d4" if value > 0.0 else "#f3f6f8")
-    elif col_idx in {6, 7, 8}:
+    elif col_idx in {10, 11}:
       value = summary_values[col_idx]
       cell.set_facecolor("#f3f6f8" if value <= 0.0 else "#fff0c2")
 
   level_table = axes[1].table(
     cellText=level_rows,
-    colLabels=["level", "height m", "toe", "heel", "total"],
+    colLabels=["level", "height m", "toe"],
     cellLoc="center",
     loc="center",
   )
@@ -1057,7 +1431,7 @@ def _write_table_image(payload: dict, output_path: Path) -> None:
   axes[1].text(
     0.5,
     0.04,
-    "Per-level collision counts are low-to-high means over successful episodes only.",
+    "Per-level toe-riser contact counts are low-to-high means over successful episodes only.",
     ha="center",
     va="center",
     fontsize=8,
@@ -1080,6 +1454,10 @@ def run_goal_pyramid_eval(task_id: str, cfg: GoalPyramidEvalConfig) -> dict:
     checkpoint_file=cfg.checkpoint_file,
     wandb_run_path=cfg.wandb_run_path,
     wandb_checkpoint_name=cfg.wandb_checkpoint_name,
+  )
+  agent_cfg = resolve_inference_agent_cfg(
+    checkpoint_path=checkpoint_path,
+    agent_cfg=agent_cfg,
   )
   output_path = _resolve_output_path(
     cfg=cfg,
@@ -1158,11 +1536,18 @@ def run_goal_pyramid_eval(task_id: str, cfg: GoalPyramidEvalConfig) -> dict:
 
   print(
     "[INFO] goal_pyramid: "
+    f"score={summary['score_100']:.1f}, "
+    f"safe_pass={summary['stair_safe_pass_rate']:.3f}, "
+    f"landing_index={summary['landing_index_100']:.1f}, "
+    f"linear_score={summary['landing_linear_score_100']:.1f}, "
     f"success={summary['success_rate']:.3f}, "
+    f"landing={summary['mean_stair_landing_score']:.3f}, "
+    f"full={summary['stair_full_landing_ratio']:.3f}, "
+    f"incomplete={summary['stair_incomplete_landing_ratio']:.3f}, "
     f"fall={summary['fall_rate']:.3f}, "
     f"dir_fail={summary['heading_failure_rate']:.3f}, "
     f"toe={summary['toe_riser_collision_count_success_only']:.3f}, "
-    f"heel={summary['heel_riser_collision_count_success_only']:.3f}"
+    f"toe_over_free={summary['toe_riser_collision_over_free_count_success_only']:.3f}"
   )
   return payload
 

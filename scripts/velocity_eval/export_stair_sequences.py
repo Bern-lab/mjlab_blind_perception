@@ -11,8 +11,10 @@ from pathlib import Path
 import torch
 import tyro
 from scripts.velocity_eval.policy_io import (
+  get_clip_actions,
   load_inference_policy,
   resolve_checkpoint_path,
+  resolve_inference_agent_cfg,
 )
 from tqdm.auto import tqdm
 
@@ -86,6 +88,10 @@ def run_export(task_id: str, cfg: ExportStairSequencesConfig) -> Path:
     wandb_run_path=cfg.wandb_run_path,
     wandb_checkpoint_name=cfg.wandb_checkpoint_name,
   )
+  agent_cfg = resolve_inference_agent_cfg(
+    checkpoint_path=checkpoint_path,
+    agent_cfg=agent_cfg,
+  )
   print(
     "[Stage 0] Export start:",
     f"task={task_id}",
@@ -97,7 +103,7 @@ def run_export(task_id: str, cfg: ExportStairSequencesConfig) -> Path:
   )
 
   raw_env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=None)
-  wrapped = RslRlVecEnvWrapper(raw_env, clip_actions=agent_cfg.clip_actions)
+  wrapped = RslRlVecEnvWrapper(raw_env, clip_actions=get_clip_actions(agent_cfg))
   try:
     policy, _runner = load_inference_policy(
       env=wrapped,

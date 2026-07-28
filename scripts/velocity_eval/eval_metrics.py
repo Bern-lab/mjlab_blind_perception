@@ -12,6 +12,8 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
 from mjlab.sensor.terrain_height_sensor import TerrainHeightSensor
 from mjlab.tasks.velocity import mdp
+from mjlab.tasks.velocity.mdp.rewards import _StepBoundaryFootVolume
+from mjlab.tasks.velocity.mdp.stair_geometry import cached_stair_shape
 from mjlab.utils.lab_api.math import quat_apply_inverse
 
 try:
@@ -33,6 +35,19 @@ EVENT_COUNT_NAMES = (
   "toe_riser_collision",
   "heel_riser_collision",
   "foot_lip_collision",
+)
+
+LANDING_COUNT_NAMES = (
+  "stair_landing_count",
+  "stair_full_landing_count",
+  "stair_incomplete_landing_count",
+  "stair_partial_support_landing_count",
+  "stair_low_support_landing_count",
+)
+
+LANDING_SUM_NAMES = (
+  "stair_landing_score_sum",
+  "stair_landing_support_sum",
 )
 
 LEVEL_EVENT_NAMES = (
@@ -558,12 +573,168 @@ class StairEventDetector:
     return self._level_any(active_boundary, levels, valid, max_levels)
 
 
+@dataclass(frozen=True)
+class StairLandingMetricParams:
+  """Geometry parameters for goal-pyramid stair landing quality metrics."""
+
+  ground_contact_sensor_name: str = "feet_ground_contact"
+  full_support_threshold: float = 0.75
+  partial_support_threshold: float = 0.50
+  min_candidate_support: float = 0.05
+  height_tolerance: float = 0.10
+
+
+class StairLandingDetector:
+  """Per-touchdown tread support and landing-quality estimator for stair eval."""
+
+  def __init__(
+    self,
+    env: ManagerBasedRlEnv,
+    params: StairLandingMetricParams | None = None,
+  ) -> None:
+    self.params = params or StairLandingMetricParams()
+    self.foot_body_cfg = SceneEntityCfg(
+      "robot",
+      body_names=("left_ankle_roll_link", "right_ankle_roll_link"),
+      preserve_order=True,
+    )
+    self.foot_body_cfg.resolve(env.scene)
+    self._volume = _StepBoundaryFootVolume(
+      RewardTermCfg(func=StairLandingDetector, weight=0.0, params={}),
+      env,
+    )
+    self._ground_sensor = self._get_ground_sensor(env)
+
+  def _get_ground_sensor(self, env: ManagerBasedRlEnv) -> ContactSensor | None:
+    try:
+      sensor = env.scene[self.params.ground_contact_sensor_name]
+    except (KeyError, AttributeError):
+      return None
+    if isinstance(sensor, ContactSensor):
+      return sensor
+    return None
+
+  def _empty(self, env: ManagerBasedRlEnv) -> dict[str, torch.Tensor]:
+    zero = torch.zeros(env.num_envs, device=env.device)
+    return {name: zero.clone() for name in (*LANDING_COUNT_NAMES, *LANDING_SUM_NAMES)}
+
+  @staticmethod
+  def _boundary_levels(
+    boundaries: torch.Tensor,
+    terrain_height_m: float,
+    max_levels: int,
+    valid: torch.Tensor,
+  ) -> torch.Tensor:
+    z_min = torch.minimum(boundaries[..., 9], boundaries[..., 10])
+    terrain_min = torch.min(
+      torch.where(valid, z_min, torch.full_like(z_min, torch.inf)),
+      dim=1,
+      keepdim=True,
+    ).values
+    terrain_min = torch.where(
+      torch.isfinite(terrain_min),
+      terrain_min,
+      torch.zeros_like(terrain_min),
+    )
+    levels = (z_min - terrain_min) / terrain_height_m + 1.0
+    return torch.round(levels).long().clamp(1, max_levels)
+
+  def compute_metrics(
+    self,
+    env: ManagerBasedRlEnv,
+    *,
+    terrain_height_m: float | None,
+    max_levels: int,
+  ) -> dict[str, torch.Tensor]:
+    """Return per-env additive landing quality counts/sums for this step."""
+    sensor = self._ground_sensor
+    if sensor is None or terrain_height_m is None or terrain_height_m <= 0.0:
+      return self._empty(env)
+
+    boundaries, valid_boundaries = _current_step_boundaries(env)
+    if boundaries is None or valid_boundaries is None or boundaries.shape[1] == 0:
+      return self._empty(env)
+
+    first_contact = sensor.compute_first_contact(dt=env.step_dt).bool()
+    body_ids = self.foot_body_cfg.body_ids
+    if not isinstance(body_ids, list):
+      return self._empty(env)
+    num_feet = len(body_ids)
+    if first_contact.shape[-1] != num_feet:
+      return self._empty(env)
+
+    points_w, _point_vel_w = self._volume._foot_points_w(env, self.foot_body_cfg)
+    foot_ref_w = self._volume._foot_ref_w(env, self.foot_body_cfg)
+    sole_z = torch.min(self._volume._local_points[:, 2])
+    sole_mask = self._volume._local_points[:, 2] <= sole_z + 1.0e-6
+    sole_points_w = points_w[:, :, sole_mask, :]
+
+    tread_depth, _riser_height, shape_valid = cached_stair_shape(
+      env, boundaries, valid_boundaries
+    )
+    support_fraction = mdp.toe_step_riser_slab_penalty._tread_support_fraction(
+      sole_points_w,
+      boundaries,
+      tread_depth,
+    )
+
+    levels = self._boundary_levels(
+      boundaries,
+      terrain_height_m,
+      max_levels,
+      valid_boundaries,
+    )
+    valid_stair_boundary = valid_boundaries & shape_valid[:, None] & (levels >= 1)
+    height_error = torch.abs(foot_ref_w[:, :, None, 2] - boundaries[:, None, :, 10])
+    candidate = (
+      valid_stair_boundary[:, None, :]
+      & (height_error <= self.params.height_tolerance)
+      & (support_fraction >= self.params.min_candidate_support)
+    )
+    masked_support = torch.where(
+      candidate,
+      support_fraction,
+      torch.full_like(support_fraction, -torch.inf),
+    )
+    best_support, _best_idx = torch.max(masked_support, dim=-1)
+    has_candidate = torch.isfinite(best_support)
+    touchdown = first_contact & has_candidate
+
+    landing_score = best_support.clamp(0.0, 1.0)
+    landing_score = torch.where(
+      touchdown, landing_score, torch.zeros_like(landing_score)
+    )
+
+    full_landing = touchdown & (best_support >= self.params.full_support_threshold)
+    partial_support = (
+      touchdown
+      & (best_support >= self.params.partial_support_threshold)
+      & (best_support < self.params.full_support_threshold)
+    )
+    low_support = touchdown & (best_support < self.params.partial_support_threshold)
+    incomplete_landing = touchdown & ~full_landing
+
+    touchdown_f = touchdown.float()
+    return {
+      "stair_landing_count": touchdown_f.sum(dim=1),
+      "stair_full_landing_count": full_landing.float().sum(dim=1),
+      "stair_incomplete_landing_count": incomplete_landing.float().sum(dim=1),
+      "stair_partial_support_landing_count": partial_support.float().sum(dim=1),
+      "stair_low_support_landing_count": low_support.float().sum(dim=1),
+      "stair_landing_score_sum": landing_score.sum(dim=1),
+      "stair_landing_support_sum": (best_support.clamp_min(0.0) * touchdown_f).sum(
+        dim=1
+      ),
+    }
+
+
 def compute_velocity_metrics(
   env: ManagerBasedRlEnv,
   detector: StairEventDetector,
   *,
   terrain_height_m: float | None,
   max_levels: int,
+  landing_detector: StairLandingDetector | None = None,
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
   """Compute scalar step metrics and per-level stair event metrics."""
   asset = env.scene["robot"]
@@ -600,6 +771,12 @@ def compute_velocity_metrics(
     "foot_clearance": foot_clearance,
   }
   metrics.update(detector.compute_events(env))
+  if landing_detector is not None:
+    metrics.update(
+      landing_detector.compute_metrics(
+        env, terrain_height_m=terrain_height_m, max_levels=max_levels
+      )
+    )
   by_level = detector.compute_events_by_level(
     env, terrain_height_m=terrain_height_m, max_levels=max_levels
   )

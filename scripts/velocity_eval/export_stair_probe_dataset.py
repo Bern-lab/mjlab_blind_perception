@@ -14,8 +14,10 @@ import numpy as np
 import torch
 import tyro
 from scripts.velocity_eval.policy_io import (
+  get_clip_actions,
   load_inference_policy,
   resolve_checkpoint_path,
+  resolve_inference_agent_cfg,
 )
 from tqdm.auto import tqdm
 
@@ -1881,6 +1883,17 @@ def _latent_obs(obs: Any) -> torch.Tensor:
   return latent
 
 
+def stage2a_base_latent_obs(obs: Any) -> torch.Tensor:
+  """Return the fixed 91-D Stage 2A latent channels from rollout observations."""
+  latent = _latent_obs(obs)
+  expected_dim = input_obs_dim()
+  if latent.shape[-1] < expected_dim:
+    raise RuntimeError(
+      f"Expected latent obs dim at least {expected_dim}, got {latent.shape[-1]}."
+    )
+  return latent[:, :expected_dim]
+
+
 def run_export(task_id: str, cfg: ExportStairProbeDatasetConfig) -> Path:
   """Run a frozen policy and export Stage 2A probe samples."""
   if cfg.num_envs <= 0:
@@ -1915,6 +1928,10 @@ def run_export(task_id: str, cfg: ExportStairProbeDatasetConfig) -> Path:
     wandb_run_path=cfg.wandb_run_path,
     wandb_checkpoint_name=cfg.wandb_checkpoint_name,
   )
+  agent_cfg = resolve_inference_agent_cfg(
+    checkpoint_path=checkpoint_path,
+    agent_cfg=agent_cfg,
+  )
   print(
     "[Stage 2A] Export start:",
     f"task={task_id}",
@@ -1929,7 +1946,7 @@ def run_export(task_id: str, cfg: ExportStairProbeDatasetConfig) -> Path:
   )
 
   raw_env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=None)
-  wrapped = RslRlVecEnvWrapper(raw_env, clip_actions=agent_cfg.clip_actions)
+  wrapped = RslRlVecEnvWrapper(raw_env, clip_actions=get_clip_actions(agent_cfg))
   builder = StairProbeDatasetBuilder(
     num_envs=cfg.num_envs,
     history_len=cfg.history_len,
@@ -1984,7 +2001,7 @@ def run_export(task_id: str, cfg: ExportStairProbeDatasetConfig) -> Path:
       device=device,
     )
     obs = wrapped.get_observations()
-    latent = _latent_obs(obs)
+    latent = stage2a_base_latent_obs(obs)
     if latent.shape[-1] != cfg.expected_obs_dim:
       raise RuntimeError(
         f"Expected latent obs dim {cfg.expected_obs_dim}, got {latent.shape[-1]}."
@@ -2020,7 +2037,7 @@ def run_export(task_id: str, cfg: ExportStairProbeDatasetConfig) -> Path:
       reset_policy_state_from_step(policy, step_result)
       obs, _rewards, dones, _extras = step_result
       reset_mask = dones.to(dtype=torch.bool)
-      latent = _latent_obs(obs)
+      latent = stage2a_base_latent_obs(obs)
       builder.push_observations(latent, reset_mask)
       if cfg.include_privileged_footprint:
         footprint = privileged_footprint_features_from_env(raw_env)
