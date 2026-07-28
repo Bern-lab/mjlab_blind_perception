@@ -154,10 +154,118 @@ eval_outputs/velocity/g1_blind_rough_lstm_teacherkl/0527_165514/goal_pyramid_h15
 eval_outputs/velocity/g1_blind_rough_lstm_teacherkl/0527_165514/goal_pyramid_h15cm_table.png
 ```
 
-The JSON contains `success_rate`, failure rates, spawn side counts, and
-`collision_by_stair_level_low_to_high_success_only`. The table image shows the
-same summary plus mean toe/heel collision counts for each stair level, averaged
-over successful episodes only.
+The JSON contains `success_rate`, failure rates, spawn side counts, landing
+support metrics, and `collision_by_stair_level_low_to_high_success_only`. The
+table image is landing-centric: it shows the publication score, strict safe-pass
+rate, landing index, completion, tread support, complete/incomplete landing
+ratios, low-support landings, and mean toe-riser contacts by stair level over
+successful episodes only.
+
+### Goal-Pyramid Metric Guide
+
+Use this evaluation when comparing stair-ascent policies for reports or paper
+figures:
+
+```bash
+uv run python scripts/velocity_eval/eval_policy_goal_pyramid.py \
+  Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1 \
+  --checkpoint-file logs/rsl_rl/.../model.pt \
+  --episodes 100 \
+  --num-envs 100 \
+  --max-episode-length-s 12.0
+```
+
+For fair comparisons, keep the terrain parameters, seed, episode count, and
+goal speed fixed across policies. The headline metric is `score_100`, a
+full-support-emphasized stair-ascent score:
+
+```text
+score_100 =
+15 * success_rate
++ 5 * mean_max_height_progress_fraction
++ 15 * mean_stair_landing_support_fraction
++ 45 * stair_full_landing_ratio
++ 15 * stair_full_landing_ratio^2
++ 5 * toe_riser_collision_score
+```
+
+The nonlinear full-support term is intentional: a high complete-foot landing
+ratio is a stronger stair-ascent safety signal than small changes in smoothness
+or actuator economy. The publication score intentionally leaves heel/lip
+contacts, base pitch/roll, action smoothness, and torque cost out of the
+headline number, because this eval measures stair completion and foot placement.
+
+Use the auxiliary metrics to explain behavior:
+
+- `landing_index_100`: landing-only score for support, complete landing,
+  incomplete landing, and low-support failures.
+- `landing_linear_score_100`: transparent linear reference score using the
+  previous landing-centric weighting.
+- `stair_safe_pass_rate`: episode-level acceptance rate. An episode passes only
+  if it succeeds, has enough complete-foot landings, has high average support,
+  keeps low-support landings below the threshold, and stays under the toe-riser
+  contact threshold.
+- `episode_stair_full_landing_ratio_p10`: worst-tail complete landing quality;
+  useful when mean full-landing ratio looks good but some episodes still fail.
+- `toe_riser_collision_over_free_count`: mean toe-riser contacts above the free
+  allowance. Toe contacts have a two-hit free allowance by default, so the score
+  only starts penalizing toe contacts above two events per episode.
+
+The default strict pass thresholds are:
+
+```text
+safe_pass_min_full_landing_ratio = 0.75
+safe_pass_min_support_fraction = 0.80
+safe_pass_max_low_support_ratio = 0.20
+safe_pass_max_toe_riser_collision_count = 10.0
+```
+
+Override them from the command line when the ablation needs a stricter or looser
+acceptance test, for example:
+
+```bash
+uv run python scripts/velocity_eval/eval_policy_goal_pyramid.py \
+  Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1 \
+  --checkpoint-file logs/rsl_rl/.../model.pt \
+  --safe-pass-min-full-landing-ratio 0.80 \
+  --safe-pass-max-toe-riser-collision-count 8.0
+```
+
+### Stair Lift-Height Sweep
+
+Use `eval_stair_lift_height_sweep.py` when checking whether a policy changes
+its swing height with stair riser height. The script runs the goal-pyramid task
+at several fixed riser heights, records each stair touchdown swing, and fits
+`peak_lift_from_takeoff_m` against true stair height. SlowLatent policies also
+report the decoded `pred_riser_height_mean_m` fit.
+
+```bash
+uv run python scripts/velocity_eval/eval_stair_lift_height_sweep.py \
+  Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1 \
+  --checkpoint-file logs/rsl_rl/.../model.pt \
+  --stair-heights 0.09 0.11 0.13 0.15 0.18 0.21 0.24 \
+  --episodes-per-height 40 \
+  --num-envs 40
+```
+
+For local checkpoints, the task selector can be omitted. The script will infer a
+registered task from the checkpoint path when possible, and falls back to legacy
+G1 presets for common actor observation dimensions: 98 without height scan, 285
+with height scan, and 490 blind-history policies.
+
+```bash
+uv run python scripts/velocity_eval/eval_stair_lift_height_sweep.py \
+  --checkpoint-file logs/rsl_rl/g1_velocity/5.19_original_train/model_61999.pt \
+  --stair-heights 0.09 0.11 0.13 0.15 0.18 0.21 \
+  --episodes-per-height 40 \
+  --num-envs 40
+```
+
+The JSON summary reports separate linear fits for the first stair level, the
+first stair touchdown, later stair levels, and all stair touch-downs. The CSV
+next to it contains one row per foot swing with touchdown level, peak lift,
+terrain clearance, decoded riser height, stair probability, and gate-memory
+ratio.
 
 To watch the same eval task in a viewer, add `--play`. Use a small `--num-envs`
 when you want to inspect motion clearly:

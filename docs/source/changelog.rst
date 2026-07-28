@@ -51,6 +51,10 @@ Added
 - Added live toe-riser contact markers to goal-pyramid velocity play
   evaluation, drawing red dots at newly detected G1 toe/stair-riser
   collision points for the current episode.
+- Added a stair lift-height sweep evaluator for goal-pyramid tests, recording
+  per-foot swing peak lift across fixed riser heights, fitting lift/predicted
+  riser correlations, and auto-selecting legacy G1 eval presets for local
+  checkpoints with older actor observation dimensions.
 - Added ``Mjlab-Velocity-Blind-Rough-TargetNavigation-StepDanger-TeacherKL-Unitree-G1``,
   a non-latent G1 target-navigation Teacher-KL task with local foot-lip danger
   parameters and a penalty-only toe-riser danger slab.
