@@ -660,16 +660,14 @@ class LSTMSlowLatentMLPModel(MLPModel):
       self.same_foot_stride_max,
     )
     upper_raw = ratchet[..., 7:8]
-    upper = upper_raw.clamp(
-      self.same_foot_stride_min,
-      self.same_foot_stride_max,
-    )
     confirmed = ratchet[..., 6:7] > 0.5
     soft_cap = active & ~confirmed & (upper_raw > 0.0)
     open_base = torch.maximum(probe, lower)
-    open_target = torch.maximum(open_base, torch.minimum(target, open_base + 0.05))
-    closed_target = 0.5 * (lower + torch.maximum(upper, lower))
-    soft_target = torch.minimum(probe, upper)
+    guard_limited = probe <= lower + 1.0e-5
+    open_ceiling = torch.where(guard_limited, probe, open_base + 0.05)
+    open_target = torch.maximum(open_base, torch.minimum(target, open_ceiling))
+    closed_target = probe
+    soft_target = probe
     ratchet_target = torch.where(
       confirmed,
       closed_target,
@@ -1905,16 +1903,14 @@ class _OnnxStairLatentModel(nn.Module):
       self.same_foot_stride_max,
     )
     upper_raw = ratchet[..., 7:8]
-    upper = upper_raw.clamp(
-      self.same_foot_stride_min,
-      self.same_foot_stride_max,
-    )
     confirmed = ratchet[..., 6:7] > 0.5
     soft_cap = active & ~confirmed & (upper_raw > 0.0)
     open_base = torch.maximum(probe, lower)
-    open_target = torch.maximum(open_base, torch.minimum(target, open_base + 0.05))
-    closed_target = 0.5 * (lower + torch.maximum(upper, lower))
-    soft_target = torch.minimum(probe, upper)
+    guard_limited = probe <= lower + 1.0e-5
+    open_ceiling = torch.where(guard_limited, probe, open_base + 0.05)
+    open_target = torch.maximum(open_base, torch.minimum(target, open_ceiling))
+    closed_target = probe
+    soft_target = probe
     return torch.where(
       active,
       torch.where(

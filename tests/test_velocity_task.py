@@ -386,7 +386,16 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert foot_event_params["include_raw_memory"] is False
   assert foot_event_params["ratchet_height_threshold_m"] == 0.025
   assert foot_event_params["ratchet_probe_increment_m"] == 0.025
+  assert foot_event_params["ratchet_no_hit_lower_margin_m"] == 0.0
+  assert foot_event_params["ratchet_interval_target_margin_m"] == 0.01
   assert foot_event_params["ratchet_collision_margin_m"] == 0.02
+  assert foot_event_params["ratchet_toe_anchor_offset_m"] == 0.085
+  assert foot_event_params["ratchet_backoff_step_m"] == 0.025
+  assert foot_event_params["ratchet_backoff_margin_m"] == 0.015
+  assert foot_event_params["ratchet_lock_margin_m"] == 0.01
+  assert foot_event_params["ratchet_lock_stable_steps"] == 2
+  assert foot_event_params["ratchet_same_foot_stride_guard_layers"] == 2.0
+  assert foot_event_params["ratchet_same_foot_stride_guard_margin_m"] == 0.04
   assert foot_event_params["ratchet_min_interval_width_m"] == 0.04
   assert foot_event_params["ratchet_min_stride_m"] == 0.10
   assert foot_event_params["ratchet_max_stride_m"] == 0.80
