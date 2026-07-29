@@ -139,10 +139,19 @@ class TerrainEntity(Entity):
         self.cfg.terrain_generator, device=self._device
       )
       terrain_generator.compile(self._spec)
-      gen_cfg = self.cfg.terrain_generator
-      proportions = np.array([s.proportion for s in gen_cfg.sub_terrains.values()])
+      proportions = terrain_generator.terrain_type_proportions
       proportions = proportions / proportions.sum()
       self._configure_env_origins(terrain_generator.terrain_origins, proportions)
+      self._terrain_type_names = tuple(terrain_generator.terrain_type_names)
+      self._terrain_type_proportions = torch.from_numpy(
+        terrain_generator.terrain_type_proportions
+      ).to(device=self._device, dtype=torch.float)
+      self._standalone_terrain_type_mask = torch.from_numpy(
+        terrain_generator.standalone_terrain_type_mask
+      ).to(device=self._device, dtype=torch.bool)
+      self._terrain_bounds_by_tile = torch.from_numpy(
+        terrain_generator.terrain_bounds_by_tile
+      ).to(device=self._device, dtype=torch.float)
       self._flat_patches: dict[str, torch.Tensor] = {
         name: torch.from_numpy(arr).to(device=self._device, dtype=torch.float)
         for name, arr in terrain_generator.flat_patches.items()
@@ -165,6 +174,16 @@ class TerrainEntity(Entity):
     elif self.cfg.terrain_type == "plane":
       self._import_ground_plane("terrain")
       self._configure_env_origins()
+      self._terrain_type_names = ()
+      self._terrain_type_proportions = torch.zeros(
+        (0,), device=self._device, dtype=torch.float
+      )
+      self._standalone_terrain_type_mask = torch.zeros(
+        (0,), device=self._device, dtype=torch.bool
+      )
+      self._terrain_bounds_by_tile = torch.zeros(
+        (0, 0, 4), device=self._device, dtype=torch.float
+      )
       self._flat_patches: dict[str, torch.Tensor] = {}
       self._flat_patch_radii: dict[str, float] = {}
       self._step_boundaries_by_tile = torch.zeros(
@@ -214,6 +233,33 @@ class TerrainEntity(Entity):
   @property
   def step_boundary_layers_by_tile(self) -> torch.Tensor:
     return self._step_boundary_layers_by_tile
+
+  @property
+  def terrain_type_names(self) -> tuple[str, ...]:
+    return self._terrain_type_names
+
+  @property
+  def terrain_type_proportions(self) -> torch.Tensor:
+    return self._terrain_type_proportions
+
+  @property
+  def standalone_terrain_type_mask(self) -> torch.Tensor:
+    return self._standalone_terrain_type_mask
+
+  @property
+  def terrain_bounds_by_tile(self) -> torch.Tensor:
+    return self._terrain_bounds_by_tile
+
+  def is_standalone_env(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+    if self._standalone_terrain_type_mask.numel() == 0:
+      if env_ids is None:
+        shape = (self.cfg.num_envs,)
+      else:
+        shape = (len(env_ids),)
+      return torch.zeros(shape, device=self._device, dtype=torch.bool)
+
+    types = self.terrain_types if env_ids is None else self.terrain_types[env_ids]
+    return self._standalone_terrain_type_mask[types]
 
   # Terrain origin management.
 

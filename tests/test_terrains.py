@@ -5,10 +5,12 @@ import numpy as np
 
 from mjlab.terrains.primitive_terrains import (
   BoxInvertedPyramidStairsTerrainCfg,
+  BoxLongStairRunwayTerrainCfg,
   BoxPyramidStairsTerrainCfg,
   BoxSteppingStonesTerrainCfg,
 )
 from mjlab.terrains.terrain_generator import (
+  FlatPatchSamplingCfg,
   StepDangerVisualizationCfg,
   TerrainGenerator,
   TerrainGeneratorCfg,
@@ -172,6 +174,77 @@ def test_terrain_generator_pads_step_boundaries_by_tile():
     generator.step_boundary_layers_by_tile[0, 0, :8],
     [1, 1, 1, 1, 2, 2, 2, 2],
   )
+
+
+def test_long_stair_runway_has_fixed_start_target_and_step_sequence():
+  cfg = BoxLongStairRunwayTerrainCfg(
+    size=(8.9, 2.5),
+    step_height_range=(0.1, 0.1),
+    step_width_range=(0.3, 0.3),
+    num_steps=14,
+    start_platform_length=2.0,
+    end_platform_length=2.0,
+    flat_patch_sampling={
+      "target": FlatPatchSamplingCfg(num_patches=1),
+    },
+  )
+  spec = mujoco.MjSpec()
+  spec.worldbody.add_body(name="terrain")
+  output = cfg.function(0.0, spec, np.random.default_rng(0))
+
+  np.testing.assert_allclose(output.origin, [1.0, 1.25, 0.0])
+  assert output.flat_patches is not None
+  np.testing.assert_allclose(output.flat_patches["target"][0], [7.2, 1.25, 1.4])
+  assert output.bounds == (0.0, 8.2, 0.0, 2.5)
+  assert output.step_boundaries is not None
+  assert output.step_boundaries.shape == (14, 11)
+  np.testing.assert_allclose(output.step_boundaries[0, 0:3], [2.0, 0.0, 0.1])
+  np.testing.assert_allclose(output.step_boundaries[0, 3:6], [2.0, 2.5, 0.1])
+  np.testing.assert_allclose(output.step_boundaries[0, 6:9], [-1.0, 0.0, 0.0])
+  np.testing.assert_allclose(output.step_boundaries[0, 9:11], [0.0, 0.1])
+  np.testing.assert_array_equal(output.step_boundary_sequence_ids, np.ones(14))
+  np.testing.assert_array_equal(output.step_boundary_layers, np.arange(1, 15))
+
+
+def test_generator_places_standalone_runway_as_extra_spawn_type():
+  cfg = TerrainGeneratorCfg(
+    size=(4.0, 4.0),
+    num_rows=2,
+    num_cols=1,
+    curriculum=True,
+    seed=0,
+    sub_terrains={
+      "flat": BoxPyramidStairsTerrainCfg(
+        proportion=1.0,
+        step_height_range=(0.0, 0.0),
+        step_width=0.4,
+        platform_width=2.0,
+        border_width=0.5,
+      )
+    },
+    standalone_terrains={
+      "runway": BoxLongStairRunwayTerrainCfg(
+        proportion=1.0,
+        size=(6.0, 2.0),
+        step_height_range=(0.1, 0.1),
+        step_width_range=(0.3, 0.3),
+        num_steps=4,
+        flat_patch_sampling={"target": FlatPatchSamplingCfg(num_patches=1)},
+      )
+    },
+  )
+  generator = TerrainGenerator(cfg)
+  spec = mujoco.MjSpec()
+  generator.compile(spec)
+
+  assert generator.terrain_origins.shape == (2, 2, 3)
+  assert generator.terrain_type_names == ("flat", "runway")
+  np.testing.assert_array_equal(
+    generator.standalone_terrain_type_mask,
+    [False, True],
+  )
+  assert generator.flat_patches["target"].shape == (2, 2, 1, 3)
+  assert generator.step_boundary_counts[0, 1] == 4
 
 
 def test_step_danger_visualization_adds_non_colliding_geoms():

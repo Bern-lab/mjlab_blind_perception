@@ -7,6 +7,7 @@ from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
+from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.sensor import CameraSensorCfg, RayCastSensorCfg
 from mjlab.tasks.velocity import mdp
 from mjlab.tasks.velocity.mdp.teacher_target_heading_command import (
@@ -16,8 +17,15 @@ from mjlab.tasks.velocity.mdp.teacher_target_heading_rewards import (
   teacher_target_progress,
   teacher_target_reached_bonus,
 )
-from mjlab.terrains import FlatPatchSamplingCfg, TerrainGeneratorCfg
-from mjlab.terrains.config import BLIND_HIGH_STAIRS_TERRAINS_CFG
+from mjlab.terrains import (
+  BoxLongStairRunwayTerrainCfg,
+  FlatPatchSamplingCfg,
+  TerrainGeneratorCfg,
+)
+from mjlab.terrains.config import (
+  BLIND_HIGH_STAIRS_TERRAINS_CFG,
+  BLIND_HIGH_STAIRS_TREAD_DEPTHS,
+)
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
 from .blind_rough_toe_contact_cfg import (
@@ -42,6 +50,8 @@ TEACHER_OBSERVATION_ORDER = (
   "base_lin_vel",
   "foot_height",
 )
+
+_STAIR_RUNWAY_NAME = "long_stair_runway"
 
 
 def _add_target_flat_patch_sampling(
@@ -70,6 +80,36 @@ def _add_target_flat_patch_sampling(
 
     sub_cfg.flat_patch_sampling = dict(sub_cfg.flat_patch_sampling or {})
     sub_cfg.flat_patch_sampling["target"] = target_sampling
+  return terrain_cfg
+
+
+def _add_stair_runway_terrain(
+  terrain_generator: TerrainGeneratorCfg,
+) -> TerrainGeneratorCfg:
+  terrain_cfg = deepcopy(terrain_generator)
+  normal_weight = sum(
+    float(sub_cfg.proportion) for sub_cfg in terrain_cfg.sub_terrains.values()
+  )
+  terrain_cfg.standalone_terrains = dict(terrain_cfg.standalone_terrains)
+  terrain_cfg.standalone_terrains[_STAIR_RUNWAY_NAME] = BoxLongStairRunwayTerrainCfg(
+    proportion=normal_weight,
+    size=(8.9, 2.5),
+    step_height_range=(0.04, 0.2),
+    step_width_range=(
+      BLIND_HIGH_STAIRS_TREAD_DEPTHS[0],
+      BLIND_HIGH_STAIRS_TREAD_DEPTHS[-1],
+    ),
+    num_steps=14,
+    start_platform_length=2.0,
+    end_platform_length=2.0,
+    flat_patch_sampling={
+      "target": FlatPatchSamplingCfg(
+        num_patches=1,
+        patch_radius=0.25,
+        max_height_diff=0.02,
+      )
+    },
+  )
   return terrain_cfg
 
 
@@ -171,9 +211,10 @@ def _configure_teacherkl_target_navigation(
 ) -> None:
   assert cfg.scene.terrain is not None
   assert cfg.scene.terrain.terrain_generator is not None
-  cfg.scene.terrain.terrain_generator = _add_target_flat_patch_sampling(
+  terrain_generator = _add_target_flat_patch_sampling(
     cfg.scene.terrain.terrain_generator
   )
+  cfg.scene.terrain.terrain_generator = _add_stair_runway_terrain(terrain_generator)
 
   twist_cmd = TeacherTargetHeadingVelocityCommandCfg(
     entity_name="robot",
@@ -212,6 +253,25 @@ def _configure_teacherkl_target_navigation(
     twist_cmd.target_tile_radius = 1
 
   cfg.commands["twist"] = twist_cmd
+  reset_base = cfg.events["reset_base"]
+  reset_base.func = mdp.reset_root_state_uniform_with_standalone_heading
+  reset_base.params["standalone_pose_range"] = {
+    "x": (-0.10, 0.10),
+    "y": (-0.10, 0.10),
+    "z": (0.01, 0.05),
+    "yaw": (-0.05, 0.05),
+  }
+  reset_base.params["target_patch_name"] = "target"
+
+  cfg.terminations["runway_out_of_bounds"] = TerminationTermCfg(
+    func=mdp.runway_out_of_bounds,
+    params={"margin": 0.2, "drop_height": 0.4},
+  )
+  cfg.terminations["runway_target_reached"] = TerminationTermCfg(
+    func=mdp.runway_target_reached,
+    time_out=True,
+    params={"command_name": "twist", "threshold": 0.5},
+  )
   cfg.rewards["target_progress"] = RewardTermCfg(
     func=teacher_target_progress,
     weight=0.8,

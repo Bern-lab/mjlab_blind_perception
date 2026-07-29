@@ -59,6 +59,9 @@ Added
   upward stair runway, lets each stage use a different command-line riser
   height within the training range, and reports first-stage versus post-change
   foot-lift and predicted-riser deltas.
+- Added a standalone long stair-runway terrain for G1 target-navigation
+  training, with fixed start/end target points, matched high-stair size ranges,
+  and runway-specific reset and termination handling.
 - Added ``Mjlab-Velocity-Blind-Rough-TargetNavigation-StepDanger-TeacherKL-Unitree-G1``,
   a non-latent G1 target-navigation Teacher-KL task with local foot-lip danger
   parameters and a penalty-only toe-riser danger slab.

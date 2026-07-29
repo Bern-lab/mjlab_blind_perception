@@ -21,6 +21,7 @@ mjlab.terrains
   - :class:`HfWaveTerrainCfg`
   - :class:`BoxFlatTerrainCfg`
   - :class:`BoxInvertedPyramidStairsTerrainCfg`
+  - :class:`BoxLongStairRunwayTerrainCfg`
   - :class:`BoxNarrowBeamsTerrainCfg`
   - :class:`BoxNestedRingsTerrainCfg`
   - :class:`BoxOpenStairsTerrainCfg`
@@ -107,6 +108,12 @@ Primitive (Box) Terrains
   :show-inheritance:
 
 .. autoclass:: BoxInvertedPyramidStairsTerrainCfg
+  :members:
+  :exclude-members: __init__
+  :undoc-members:
+  :show-inheritance:
+
+.. autoclass:: BoxLongStairRunwayTerrainCfg
   :members:
   :exclude-members: __init__
   :undoc-members:

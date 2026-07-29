@@ -6,9 +6,16 @@ import numpy as np
 import pytest
 import torch
 
-from mjlab.terrains.primitive_terrains import BoxFlatTerrainCfg
+from mjlab.terrains.primitive_terrains import (
+  BoxFlatTerrainCfg,
+  BoxLongStairRunwayTerrainCfg,
+)
 from mjlab.terrains.terrain_entity import TerrainEntity, TerrainEntityCfg
-from mjlab.terrains.terrain_generator import TerrainGenerator, TerrainGeneratorCfg
+from mjlab.terrains.terrain_generator import (
+  FlatPatchSamplingCfg,
+  TerrainGenerator,
+  TerrainGeneratorCfg,
+)
 
 
 @pytest.fixture(scope="module")
@@ -199,3 +206,34 @@ def test_generator_does_not_mutate_cfg_num_cols() -> None:
   )
   TerrainGenerator(cfg)
   assert cfg.num_cols == 1, f"cfg.num_cols was mutated to {cfg.num_cols}"
+
+
+def test_standalone_terrain_gets_half_of_envs_when_weight_matches_grid() -> None:
+  cfg = TerrainGeneratorCfg(
+    size=(4.0, 4.0),
+    curriculum=True,
+    num_cols=1,
+    num_rows=2,
+    seed=0,
+    sub_terrains={
+      "flat": BoxFlatTerrainCfg(proportion=1.0, size=(4.0, 4.0)),
+    },
+    standalone_terrains={
+      "runway": BoxLongStairRunwayTerrainCfg(
+        proportion=1.0,
+        size=(6.0, 2.0),
+        step_height_range=(0.1, 0.1),
+        step_width_range=(0.3, 0.3),
+        num_steps=4,
+        flat_patch_sampling={"target": FlatPatchSamplingCfg(num_patches=1)},
+      )
+    },
+  )
+  entity = TerrainEntity(
+    TerrainEntityCfg(terrain_type="generator", terrain_generator=cfg, num_envs=100),
+    device="cpu",
+  )
+
+  assert entity.terrain_type_names == ("flat", "runway")
+  assert int(entity.is_standalone_env().sum().item()) == 50
+  assert int((~entity.is_standalone_env()).sum().item()) == 50

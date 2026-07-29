@@ -51,6 +51,7 @@ from mjlab.tasks.velocity.mdp.teacher_target_heading_command import (
 from mjlab.terrains.config import BLIND_HIGH_STAIRS_TREAD_DEPTHS
 from mjlab.terrains.primitive_terrains import (
   BoxInvertedPyramidStairsTerrainCfg,
+  BoxLongStairRunwayTerrainCfg,
   BoxPyramidStairsTerrainCfg,
 )
 
@@ -284,6 +285,27 @@ def test_teacherkl_target_navigation_switch() -> None:
   assert "target_reached_bonus" in target_cfg.rewards
   assert "height_scan" not in target_cfg.observations["actor"].terms
   assert "toe_terrain_contact" in target_cfg.observations["critic"].terms
+  assert target_cfg.scene.terrain is not None
+  terrain_generator = target_cfg.scene.terrain.terrain_generator
+  assert terrain_generator is not None
+  assert "long_stair_runway" in terrain_generator.standalone_terrains
+  runway = terrain_generator.standalone_terrains["long_stair_runway"]
+  assert isinstance(runway, BoxLongStairRunwayTerrainCfg)
+  assert runway.step_height_range == (0.04, 0.2)
+  assert runway.step_width_range == (
+    BLIND_HIGH_STAIRS_TREAD_DEPTHS[0],
+    BLIND_HIGH_STAIRS_TREAD_DEPTHS[-1],
+  )
+  assert runway.proportion == pytest.approx(
+    sum(s.proportion for s in terrain_generator.sub_terrains.values())
+  )
+  assert target_cfg.events["reset_base"].func.__name__ == (
+    "reset_root_state_uniform_with_standalone_heading"
+  )
+  assert "runway_out_of_bounds" in target_cfg.terminations
+  assert target_cfg.terminations["runway_out_of_bounds"].time_out is False
+  assert "runway_target_reached" in target_cfg.terminations
+  assert target_cfg.terminations["runway_target_reached"].time_out is True
 
 
 def test_g1_high_stairs_tasks_enable_mixed_terrain_replay() -> None:
