@@ -267,22 +267,61 @@ next to it contains one row per foot swing with touchdown level, peak lift,
 terrain clearance, decoded riser height, stair probability, and gate-memory
 ratio.
 
+To watch one height from the same eval setup, add `--play` and select a height
+with `--play-stair-height`:
+
+```bash
+uv run python scripts/velocity_eval/eval_stair_lift_height_sweep.py \
+  --checkpoint-file logs/rsl_rl/.../model.pt \
+  --play \
+  --play-stair-height 0.18 \
+  --num-envs 1 \
+  --max-episode-length-s 12.0
+```
+
+### Stair Height-Transition Evaluation
+
+Use `eval_stair_height_transition.py` to test whether a policy updates its
+foot-lift behavior after the stair height changes within the same episode. The
+eval builds a long runway with a 3 m wide stair strip: 10 upward steps at the
+first riser height, a short flat platform, then 10 upward steps at the second
+riser height. Vectorized lanes get side margins, but the actual stair surface
+remains 3 m wide. The robot spawns facing the first stair from the bottom apron,
+with lateral randomization limited to the middle 1 m of the stair width. The
+command points to the final top target.
+
+```bash
+uv run python scripts/velocity_eval/eval_stair_height_transition.py \
+  --checkpoint-file logs/rsl_rl/.../model.pt \
+  --first-stair-height 0.10 \
+  --second-stair-height 0.18 \
+  --episodes 40 \
+  --num-envs 40
+```
+
+The default stair-height and tread-depth checks stay within the current training
+range (`0.088--0.25 m` risers, `0.23--0.37 m` treads). The JSON/CSV outputs
+split landings into first and second stair stages, mark the first touchdown after
+the height change, and report stage deltas plus paired-episode lift changes for
+`peak_lift_from_takeoff_m` and SlowLatent `pred_riser_height_mean_m`.
+
 To watch the same eval task in a viewer, add `--play`. Use a small `--num-envs`
 when you want to inspect motion clearly:
 
 ```bash
-uv run python scripts/velocity_eval/eval_policy_goal_pyramid.py \
-  Mjlab-Velocity-Blind-Rough-LSTM-TeacherKL-Unitree-G1 \
-  --checkpoint-file logs/rsl_rl/g1_blind_rough_lstm_teacherkl/Mjlab-Velocity-Blind-Rough-LSTM-TeacherKL-Unitree-G1/5.25deployed/model_14800.pt \
+uv run python scripts/velocity_eval/eval_stair_height_transition.py \
+  --checkpoint-file logs/rsl_rl/.../model.pt \
+  --first-stair-height 0.10 \
+  --second-stair-height 0.18 \
   --play \
   --num-envs 4 \
-  --max-episode-length-s 12.0
+  --max-episode-length-s 16.0
 ```
 
-The play mode automatically respawns robots on the pyramid apron after success,
-fall, timeout, or heading failure. Pass `--viewer native` or `--viewer viser` to
-force a backend; `auto` uses native when a display is available and Viser
-otherwise.
+The play mode automatically respawns robots on the transition runway after
+success, fall, timeout, or heading failure. Pass `--viewer native` or
+`--viewer viser` to force a backend; `auto` uses native when a display is
+available and Viser otherwise.
 
 ## Collect Latents
 

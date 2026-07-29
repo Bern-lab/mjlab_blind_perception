@@ -5,12 +5,13 @@ from __future__ import annotations
 import csv
 import json
 import math
+import os
 import sys
 import traceback
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import numpy as np
 import torch
@@ -18,7 +19,10 @@ import tyro
 from scripts.velocity_eval.eval_metrics import _current_step_boundaries
 from scripts.velocity_eval.eval_policy_goal_pyramid import (
   GoalPyramidEvalConfig,
+  GoalPyramidNativeViewer,
+  GoalPyramidViserViewer,
   _computed_start_distance,
+  _force_single_goal_terrain_tile,
   _fresh_obs_with_history,
   _goal_reached,
   _heading_failure,
@@ -93,6 +97,9 @@ class StairLiftHeightSweepConfig:
   clean_observations: bool = True
   disable_observation_delay: bool = True
   disable_actuator_delay: bool = True
+  play: bool = False
+  viewer: Literal["auto", "native", "viser"] = "auto"
+  play_stair_height: float | None = None
 
   stair_levels: int = 10
   step_width: float = 0.30
@@ -858,6 +865,8 @@ def _goal_cfg_for_height(
     clean_observations=cfg.clean_observations,
     disable_observation_delay=cfg.disable_observation_delay,
     disable_actuator_delay=cfg.disable_actuator_delay,
+    play=cfg.play,
+    viewer=cfg.viewer,
     stair_levels=cfg.stair_levels,
     stair_height=stair_height_m,
     step_width=cfg.step_width,
@@ -1067,6 +1076,102 @@ def _run_height_batch(
       step_dt=float(wrapped.unwrapped.step_dt),
       records=tracker.records,
     )
+  finally:
+    wrapped.close()
+
+
+def _resolve_play_stair_height(cfg: StairLiftHeightSweepConfig) -> float:
+  if cfg.play_stair_height is not None:
+    return float(cfg.play_stair_height)
+  if not cfg.stair_heights:
+    raise ValueError("Provide at least one --stair-heights value for --play.")
+  stair_height_m = float(cfg.stair_heights[0])
+  if len(cfg.stair_heights) > 1:
+    print(
+      "[INFO] stair_lift_sweep --play uses one height at a time; "
+      f"using the first --stair-heights value ({stair_height_m:.3f} m). "
+      "Pass --play-stair-height to choose another height."
+    )
+  return stair_height_m
+
+
+def run_stair_lift_height_sweep_play(
+  task_id: str,
+  cfg: StairLiftHeightSweepConfig,
+) -> None:
+  configure_torch_backends()
+  device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
+  runtime = _resolve_eval_runtime(task_id, cfg)
+  stair_height_m = _resolve_play_stair_height(cfg)
+  goal_cfg = _goal_cfg_for_height(cfg, stair_height_m)
+  terrain = _make_goal_terrain(goal_cfg)
+
+  env_cfg = runtime.env_cfg_factory(True)
+  apply_eval_overrides(
+    env_cfg,
+    terrain,
+    num_envs=cfg.num_envs,
+    seed=cfg.seed,
+    max_episode_length_s=cfg.max_episode_length_s,
+    command=(0.0, 0.0, 0.0),
+    clean_observations=cfg.clean_observations,
+    disable_observation_delay=cfg.disable_observation_delay,
+    disable_actuator_delay=cfg.disable_actuator_delay,
+    enable_riser_contact_sensor="g1" in runtime.task_id.lower(),
+  )
+  _force_single_goal_terrain_tile(env_cfg)
+  env_cfg.viewer.distance = max(env_cfg.viewer.distance, 8.0)
+  env_cfg.viewer.elevation = min(env_cfg.viewer.elevation, -30.0)
+  env_cfg.viewer.max_extra_envs = max(env_cfg.viewer.max_extra_envs, cfg.num_envs - 1)
+
+  env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
+  wrapped = RslRlVecEnvWrapper(env, clip_actions=get_clip_actions(runtime.agent_cfg))
+
+  try:
+    policy, _runner = load_inference_policy(
+      env=wrapped,
+      task_id=runtime.task_id,
+      agent_cfg=runtime.agent_cfg,
+      checkpoint_path=runtime.checkpoint_path,
+      device=device,
+      runner_cls=runtime.runner_cls,
+    )
+    spawn = _spawn_on_pyramid_apron(wrapped.unwrapped, goal_cfg, seed=cfg.seed)
+    active = torch.ones(
+      cfg.num_envs,
+      dtype=torch.bool,
+      device=wrapped.unwrapped.device,
+    )
+    _update_goal_command(wrapped.unwrapped, goal_cfg, spawn, active)
+    _fresh_obs_with_history(wrapped.unwrapped)
+
+    if cfg.viewer == "auto":
+      has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+      resolved_viewer = "native" if has_display else "viser"
+    else:
+      resolved_viewer = cfg.viewer
+
+    print(
+      "[INFO] Playing stair_lift_sweep height "
+      f"{stair_height_m:.3f} m with {cfg.num_envs} envs using "
+      f"{resolved_viewer} viewer"
+    )
+    if resolved_viewer == "native":
+      GoalPyramidNativeViewer(
+        wrapped,
+        policy,
+        goal_cfg=goal_cfg,
+        spawn=spawn,
+      ).run()
+    elif resolved_viewer == "viser":
+      GoalPyramidViserViewer(
+        wrapped,
+        policy,
+        goal_cfg=goal_cfg,
+        spawn=spawn,
+      ).run()
+    else:
+      raise RuntimeError(f"Unsupported viewer backend: {resolved_viewer}")
   finally:
     wrapped.close()
 
@@ -1489,11 +1594,17 @@ def main() -> None:
   remaining_args = _normalize_float_list_flag(list(remaining_args), "--stair-heights")
   cfg = tyro.cli(
     StairLiftHeightSweepConfig,
-    args=_normalize_standalone_bool_flags(remaining_args, ("--write-records-csv",)),
+    args=_normalize_standalone_bool_flags(
+      remaining_args,
+      ("--write-records-csv", "--play"),
+    ),
     prog=sys.argv[0] + f" {chosen_task}",
     config=mjlab.TYRO_FLAGS,
   )
   try:
+    if cfg.play:
+      run_stair_lift_height_sweep_play(chosen_task, cfg)
+      return
     run_stair_lift_height_sweep(chosen_task, cfg)
   except Exception:
     traceback.print_exc()

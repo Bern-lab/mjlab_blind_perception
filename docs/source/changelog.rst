@@ -55,6 +55,10 @@ Added
   per-foot swing peak lift across fixed riser heights, fitting lift/predicted
   riser correlations, and auto-selecting legacy G1 eval presets for local
   checkpoints with older actor observation dimensions.
+- Added a stair height-transition evaluator that builds a long two-stage
+  upward stair runway, lets each stage use a different command-line riser
+  height within the training range, and reports first-stage versus post-change
+  foot-lift and predicted-riser deltas.
 - Added ``Mjlab-Velocity-Blind-Rough-TargetNavigation-StepDanger-TeacherKL-Unitree-G1``,
   a non-latent G1 target-navigation Teacher-KL task with local foot-lip danger
   parameters and a penalty-only toe-riser danger slab.
