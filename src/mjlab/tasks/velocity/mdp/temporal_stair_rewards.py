@@ -896,6 +896,24 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     self._landing_touchdown_now[env_ids] = False
     self._landing_quality_now[env_ids] = 0.0
 
+  def _reset_stride_tracking(self, env_ids: torch.Tensor | slice) -> None:
+    """Clear stale stride labels without leaving stair context."""
+    self._safe_stride_valid[env_ids] = False
+    self._safe_tread_lower_bound[env_ids] = 0.0
+    self._minimum_safe_stride_valid[env_ids] = False
+    self._minimum_safe_stride_interval_valid[env_ids] = False
+    self._minimum_safe_stride_exact[env_ids] = False
+    self._minimum_safe_stride_weight[env_ids] = 0.0
+    self._safe_stride_evidence_steps[env_ids] = 0
+    self._probe_evidence_seen[env_ids] = False
+    self._minimum_safe_stride_geometry_valid[env_ids] = False
+    self._minimum_safe_stride_interval_geometry_valid[env_ids] = False
+    self._minimum_safe_stride_raw[env_ids] = 0.0
+    self._minimum_safe_stride[env_ids] = 0.0
+    self._minimum_safe_stride_upper[env_ids] = 0.0
+    self._safe_landing_center_s[env_ids] = 0.0
+    self._observed_step_stride[env_ids] = 0.0
+
   @staticmethod
   def _normalize_xy(vec: torch.Tensor) -> torch.Tensor:
     return vec / torch.norm(vec, dim=-1, keepdim=True).clamp_min(1.0e-6)
@@ -2995,7 +3013,14 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         self._observed_step_stride.sum() / safe_count
       )
 
-      reset_mask = confirmed_exit | (active_phase & ~level_active) | stale_stride_reset
+      nonflat_tracking_reset = (active_phase & ~level_active) | stale_stride_reset
+      tracking_reset_count = nonflat_tracking_reset.float().sum().clamp_min(1.0)
+      if bool(torch.any(nonflat_tracking_reset).item()):
+        self._reset_stride_tracking(
+          nonflat_tracking_reset.nonzero(as_tuple=False).squeeze(-1)
+        )
+
+      reset_mask = confirmed_exit
       reset_count = reset_mask.float().sum().clamp_min(1.0)
       log["Metrics/stair_phase_reset_event_ratio"] = (
         reset_mask.float().sum() / active_phase_count
@@ -3005,10 +3030,19 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         confirmed_exit & past_last_boundary
       ).float().sum() / confirmed_exit_count
       log["Metrics/stair_exit_reset_by_level_ratio"] = (
-        active_phase & ~level_active
+        confirmed_exit & (active_phase & ~level_active)
       ).float().sum() / reset_count
-      log["Metrics/stair_phase_reset_by_stale_stride_ratio"] = (
-        stale_stride_reset.float().sum() / reset_count
+      log["Metrics/stair_phase_reset_by_stale_stride_ratio"] = torch.zeros(
+        (), device=env.device
+      )
+      log["Metrics/stair_stride_tracking_reset_event_ratio"] = (
+        nonflat_tracking_reset.float().sum() / active_phase_count
+      )
+      log["Metrics/stair_stride_tracking_reset_by_level_ratio"] = (
+        active_phase & ~level_active
+      ).float().sum() / tracking_reset_count
+      log["Metrics/stair_stride_tracking_reset_by_stale_stride_ratio"] = (
+        stale_stride_reset.float().sum() / tracking_reset_count
       )
       if bool(torch.any(reset_mask).item()):
         reset_ids = reset_mask.nonzero(as_tuple=False).squeeze(-1)
@@ -3034,6 +3068,9 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       log["Metrics/stair_exit_reset_by_past_last_ratio"] = zero
       log["Metrics/stair_exit_reset_by_level_ratio"] = zero
       log["Metrics/stair_phase_reset_by_stale_stride_ratio"] = zero
+      log["Metrics/stair_stride_tracking_reset_event_ratio"] = zero
+      log["Metrics/stair_stride_tracking_reset_by_level_ratio"] = zero
+      log["Metrics/stair_stride_tracking_reset_by_stale_stride_ratio"] = zero
 
     total_penalty = slab_penalty + contact_penalty
     log["Metrics/toe_riser_total_penalty_mean"] = total_penalty.mean()

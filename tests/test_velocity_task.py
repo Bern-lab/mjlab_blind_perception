@@ -392,8 +392,11 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert foot_event_params["ratchet_toe_anchor_offset_m"] == 0.085
   assert foot_event_params["ratchet_backoff_step_m"] == 0.025
   assert foot_event_params["ratchet_backoff_margin_m"] == 0.015
-  assert foot_event_params["ratchet_lock_margin_m"] == 0.01
-  assert foot_event_params["ratchet_lock_stable_steps"] == 2
+  assert foot_event_params["ratchet_lock_margin_m"] == 0.005
+  assert foot_event_params["ratchet_lock_stable_steps"] == 1
+  assert foot_event_params["ratchet_lock_target_stable_enabled"] is True
+  assert foot_event_params["ratchet_soft_upper_ttl_steps"] == 2
+  assert foot_event_params["ratchet_lower_target_lag_margin_m"] == 0.005
   assert foot_event_params["ratchet_same_foot_stride_guard_layers"] == 2.0
   assert foot_event_params["ratchet_same_foot_stride_guard_margin_m"] == 0.04
   assert foot_event_params["ratchet_min_interval_width_m"] == 0.04
@@ -529,6 +532,7 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert actor_cfg.event_label_window_steps == 4
   assert actor_cfg.min_stair_steps == 30
   assert actor_cfg.exit_steps == 40
+  assert actor_cfg.stair_memory_exit_on_stair_off is False
   assert actor_cfg.stair_on_threshold == 0.35
   assert actor_cfg.stair_off_threshold == 0.20
   assert actor_cfg.aux_stair_coef == 0.05
@@ -819,6 +823,7 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
       alpha_hold_state=0.006,
       alpha_hold_shape=0.07,
       stair_confirm_steps=3,
+      stair_memory_exit_on_stair_off=True,
       stair_on_threshold=0.2,
       stair_off_threshold=0.05,
       aux_event_pos_weight=42.0,
@@ -854,6 +859,7 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
   assert actor_cfg.alpha_hold_state == 0.006
   assert actor_cfg.alpha_hold_shape == 0.07
   assert actor_cfg.stair_confirm_steps == 3
+  assert actor_cfg.stair_memory_exit_on_stair_off is True
   assert actor_cfg.stair_on_threshold == 0.2
   assert actor_cfg.stair_off_threshold == 0.05
   assert actor_cfg.aux_event_pos_weight == 42.0

@@ -98,6 +98,8 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """Minimum steps in STAIR_MEMORY before exit is allowed."""
   exit_steps: int = 40
   """Consecutive stair-off steps required to exit STAIR_MEMORY."""
+  stair_memory_exit_on_stair_off: bool = True
+  """Allow predicted stair-off evidence to release STAIR_MEMORY."""
   cooldown_steps: int = 15
   """Cooldown steps after exiting STAIR_MEMORY before re-triggering."""
 

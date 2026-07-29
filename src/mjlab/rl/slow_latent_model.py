@@ -71,6 +71,7 @@ class LSTMSlowLatentMLPModel(MLPModel):
     stair_confirm_steps: int = 3,
     min_stair_steps: int = 30,
     exit_steps: int = 40,
+    stair_memory_exit_on_stair_off: bool = True,
     cooldown_steps: int = 15,
     event_on_threshold: float = 0.60,
     event_off_threshold: float = 0.20,
@@ -299,6 +300,7 @@ class LSTMSlowLatentMLPModel(MLPModel):
     self.stair_confirm_steps = float(stair_confirm_steps)
     self.min_stair_steps = float(min_stair_steps)
     self.exit_steps = float(exit_steps)
+    self.stair_memory_exit_on_stair_off = bool(stair_memory_exit_on_stair_off)
     self.cooldown_steps = float(cooldown_steps)
     if self.write_steps < 1.0:
       raise ValueError("write_steps must be at least 1.")
@@ -1109,6 +1111,8 @@ class LSTMSlowLatentMLPModel(MLPModel):
     memory_shape_boost = in_memory & (write_timer > 0.0)
     stair_timer = torch.where(in_memory, stair_timer + 1.0, stair_timer)
     stair_off = stair_prob < self.stair_off_threshold
+    if not self.stair_memory_exit_on_stair_off:
+      stair_off = torch.zeros_like(stair_off)
     evidence_timer = torch.where(
       in_memory & stair_off,
       evidence_timer + 1.0,
@@ -1780,6 +1784,7 @@ class _OnnxStairLatentModel(nn.Module):
     self.stair_confirm_steps = model.stair_confirm_steps
     self.min_stair_steps = model.min_stair_steps
     self.exit_steps = model.exit_steps
+    self.stair_memory_exit_on_stair_off = model.stair_memory_exit_on_stair_off
     self.cooldown_steps = model.cooldown_steps
     self.event_on_threshold = model.event_on_threshold
     self.event_off_threshold = model.event_off_threshold
@@ -2109,6 +2114,8 @@ class _OnnxStairLatentModel(nn.Module):
     memory_shape_boost = in_memory & (write_timer > 0.0)
     stair_timer = torch.where(in_memory, stair_timer + 1.0, stair_timer)
     stair_off = stair_prob < self.stair_off_threshold
+    if not self.stair_memory_exit_on_stair_off:
+      stair_off = torch.zeros_like(stair_off)
     evidence_timer = torch.where(
       in_memory & stair_off,
       evidence_timer + 1.0,

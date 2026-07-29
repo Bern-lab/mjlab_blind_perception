@@ -402,6 +402,36 @@ def test_stair_context_requires_two_explicit_flat_touchdowns_to_exit() -> None:
   assert confirmed.tolist() == [True, False, False]
 
 
+def test_nonflat_stride_reset_keeps_stair_phase_and_shape_context() -> None:
+  term = object.__new__(temporal_toe_step_riser_slab_penalty)
+  term._stair_phase = torch.tensor([2])
+  term._stair_shape_label_valid = torch.tensor([True])
+  term._safe_stride_valid = torch.tensor([True])
+  term._safe_tread_lower_bound = torch.tensor([0.2])
+  term._minimum_safe_stride_valid = torch.tensor([True])
+  term._minimum_safe_stride_interval_valid = torch.tensor([True])
+  term._minimum_safe_stride_exact = torch.tensor([True])
+  term._minimum_safe_stride_weight = torch.tensor([3.0])
+  term._safe_stride_evidence_steps = torch.tensor([5])
+  term._probe_evidence_seen = torch.tensor([True])
+  term._minimum_safe_stride_geometry_valid = torch.tensor([True])
+  term._minimum_safe_stride_interval_geometry_valid = torch.tensor([True])
+  term._minimum_safe_stride_raw = torch.tensor([0.4])
+  term._minimum_safe_stride = torch.tensor([0.3])
+  term._minimum_safe_stride_upper = torch.tensor([0.5])
+  term._safe_landing_center_s = torch.tensor([0.2])
+  term._observed_step_stride = torch.tensor([0.35])
+
+  term._reset_stride_tracking(torch.tensor([0]))
+
+  assert term._stair_phase.tolist() == [2]
+  assert term._stair_shape_label_valid.tolist() == [True]
+  assert term._safe_stride_valid.tolist() == [False]
+  assert term._minimum_safe_stride_valid.tolist() == [False]
+  assert term._minimum_safe_stride_interval_valid.tolist() == [False]
+  assert term._minimum_safe_stride_raw.tolist() == [0.0]
+
+
 def test_stair_entry_tread_support_fraction_detects_sixty_percent() -> None:
   sole_points_w = torch.tensor(
     [

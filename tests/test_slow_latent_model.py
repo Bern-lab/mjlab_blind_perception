@@ -41,6 +41,7 @@ def _make_model(
   shadow_semantic_enabled: bool = False,
   actor_semantic_enabled: bool = False,
   geometry_probe_input: str = "none",
+  stair_memory_exit_on_stair_off: bool = True,
 ) -> LSTMSlowLatentMLPModel:
   obs = _make_obs()
   return LSTMSlowLatentMLPModel(
@@ -73,6 +74,7 @@ def _make_model(
     shadow_semantic_enabled=shadow_semantic_enabled,
     actor_semantic_enabled=actor_semantic_enabled,
     geometry_probe_input=geometry_probe_input,
+    stair_memory_exit_on_stair_off=stair_memory_exit_on_stair_off,
   )
 
 
@@ -797,6 +799,24 @@ def test_stair_head_alone_controls_memory_exit() -> None:
   assert gate[1, 0].item() == 2.0
 
 
+def test_memory_can_ignore_stair_prob_until_external_reset() -> None:
+  model = _make_model(stair_memory_exit_on_stair_off=False)
+  model.min_stair_steps = 0.0
+  model.exit_steps = 1.0
+  gate = torch.zeros(1, 5)
+  gate[:, 0] = 2.0
+
+  for _ in range(4):
+    gate, _alpha = model._advance_gate_state(
+      event_prob=torch.zeros(1, 1),
+      stair_prob=torch.zeros(1, 1),
+      gate_state=gate,
+    )
+
+  assert gate[0, 0].item() == 2.0
+  assert gate[0, 2].item() == 0.0
+
+
 def test_memory_exit_smoothly_releases_latent_update_rate() -> None:
   model = _make_model()
   model.min_stair_steps = 0.0
@@ -1173,6 +1193,7 @@ def test_slow_latent_export_metadata() -> None:
   assert metadata["policy_slow_latent_alpha_hold_state"] == "0.0"
   assert metadata["policy_slow_latent_alpha_hold_shape"] == "0.05"
   assert metadata["policy_slow_latent_memory_event_shape_boost_steps"] == "15.0"
+  assert metadata["policy_slow_latent_memory_exit_on_stair_off"] == "True"
   assert metadata["policy_latent_obs_dim"] == "11"
   assert metadata["policy_stair_tread_depth_min"] == "0.23"
   assert metadata["policy_stair_tread_depth_max"] == "0.37"

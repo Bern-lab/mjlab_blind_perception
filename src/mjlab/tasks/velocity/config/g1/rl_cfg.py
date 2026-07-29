@@ -72,6 +72,8 @@ class G1SlowLatentPolicyModelParams:
   """Minimum memory-hold steps before exit is allowed."""
   exit_steps: int = 40
   """Consecutive stair-off steps required to leave stair-memory mode."""
+  stair_memory_exit_on_stair_off: bool = False
+  """Keep stair memory latched until the env confirms flat exit/reset."""
   cooldown_steps: int = 15
   """Cooldown steps after exiting memory before another trigger is accepted."""
   event_on_threshold: float = 0.60
@@ -233,6 +235,7 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
   stair_confirm_steps: int = 3,
   min_stair_steps: int = 30,
   exit_steps: int = 40,
+  stair_memory_exit_on_stair_off: bool = False,
   cooldown_steps: int = 15,
   event_on_threshold: float = 0.60,
   event_off_threshold: float = 0.20,
@@ -303,6 +306,7 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
     stair_confirm_steps=stair_confirm_steps,
     min_stair_steps=min_stair_steps,
     exit_steps=exit_steps,
+    stair_memory_exit_on_stair_off=stair_memory_exit_on_stair_off,
     cooldown_steps=cooldown_steps,
     event_on_threshold=event_on_threshold,
     event_off_threshold=event_off_threshold,
@@ -506,6 +510,7 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
   stair_confirm_steps: int = 3,
   min_stair_steps: int = 30,
   exit_steps: int = 40,
+  stair_memory_exit_on_stair_off: bool = False,
   cooldown_steps: int = 15,
   event_on_threshold: float = 0.60,
   event_off_threshold: float = 0.20,
@@ -589,6 +594,7 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
     stair_confirm_steps = model_params.stair_confirm_steps
     min_stair_steps = model_params.min_stair_steps
     exit_steps = model_params.exit_steps
+    stair_memory_exit_on_stair_off = model_params.stair_memory_exit_on_stair_off
     cooldown_steps = model_params.cooldown_steps
     event_on_threshold = model_params.event_on_threshold
     event_off_threshold = model_params.event_off_threshold
@@ -671,6 +677,7 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
     stair_confirm_steps=stair_confirm_steps,
     min_stair_steps=min_stair_steps,
     exit_steps=exit_steps,
+    stair_memory_exit_on_stair_off=stair_memory_exit_on_stair_off,
     cooldown_steps=cooldown_steps,
     event_on_threshold=event_on_threshold,
     event_off_threshold=event_off_threshold,
