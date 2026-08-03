@@ -206,6 +206,28 @@ def test_long_stair_runway_has_fixed_start_target_and_step_sequence():
   np.testing.assert_array_equal(output.step_boundary_layers, np.arange(1, 15))
 
 
+def test_long_stair_runway_can_place_target_near_end_platform():
+  cfg = BoxLongStairRunwayTerrainCfg(
+    size=(10.9, 2.5),
+    step_height_range=(0.1, 0.1),
+    step_width_range=(0.3, 0.3),
+    num_steps=14,
+    start_platform_length=2.0,
+    end_platform_length=4.0,
+    end_target_fraction=0.85,
+    flat_patch_sampling={
+      "target": FlatPatchSamplingCfg(num_patches=1),
+    },
+  )
+  spec = mujoco.MjSpec()
+  spec.worldbody.add_body(name="terrain")
+  output = cfg.function(0.0, spec, np.random.default_rng(0))
+
+  assert output.flat_patches is not None
+  np.testing.assert_allclose(output.flat_patches["target"][0], [9.6, 1.25, 1.4])
+  assert output.bounds == (0.0, 10.2, 0.0, 2.5)
+
+
 def test_generator_places_standalone_runway_as_extra_spawn_type():
   cfg = TerrainGeneratorCfg(
     size=(4.0, 4.0),

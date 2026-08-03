@@ -597,6 +597,8 @@ class BoxLongStairRunwayTerrainCfg(SubTerrainCfg):
   """Length of the flat start platform before the first riser."""
   end_platform_length: float = 2.0
   """Length of the flat goal platform after the final riser."""
+  end_target_fraction: float = 0.5
+  """Position of the target patch within the end platform, from 0=start to 1=end."""
   foundation_depth: float = 1.0
   """How far boxes extend below z=0 for stable collision support."""
 
@@ -678,7 +680,14 @@ class BoxLongStairRunwayTerrainCfg(SubTerrainCfg):
     add_box(end_start, end_end, total_height, end_rgba)
 
     origin = np.array([0.5 * self.start_platform_length, 0.5 * width, 0.0])
-    target = np.array([0.5 * (end_start + end_end), 0.5 * width, total_height])
+    target_fraction = float(np.clip(self.end_target_fraction, 0.0, 1.0))
+    target = np.array(
+      [
+        end_start + target_fraction * self.end_platform_length,
+        0.5 * width,
+        total_height,
+      ]
+    )
     flat_patches: dict[str, np.ndarray] | None = None
     if self.flat_patch_sampling is not None:
       flat_patches = {}

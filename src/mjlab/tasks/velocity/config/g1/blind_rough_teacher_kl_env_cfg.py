@@ -35,6 +35,7 @@ from .env_cfgs import (
   UniformVelocityCommandCfg,
   configure_g1_high_stairs_play_randomization,
   configure_g1_high_stairs_play_terrain_generator,
+  configure_g1_high_stairs_standalone_replay,
   unitree_g1_rough_env_cfg,
 )
 
@@ -93,7 +94,7 @@ def _add_stair_runway_terrain(
   terrain_cfg.standalone_terrains = dict(terrain_cfg.standalone_terrains)
   terrain_cfg.standalone_terrains[_STAIR_RUNWAY_NAME] = BoxLongStairRunwayTerrainCfg(
     proportion=normal_weight,
-    size=(8.9, 2.5),
+    size=(10.9, 2.5),
     step_height_range=(0.04, 0.2),
     step_width_range=(
       BLIND_HIGH_STAIRS_TREAD_DEPTHS[0],
@@ -101,7 +102,8 @@ def _add_stair_runway_terrain(
     ),
     num_steps=14,
     start_platform_length=2.0,
-    end_platform_length=2.0,
+    end_platform_length=4.0,
+    end_target_fraction=0.85,
     flat_patch_sampling={
       "target": FlatPatchSamplingCfg(
         num_patches=1,
@@ -215,6 +217,8 @@ def _configure_teacherkl_target_navigation(
     cfg.scene.terrain.terrain_generator
   )
   cfg.scene.terrain.terrain_generator = _add_stair_runway_terrain(terrain_generator)
+  if not play:
+    configure_g1_high_stairs_standalone_replay(cfg)
 
   twist_cmd = TeacherTargetHeadingVelocityCommandCfg(
     entity_name="robot",

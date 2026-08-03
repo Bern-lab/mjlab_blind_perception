@@ -123,11 +123,13 @@ def test_goal_pyramid_policy_score_allows_two_toe_hits_without_penalty():
   perfect = _score_policy(summary, cfg)
   assert perfect["score_100"] == 100.0
   assert perfect["collision_subscores"]["toe"] == 1.0
+  assert perfect["collision_penalties"]["toe"] == 0.0
 
   summary["toe_riser_collision_count"] = 5.0
   penalized = _score_policy(summary, cfg)
-  assert penalized["collision_subscores"]["toe"] == 0.625
-  assert penalized["score_100"] == 98.125
+  assert penalized["collision_penalties"]["toe"] == pytest.approx(2.1)
+  assert penalized["collision_subscores"]["toe"] == pytest.approx(0.825)
+  assert penalized["score_100"] == pytest.approx(97.9)
   assert "heel" not in penalized["collision_subscores"]
   assert "lip" not in penalized["collision_subscores"]
 
@@ -172,9 +174,11 @@ def test_goal_pyramid_summary_reports_landing_quality_and_score():
   assert summary["episode_stair_full_landing_ratio_p10"] == pytest.approx(0.075)
   assert "landing_index_100" in summary
   assert "landing_linear_score_100" in summary
-  assert summary["score_version"] == "goal_pyramid_full_support_v3"
+  assert summary["score_version"] == "goal_pyramid_full_support_v4"
   assert summary["paper_metrics"]["full_landing_ratio"] == pytest.approx(3.0 / 6.0)
   assert summary["paper_metrics"]["stair_safe_pass_rate"] == pytest.approx(0.5)
+  assert summary["paper_metrics"]["toe_riser_collision_penalty"] > 0.0
+  assert summary["score_collision_penalties"]["toe"] > 0.0
   assert "collision_heel" not in summary["score_components"]
   assert "collision_lip" not in summary["score_components"]
   assert 0.0 < summary["score_100"] < 100.0

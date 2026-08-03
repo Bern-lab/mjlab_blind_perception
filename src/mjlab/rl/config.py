@@ -150,6 +150,12 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """Slack, in meters, before interval-coverage loss is applied."""
   safe_stride_confidence_loss_coef: float = 0.30
   """Weight for SafeStride interval-confidence BCE inside the SafeStride loss."""
+  safe_stride_phase_center_loss_coef: float = 0.0
+  """Weight for phase-aware SafeStride center Huber from ratchet targets."""
+  safe_stride_trend_loss_coef: float = 0.0
+  """Weight for explicit SafeStride closer/hold/farther classification loss."""
+  safe_stride_dense_trend_loss_coef: float = 1.0
+  """Extra trend-head weight for deployable ratchet probe/backoff/lock labels."""
   safe_stride_std_floor_loss_coef: float = 0.0
   """Weight for penalizing collapsed SafeStride prediction spread."""
   safe_stride_centered_loss_coef: float = 0.0
@@ -161,7 +167,7 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   safe_stride_deployable_hint_margin: float = 0.02
   """Slack, in meters, before deployable lower-bound hints are penalized."""
   same_foot_stride_deployable_hint_loss_coef: float = 0.0
-  """Weight for deployable same-foot stride ratchet hints inside shape loss."""
+  """Weight for deployable ratchet hints that supervise the shape head."""
   same_foot_stride_deployable_hint_margin: float = 0.02
   """Slack, in meters, before open same-foot stride hints are penalized."""
   safe_stride_min: float = 0.10
@@ -198,6 +204,8 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """Huber transition point for normalized next-touchdown quality."""
   future_horizon: int = 20
   """Future window for maximum risk and first-touchdown quality labels."""
+  slow_latent_metrics: Literal["off", "minimal", "full"] = "full"
+  """Amount of slow-latent diagnostic logging during PPO updates."""
 
   # ---- MLP encoder ----
   mlp_encoder_dims: tuple[int, ...] = (128, 128)

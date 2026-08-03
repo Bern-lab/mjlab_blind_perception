@@ -291,14 +291,22 @@ def test_teacherkl_target_navigation_switch() -> None:
   assert "long_stair_runway" in terrain_generator.standalone_terrains
   runway = terrain_generator.standalone_terrains["long_stair_runway"]
   assert isinstance(runway, BoxLongStairRunwayTerrainCfg)
+  assert runway.size == (10.9, 2.5)
   assert runway.step_height_range == (0.04, 0.2)
   assert runway.step_width_range == (
     BLIND_HIGH_STAIRS_TREAD_DEPTHS[0],
     BLIND_HIGH_STAIRS_TREAD_DEPTHS[-1],
   )
+  assert runway.start_platform_length == 2.0
+  assert runway.end_platform_length == 4.0
+  assert runway.end_target_fraction == 0.85
   assert runway.proportion == pytest.approx(
     sum(s.proportion for s in terrain_generator.sub_terrains.values())
   )
+  assert target_cfg.scene.terrain.standalone_spawn_start_level == 3
+  terrain_params = target_cfg.curriculum["terrain_levels"].params
+  assert terrain_params["standalone_replay_start_level"] == 3
+  assert terrain_params["standalone_replay_probability"] == pytest.approx(0.5)
   assert target_cfg.events["reset_base"].func.__name__ == (
     "reset_root_state_uniform_with_standalone_heading"
   )
@@ -407,20 +415,35 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   foot_event_params = env_cfg.observations["latent"].terms["foot_event_memory"].params
   assert foot_event_params["include_raw_memory"] is False
   assert foot_event_params["ratchet_height_threshold_m"] == 0.025
-  assert foot_event_params["ratchet_probe_increment_m"] == 0.025
+  assert foot_event_params["ratchet_probe_increment_m"] == 0.05
+  assert foot_event_params["ratchet_first_collision_probe_push_m"] == 0.16
+  assert foot_event_params["ratchet_post_first_collision_probe_increment_m"] == 0.14
   assert foot_event_params["ratchet_no_hit_lower_margin_m"] == 0.0
   assert foot_event_params["ratchet_interval_target_margin_m"] == 0.01
   assert foot_event_params["ratchet_collision_margin_m"] == 0.02
   assert foot_event_params["ratchet_toe_anchor_offset_m"] == 0.085
   assert foot_event_params["ratchet_backoff_step_m"] == 0.025
+  assert foot_event_params["ratchet_first_collision_backoff_step_m"] == 0.025
   assert foot_event_params["ratchet_backoff_margin_m"] == 0.015
   assert foot_event_params["ratchet_lock_margin_m"] == 0.005
   assert foot_event_params["ratchet_lock_stable_steps"] == 1
   assert foot_event_params["ratchet_lock_target_stable_enabled"] is True
-  assert foot_event_params["ratchet_soft_upper_ttl_steps"] == 2
-  assert foot_event_params["ratchet_lower_target_lag_margin_m"] == 0.005
+  assert foot_event_params["ratchet_soft_upper_ttl_steps"] == 5
+  assert foot_event_params["ratchet_first_collision_enters_stair_mode"] is True
+  assert foot_event_params["ratchet_single_collision_confirms_interval"] is False
+  assert foot_event_params["ratchet_two_collision_enabled"] is True
+  assert foot_event_params["ratchet_two_collision_interval_margin_m"] == 0.025
+  assert foot_event_params["ratchet_two_collision_stride_layers"] == 2.0
+  assert foot_event_params["ratchet_two_collision_min_layer_delta"] == 1
+  assert foot_event_params["ratchet_two_collision_tread_min_m"] == 0.18
+  assert foot_event_params["ratchet_two_collision_tread_max_m"] == 0.42
+  assert foot_event_params["ratchet_lower_target_lag_margin_m"] == 0.0
   assert foot_event_params["ratchet_same_foot_stride_guard_layers"] == 2.0
   assert foot_event_params["ratchet_same_foot_stride_guard_margin_m"] == 0.04
+  assert foot_event_params["ratchet_collision_min_confidence"] == 0.45
+  assert (
+    foot_event_params["ratchet_post_first_collision_collision_min_confidence"] == 0.30
+  )
   assert foot_event_params["ratchet_min_interval_width_m"] == 0.04
   assert foot_event_params["ratchet_min_stride_m"] == 0.10
   assert foot_event_params["ratchet_max_stride_m"] == 0.80
@@ -570,20 +593,23 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert actor_cfg.safe_stride_phase_dim == 2
   assert actor_cfg.safe_stride_phase_start == 91
   assert actor_cfg.stair_shape_huber_delta == 0.05
-  assert actor_cfg.stair_shape_same_foot_loss_coef == 2.0
-  assert actor_cfg.stair_shape_riser_loss_coef == 0.5
+  assert actor_cfg.stair_shape_same_foot_loss_coef == 0.0
+  assert actor_cfg.stair_shape_riser_loss_coef == 1.0
   assert actor_cfg.safe_stride_huber_delta == 0.05
-  assert actor_cfg.safe_stride_width_loss_coef == 1.0
+  assert actor_cfg.safe_stride_width_loss_coef == 1.5
   assert actor_cfg.safe_stride_lower_shortfall_coef == 1.2
   assert actor_cfg.safe_stride_interval_coverage_loss_coef == 0.0
   assert actor_cfg.safe_stride_interval_coverage_margin == 0.01
   assert actor_cfg.safe_stride_confidence_loss_coef == 0.10
+  assert actor_cfg.safe_stride_phase_center_loss_coef == 1.0
+  assert actor_cfg.safe_stride_trend_loss_coef == 0.50
+  assert actor_cfg.safe_stride_dense_trend_loss_coef == 1.0
   assert actor_cfg.safe_stride_std_floor_loss_coef == 0.0
   assert actor_cfg.safe_stride_centered_loss_coef == 0.0
-  assert actor_cfg.safe_stride_std_floor_ratio == 0.70
+  assert actor_cfg.safe_stride_std_floor_ratio == 0.55
   assert actor_cfg.safe_stride_deployable_hint_loss_coef == 0.0
-  assert actor_cfg.safe_stride_deployable_hint_margin == 0.02
-  assert actor_cfg.same_foot_stride_deployable_hint_loss_coef == 0.60
+  assert actor_cfg.safe_stride_deployable_hint_margin == 0.01
+  assert actor_cfg.same_foot_stride_deployable_hint_loss_coef == 0.0
   assert actor_cfg.same_foot_stride_deployable_hint_margin == 0.02
   assert actor_cfg.safe_stride_min == 0.10
   assert actor_cfg.safe_stride_max == 0.55
@@ -652,7 +678,7 @@ def test_semantic_v2_probe_freezes_policy_and_uses_dynamic_stride_input() -> Non
   assert actor_cfg.safe_stride_phase_dim == 2
   assert actor_cfg.safe_stride_phase_start == 91
   assert actor_cfg.aux_safe_stride_coef == 1.0
-  assert actor_cfg.safe_stride_width_loss_coef == 1.0
+  assert actor_cfg.safe_stride_width_loss_coef == 1.5
   assert actor_cfg.safe_stride_interval_coverage_loss_coef == 0.0
   assert actor_cfg.actor_semantic_enabled is False
   assert actor_cfg.aux_event_coef == 0.0

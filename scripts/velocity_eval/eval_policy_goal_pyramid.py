@@ -98,7 +98,8 @@ class GoalPyramidEvalConfig:
   heading_failure_grace_s: float = 0.25
 
   toe_collision_free_count: float = 2.0
-  toe_collision_zero_score_count: float = 10.0
+  toe_collision_penalty_step: float = 0.35
+  toe_collision_max_penalty: float = 12.0
   safe_pass_min_full_landing_ratio: float = 0.75
   safe_pass_min_support_fraction: float = 0.80
   safe_pass_max_low_support_ratio: float = 0.20
@@ -876,13 +877,14 @@ def _quantile(values: list[float], q: float) -> float:
   return float(sorted_values[lower] * (1.0 - weight) + sorted_values[upper] * weight)
 
 
-def _collision_score(
-  mean_count: float, free_count: float, zero_score_count: float
+def _progressive_collision_penalty(
+  mean_count: float, free_count: float, penalty_step: float, max_penalty: float
 ) -> float:
   if mean_count <= free_count:
-    return 1.0
-  span = max(zero_score_count - free_count, 1.0e-6)
-  return float(max(0.0, min(1.0, 1.0 - (mean_count - free_count) / span)))
+    return 0.0
+  excess = mean_count - free_count
+  penalty = penalty_step * excess * (excess + 1.0) * 0.5
+  return float(max(0.0, min(max_penalty, penalty)))
 
 
 def _paper_metrics(summary: dict) -> dict:
@@ -906,6 +908,7 @@ def _paper_metrics(summary: dict) -> dict:
     "toe_riser_contacts_over_free_per_episode": summary[
       "toe_riser_collision_over_free_count"
     ],
+    "toe_riser_collision_penalty": summary["score_collision_penalties"]["toe"],
   }
 
 
@@ -920,12 +923,14 @@ def _score_policy(summary: dict, cfg: GoalPyramidEvalConfig) -> dict:
   landing_full = 45.0 * full_landing_ratio
   landing_full_consistency = 15.0 * full_landing_ratio * full_landing_ratio
 
-  toe_score = _collision_score(
+  toe_penalty = _progressive_collision_penalty(
     summary["toe_riser_collision_count"],
     cfg.toe_collision_free_count,
-    cfg.toe_collision_zero_score_count,
+    cfg.toe_collision_penalty_step,
+    cfg.toe_collision_max_penalty,
   )
-  collision_toe = 5.0 * toe_score
+  toe_score = 1.0 - _ratio(toe_penalty, cfg.toe_collision_max_penalty)
+  collision_toe = 5.0 - toe_penalty
   landing_index = (
     40.0 * summary["mean_stair_landing_support_fraction"]
     + 40.0 * full_landing_ratio
@@ -949,26 +954,31 @@ def _score_policy(summary: dict, cfg: GoalPyramidEvalConfig) -> dict:
     "landing_full_support_consistency": landing_full_consistency,
     "collision_toe": collision_toe,
   }
+  raw_score = float(sum(components.values()))
   return {
-    "score_100": float(sum(components.values())),
-    "score_version": "goal_pyramid_full_support_v3",
+    "score_100": float(max(0.0, min(100.0, raw_score))),
+    "score_version": "goal_pyramid_full_support_v4",
     "landing_index_100": float(landing_index),
     "landing_linear_score_100": float(landing_linear_score),
     "components": components,
+    "collision_penalties": {
+      "toe": toe_penalty,
+    },
     "collision_subscores": {
       "toe": toe_score,
     },
     "formula": {
-      "profile": "stair_full_support_v3",
+      "profile": "stair_full_support_v4",
       "completion_success": "15 * success_rate",
       "completion_progress": "5 * mean_max_height_progress_fraction",
       "landing_support": "15 * mean_stair_landing_support_fraction",
       "landing_full_support": "45 * stair_full_landing_ratio",
       "landing_full_support_consistency": "15 * stair_full_landing_ratio^2",
       "collision_toe": (
-        "5 * linear_score(mean_toe_collisions, "
+        "5 - progressive_penalty(mean_toe_collisions, "
         f"free={cfg.toe_collision_free_count}, "
-        f"zero={cfg.toe_collision_zero_score_count})"
+        f"step={cfg.toe_collision_penalty_step}, "
+        f"cap={cfg.toe_collision_max_penalty})"
       ),
       "landing_index_100": (
         "40 * mean_stair_landing_support_fraction "
@@ -1230,9 +1240,10 @@ def _summarize_batches(cfg: GoalPyramidEvalConfig, batches: list[dict]) -> dict:
   summary["score_version"] = policy_score["score_version"]
   summary["landing_index_100"] = policy_score["landing_index_100"]
   summary["landing_linear_score_100"] = policy_score["landing_linear_score_100"]
-  summary["paper_metrics"] = _paper_metrics(summary)
   summary["score_components"] = policy_score["components"]
+  summary["score_collision_penalties"] = policy_score["collision_penalties"]
   summary["score_collision_subscores"] = policy_score["collision_subscores"]
+  summary["paper_metrics"] = _paper_metrics(summary)
   summary["score_formula"] = policy_score["formula"]
   return summary
 
@@ -1307,9 +1318,11 @@ def _write_table_image(payload: dict, output_path: Path) -> None:
     "low %",
     "toe",
     "toe>free",
+    "toe pen",
   ]
   toe = summary["toe_riser_collision_count"]
   toe_over_free = summary["toe_riser_collision_over_free_count"]
+  toe_penalty = summary["score_collision_penalties"]["toe"]
   summary_values = [
     summary["score_100"],
     summary["stair_safe_pass_rate"] * 100.0,
@@ -1323,6 +1336,7 @@ def _write_table_image(payload: dict, output_path: Path) -> None:
     summary["stair_low_support_landing_ratio"] * 100.0,
     toe,
     toe_over_free,
+    toe_penalty,
   ]
   summary_text = [
     [
@@ -1338,6 +1352,7 @@ def _write_table_image(payload: dict, output_path: Path) -> None:
       f"{summary_values[9]:.0f}",
       f"{summary_values[10]:.2f}",
       f"{summary_values[11]:.2f}",
+      f"{summary_values[12]:.1f}",
     ]
   ]
 

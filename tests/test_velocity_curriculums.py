@@ -9,6 +9,7 @@ import torch
 import mjlab.tasks.velocity.mdp.observations as velocity_observations
 import mjlab.tasks.velocity.mdp.rewards as velocity_rewards
 import mjlab.tasks.velocity.mdp.temporal_stair_rewards as temporal_stair_rewards
+from mjlab.envs import ManagerBasedRlEnv
 from mjlab.envs.mdp.events import randomize_terrain
 from mjlab.tasks.velocity.mdp.curriculums import (
   _terrain_family_name,
@@ -64,7 +65,15 @@ class _FakeScene:
 
 
 class _FakeTerrain:
-  def __init__(self, num_envs: int, num_levels: int = 10) -> None:
+  def __init__(
+    self,
+    num_envs: int,
+    num_levels: int = 10,
+    num_cols: int = 1,
+    standalone_mask: tuple[bool, ...] | None = None,
+    type_proportions: tuple[float, ...] | None = None,
+    terrain_type_names: tuple[str, ...] | None = None,
+  ) -> None:
     self.cfg = SimpleNamespace(
       terrain_generator=SimpleNamespace(
         size=(8.0, 8.0),
@@ -73,10 +82,35 @@ class _FakeTerrain:
     )
     self.terrain_levels = torch.zeros(num_envs, dtype=torch.long)
     self.terrain_types = torch.zeros(num_envs, dtype=torch.long)
-    self.terrain_origins = torch.zeros(num_levels, 1, 3)
+    self.terrain_origins = torch.zeros(num_levels, num_cols, 3)
     self.env_origins = torch.zeros(num_envs, 3)
+    self._standalone_terrain_type_mask = torch.tensor(
+      standalone_mask or (False,) * num_cols,
+      dtype=torch.bool,
+    )
+    self._terrain_type_proportions = torch.tensor(
+      type_proportions or (1.0,) * num_cols,
+      dtype=torch.float,
+    )
+    self._terrain_type_names = terrain_type_names or ("stairs",) * num_cols
     self.last_move_up: torch.Tensor | None = None
     self.last_move_down: torch.Tensor | None = None
+
+  @property
+  def terrain_type_names(self) -> tuple[str, ...]:
+    return self._terrain_type_names
+
+  @property
+  def standalone_terrain_type_mask(self) -> torch.Tensor:
+    return self._standalone_terrain_type_mask
+
+  @property
+  def terrain_type_proportions(self) -> torch.Tensor:
+    return self._terrain_type_proportions
+
+  def is_standalone_env(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+    types = self.terrain_types if env_ids is None else self.terrain_types[env_ids]
+    return self._standalone_terrain_type_mask[types]
 
   def update_env_origins(
     self,
@@ -94,6 +128,25 @@ class _FakeTerrain:
     ]
 
 
+def test_standalone_stair_runway_bypasses_min_terrain_level_gate() -> None:
+  terrain = SimpleNamespace(
+    terrain_levels=torch.tensor([0, 0, 3], dtype=torch.long),
+    is_standalone_env=lambda: torch.tensor([True, False, False]),
+  )
+  env = SimpleNamespace(
+    num_envs=3,
+    device=torch.device("cpu"),
+    scene=SimpleNamespace(terrain=terrain),
+  )
+
+  active = velocity_rewards._terrain_level_active(
+    cast(ManagerBasedRlEnv, env),
+    min_terrain_level=3,
+  )
+
+  assert active.tolist() == [True, False, True]
+
+
 class _FakeCommandManager:
   def __init__(self, term) -> None:
     self._term = term
@@ -107,7 +160,15 @@ class _FakeCommandManager:
     return self._term.command
 
 
-def _make_env(root_xy: torch.Tensor, command_term, num_levels: int = 10):
+def _make_env(
+  root_xy: torch.Tensor,
+  command_term,
+  num_levels: int = 10,
+  num_cols: int = 1,
+  standalone_mask: tuple[bool, ...] | None = None,
+  type_proportions: tuple[float, ...] | None = None,
+  terrain_type_names: tuple[str, ...] | None = None,
+):
   num_envs = root_xy.shape[0]
   root_pos = torch.cat([root_xy, torch.zeros(num_envs, 1)], dim=1)
   root_quat = torch.zeros(num_envs, 4)
@@ -115,7 +176,14 @@ def _make_env(root_xy: torch.Tensor, command_term, num_levels: int = 10):
   asset = SimpleNamespace(
     data=SimpleNamespace(root_link_pos_w=root_pos, root_link_quat_w=root_quat)
   )
-  terrain = _FakeTerrain(num_envs, num_levels=num_levels)
+  terrain = _FakeTerrain(
+    num_envs,
+    num_levels=num_levels,
+    num_cols=num_cols,
+    standalone_mask=standalone_mask,
+    type_proportions=type_proportions,
+    terrain_type_names=terrain_type_names,
+  )
   scene = _FakeScene(asset, terrain, terrain.env_origins)
   env = SimpleNamespace(
     num_envs=num_envs,
@@ -217,6 +285,119 @@ def test_terrain_levels_vel_mixed_replay_sticks_after_high_level() -> None:
   )
 
   assert terrain.terrain_levels[0].item() == 9
+
+
+def test_standalone_replay_starts_after_level_gate() -> None:
+  command_term = SimpleNamespace(command=torch.zeros(4, 3))
+  env, terrain = _make_env(
+    torch.tensor(
+      [
+        [5.0, 0.0],
+        [5.0, 0.0],
+        [1.0, 0.0],
+        [1.0, 0.0],
+      ]
+    ),
+    command_term,
+    num_levels=10,
+    num_cols=2,
+    standalone_mask=(False, True),
+    type_proportions=(1.0, 1.0),
+  )
+  terrain.terrain_levels[:] = torch.tensor([2, 2, 2, 0])
+  terrain.terrain_types[:] = torch.tensor([0, 0, 1, 1])
+
+  result = terrain_levels_vel(
+    cast(Any, env),
+    torch.arange(4),
+    command_name="twist",
+    standalone_replay_start_level=3,
+    standalone_replay_probability=1.0,
+  )
+
+  assert terrain.terrain_levels.tolist() == [3, 3, 2, 0]
+  assert terrain.terrain_types.tolist() == [1, 1, 0, 0]
+  assert result["standalone_replay_active"].item() == torch.tensor(0.5).item()
+  assert result["standalone_replay_spawn_ratio"].item() == torch.tensor(1.0).item()
+
+
+def test_standalone_replay_deactivates_below_level_gate() -> None:
+  command_term = SimpleNamespace(
+    command=torch.tensor(
+      [
+        [1.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+      ]
+    )
+  )
+  env, terrain = _make_env(
+    torch.tensor(
+      [
+        [0.1, 0.0],
+        [0.1, 0.0],
+        [0.1, 0.0],
+        [0.1, 0.0],
+      ]
+    ),
+    command_term,
+    num_levels=10,
+    num_cols=2,
+    standalone_mask=(False, True),
+    type_proportions=(1.0, 1.0),
+  )
+  terrain.terrain_levels[:] = torch.tensor([3, 1, 0, 0])
+  terrain.terrain_types[:] = torch.tensor([1, 1, 1, 0])
+  env.extras["terrain_standalone_replay_active"] = torch.ones(4, dtype=torch.bool)
+
+  result = terrain_levels_vel(
+    cast(Any, env),
+    torch.arange(4),
+    command_name="twist",
+    standalone_replay_start_level=3,
+    standalone_replay_probability=1.0,
+  )
+
+  assert terrain.terrain_levels.tolist() == [2, 0, 0, 0]
+  assert terrain.terrain_types.tolist() == [0, 0, 0, 0]
+  assert result["standalone_replay_active"].item() == torch.tensor(0.0).item()
+  assert result["standalone_replay_spawn_ratio"].item() == torch.tensor(0.0).item()
+
+
+def test_terrain_levels_vel_logs_compiled_standalone_type_levels() -> None:
+  command_term = SimpleNamespace(command=torch.zeros(4, 3))
+  env, terrain = _make_env(
+    torch.tensor(
+      [
+        [5.0, 0.0],
+        [5.0, 0.0],
+        [1.0, 0.0],
+        [1.0, 0.0],
+      ]
+    ),
+    command_term,
+    num_levels=10,
+    num_cols=2,
+    standalone_mask=(False, True),
+    type_proportions=(1.0, 1.0),
+    terrain_type_names=("pyramid_stairs_inv", "long_stair_runway"),
+  )
+  terrain.terrain_levels[:] = torch.tensor([2, 2, 2, 0])
+  terrain.terrain_types[:] = torch.tensor([0, 0, 1, 1])
+
+  result = terrain_levels_vel(
+    cast(Any, env),
+    torch.arange(4),
+    command_name="twist",
+    standalone_replay_start_level=3,
+    standalone_replay_probability=1.0,
+  )
+
+  assert result["pyramid_stairs_inv"].item() == torch.tensor(1.0).item()
+  assert result["long_stair_runway"].item() == torch.tensor(3.0).item()
+  assert result["standalone_replay_level_mean"].item() == torch.tensor(3.0).item()
+  assert result["standalone_replay_grid_level_mean"].item() == torch.tensor(1.0).item()
 
 
 def test_randomize_terrain_can_sample_weighted_level_buckets() -> None:

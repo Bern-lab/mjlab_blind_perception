@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 _DEFAULT_SCENE_CFG = SceneEntityCfg("robot")
 _MIXED_REPLAY_ACTIVE_KEY = "terrain_mixed_replay_active"
+_STANDALONE_REPLAY_ACTIVE_KEY = "terrain_standalone_replay_active"
 _MIXED_REPLAY_BUCKET_NAMES = ("low", "mid", "high")
 
 
@@ -163,6 +164,166 @@ def _apply_mixed_terrain_replay(
   return result
 
 
+def _sample_terrain_types_from_mask(
+  type_mask: torch.Tensor,
+  type_proportions: torch.Tensor,
+  num_samples: int,
+) -> torch.Tensor:
+  type_ids = torch.nonzero(type_mask, as_tuple=False).flatten()
+  weights = type_proportions[type_ids].to(dtype=torch.float)
+  if torch.sum(weights) <= 0.0:
+    weights = torch.ones_like(weights)
+  choices = torch.multinomial(
+    weights / torch.sum(weights),
+    num_samples,
+    replacement=True,
+  )
+  return type_ids[choices]
+
+
+def _standalone_spawn_probability(
+  standalone_mask: torch.Tensor,
+  type_proportions: torch.Tensor,
+  explicit_probability: float | None,
+) -> float:
+  if explicit_probability is not None:
+    return max(0.0, min(1.0, float(explicit_probability)))
+
+  standalone_weight = torch.sum(type_proportions[standalone_mask])
+  grid_weight = torch.sum(type_proportions[~standalone_mask])
+  total = standalone_weight + grid_weight
+  if total <= 0.0:
+    return 0.5
+  return float((standalone_weight / total).item())
+
+
+def _apply_standalone_terrain_replay(
+  env: ManagerBasedRlEnv,
+  env_ids: torch.Tensor,
+  terrain,
+  standalone_replay_start_level: int | None,
+  standalone_replay_probability: float | None = None,
+  activation_levels: torch.Tensor | None = None,
+) -> dict[str, torch.Tensor]:
+  if standalone_replay_start_level is None:
+    return {}
+
+  terrain_origins = terrain.terrain_origins
+  if terrain_origins is None:
+    return {}
+
+  standalone_mask = getattr(terrain, "standalone_terrain_type_mask", None)
+  if not isinstance(standalone_mask, torch.Tensor):
+    return {}
+  num_levels, num_cols = terrain_origins.shape[:2]
+  if standalone_mask.numel() != num_cols:
+    return {}
+
+  device = terrain.terrain_types.device
+  standalone_mask = standalone_mask.to(device=device, dtype=torch.bool)
+  if not standalone_mask.any() or not (~standalone_mask).any():
+    return {}
+
+  start_level = max(0, min(int(standalone_replay_start_level), num_levels - 1))
+  type_proportions = getattr(terrain, "terrain_type_proportions", None)
+  if (
+    not isinstance(type_proportions, torch.Tensor)
+    or type_proportions.numel() != num_cols
+  ):
+    type_proportions = torch.ones(num_cols, device=device, dtype=torch.float)
+  else:
+    type_proportions = type_proportions.to(device=device, dtype=torch.float)
+  spawn_probability = _standalone_spawn_probability(
+    standalone_mask,
+    type_proportions,
+    standalone_replay_probability,
+  )
+
+  extras = getattr(env, "extras", None)
+  if extras is None:
+    extras = {}
+    env.extras = extras
+
+  active = extras.get(_STANDALONE_REPLAY_ACTIVE_KEY)
+  if (
+    not isinstance(active, torch.Tensor) or active.shape != terrain.terrain_levels.shape
+  ):
+    active = torch.zeros_like(terrain.terrain_levels, dtype=torch.bool)
+    extras[_STANDALONE_REPLAY_ACTIVE_KEY] = active
+
+  if activation_levels is None:
+    effective_activation_levels = terrain.terrain_levels[env_ids]
+  else:
+    effective_activation_levels = activation_levels
+  active[env_ids] = effective_activation_levels >= start_level
+  active_env_ids = env_ids[active[env_ids]]
+
+  if active_env_ids.numel() > 0:
+    replay_count = int(active_env_ids.numel())
+    use_standalone = torch.rand(replay_count, device=device) < spawn_probability
+    sampled_types = torch.empty(replay_count, device=device, dtype=torch.long)
+    if use_standalone.any():
+      sampled_types[use_standalone] = _sample_terrain_types_from_mask(
+        standalone_mask,
+        type_proportions,
+        int(use_standalone.sum().item()),
+      )
+    if (~use_standalone).any():
+      sampled_types[~use_standalone] = _sample_terrain_types_from_mask(
+        ~standalone_mask,
+        type_proportions,
+        int((~use_standalone).sum().item()),
+      )
+    terrain.terrain_types[active_env_ids] = sampled_types
+
+  # Defensive cleanup: envs that have not crossed the gate should remain on
+  # regular grid terrains even if an earlier setup assigned them a standalone type.
+  inactive_env_ids = env_ids[~active[env_ids]]
+  if inactive_env_ids.numel() > 0:
+    inactive_types = terrain.terrain_types[inactive_env_ids]
+    inactive_standalone = standalone_mask[inactive_types]
+    if inactive_standalone.any():
+      cleanup_ids = inactive_env_ids[inactive_standalone]
+      terrain.terrain_types[cleanup_ids] = _sample_terrain_types_from_mask(
+        ~standalone_mask,
+        type_proportions,
+        int(cleanup_ids.numel()),
+      )
+
+  changed_ids = env_ids
+  origins = terrain_origins[
+    terrain.terrain_levels[changed_ids],
+    terrain.terrain_types[changed_ids],
+  ]
+  terrain_env_origins = getattr(terrain, "env_origins", None)
+  if terrain_env_origins is not None:
+    terrain_env_origins[changed_ids] = origins
+  scene_env_origins = getattr(env.scene, "env_origins", None)
+  if scene_env_origins is not None:
+    scene_env_origins[changed_ids] = origins
+
+  zero = torch.tensor(0.0, device=device)
+  active_types = terrain.terrain_types[active]
+  spawn_ratio = (
+    torch.mean(standalone_mask[active_types].float()) if active_types.numel() else zero
+  )
+  current_standalone = standalone_mask[terrain.terrain_types]
+  levels = terrain.terrain_levels.float()
+  standalone_level_mean = (
+    torch.mean(levels[current_standalone]) if current_standalone.any() else zero
+  )
+  grid_level_mean = (
+    torch.mean(levels[~current_standalone]) if (~current_standalone).any() else zero
+  )
+  return {
+    "standalone_replay_active": torch.mean(active.float()),
+    "standalone_replay_spawn_ratio": spawn_ratio,
+    "standalone_replay_probability": torch.tensor(spawn_probability, device=device),
+    "standalone_replay_level_mean": standalone_level_mean,
+    "standalone_replay_grid_level_mean": grid_level_mean,
+  }
+
+
 class VelocityStage(TypedDict):
   step: int
   lin_vel_x: tuple[float, float] | None
@@ -178,6 +339,8 @@ def terrain_levels_vel(
   mixed_replay_start_level: int | None = None,
   mixed_replay_level_ranges: tuple[tuple[int, int], ...] = ((0, 2), (3, 5), (6, 9)),
   mixed_replay_weights: tuple[float, ...] = (0.2, 0.3, 0.5),
+  standalone_replay_start_level: int | None = None,
+  standalone_replay_probability: float | None = None,
 ) -> dict[str, torch.Tensor]:
   asset: Entity = env.scene[asset_cfg.name]
 
@@ -236,6 +399,14 @@ def terrain_levels_vel(
     mixed_replay_weights,
     activation_levels,
   )
+  standalone_replay_result = _apply_standalone_terrain_replay(
+    env,
+    env_ids,
+    terrain,
+    standalone_replay_start_level,
+    standalone_replay_probability,
+    terrain.terrain_levels[env_ids],
+  )
 
   # Compute per-terrain-type mean levels.
   levels = terrain.terrain_levels.float()
@@ -243,21 +414,28 @@ def terrain_levels_vel(
     "mean": torch.mean(levels),
     "max": torch.max(levels),
     **mixed_replay_result,
+    **standalone_replay_result,
   }
   if target_attempted is not None and target_reached is not None:
     result["target_attempted"] = torch.mean(target_attempted.float())
     result["target_reached"] = torch.mean(target_reached.float())
 
-  # In curriculum mode num_cols == num_terrains (one column per type),
-  # so the column index directly maps to the sub-terrain name.
-  sub_terrain_names = list(terrain_generator.sub_terrains.keys())
+  # In curriculum mode the column index directly maps to the terrain type name.
+  # Prefer the compiled entity names because standalone terrain columns are
+  # appended after regular sub-terrains and are not present in sub_terrains.
+  compiled_terrain_names = getattr(terrain, "terrain_type_names", ())
+  terrain_type_names = list(compiled_terrain_names)
+  if not terrain_type_names:
+    terrain_type_names = list(terrain_generator.sub_terrains.keys())
+    standalone_terrains = getattr(terrain_generator, "standalone_terrains", {})
+    terrain_type_names.extend(standalone_terrains.keys())
   terrain_origins = terrain.terrain_origins
   assert terrain_origins is not None
   num_cols = terrain_origins.shape[1]
-  if num_cols == len(sub_terrain_names):
+  if num_cols == len(terrain_type_names):
     types = terrain.terrain_types
     family_masks: dict[str, torch.Tensor] = {}
-    for i, name in enumerate(sub_terrain_names):
+    for i, name in enumerate(terrain_type_names):
       mask = types == i
       if mask.any():
         result[name] = torch.mean(levels[mask])

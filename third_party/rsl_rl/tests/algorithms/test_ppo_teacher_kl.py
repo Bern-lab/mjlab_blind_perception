@@ -678,6 +678,262 @@ def test_safe_stride_interval_coverage_penalizes_missing_target_bounds() -> None
     assert covered_upper_shortfall.item() == pytest.approx(0.0)
 
 
+def test_safe_stride_trend_metrics_compare_farther_closer_and_hold() -> None:
+    """SafeStride trend logs should reflect the relative next-step direction."""
+    predictions = torch.tensor([[0.42], [0.25], [0.31], [0.50]])
+    labels = torch.tensor([[0.44], [0.24], [0.31], [0.20]])
+    reference = torch.full_like(predictions, 0.30)
+    valid = torch.ones_like(predictions)
+
+    metrics = PPOTeacherKL._compute_stride_trend_metrics(
+        predictions,
+        labels,
+        reference,
+        valid,
+        margin=0.02,
+    )
+
+    assert metrics["accuracy"].item() == pytest.approx(0.75)
+    assert metrics["active_accuracy"].item() == pytest.approx(2.0 / 3.0)
+    assert metrics["farther_ratio"].item() == pytest.approx(0.25)
+    assert metrics["closer_ratio"].item() == pytest.approx(0.50)
+    assert metrics["hold_ratio"].item() == pytest.approx(0.25)
+    assert metrics["farther_recall"].item() == pytest.approx(1.0)
+    assert metrics["closer_recall"].item() == pytest.approx(0.5)
+    assert metrics["hold_accuracy"].item() == pytest.approx(1.0)
+
+
+def test_safe_stride_dense_trend_uses_ratchet_probe_backoff_lock() -> None:
+    """Ratchet state should recover only after a soft/confirmed upper exists."""
+    latent_obs = torch.zeros(4, 80)
+    latent_obs[:, 70] = torch.tensor([1.0, 1.0, 1.0, 0.0])
+    latent_obs[:, 71] = torch.tensor([0.30, 0.30, 0.30, 0.0])
+    latent_obs[:, 72] = torch.tensor([0.45, 0.41, 0.36, 0.0])
+    latent_obs[:, 76] = torch.tensor([0.0, 0.0, 1.0, 0.0])
+    latent_obs[:, 77] = torch.tensor([0.0, 0.42, 0.48, 0.0])
+    latent_obs[:, 78] = torch.tensor([0.8, 0.8, 0.8, 0.0])
+    observations = TensorDict({"latent": latent_obs}, batch_size=[4])
+
+    trend = PPOTeacherKL._safe_stride_dense_trend_from_latent_obs(
+        observations,
+        "latent",
+        margin=0.02,
+    )
+
+    assert trend is not None
+    torch.testing.assert_close(trend[:, 0], torch.tensor([2.0, 0.0, 1.0, 2.0]))
+    torch.testing.assert_close(trend[:, 1], torch.tensor([1.0, 1.0, 1.0, 0.0]))
+
+
+def test_safe_stride_phase_targets_read_ratchet_center_and_phase() -> None:
+    """Ratchet target should supervise center while upper/confirmed set phase."""
+    latent_obs = torch.zeros(4, 80)
+    latent_obs[:, 70] = 1.0
+    latent_obs[:, 71] = torch.tensor([0.30, 0.30, 0.30, 0.30])
+    latent_obs[:, 72] = torch.tensor([0.52, 0.41, 0.35, 0.31])
+    latent_obs[:, 73] = torch.tensor([0.0, 0.42, 0.42, 0.0])
+    latent_obs[:, 76] = torch.tensor([0.0, 0.0, 0.0, 1.0])
+    latent_obs[:, 77] = torch.tensor([0.0, 0.0, 0.0, 0.35])
+    latent_obs[:, 78] = 0.8
+    observations = TensorDict({"latent": latent_obs}, batch_size=[4])
+
+    phase = PPOTeacherKL._safe_stride_phase_targets_from_latent_obs(
+        observations,
+        "latent",
+        safe_stride_min=0.10,
+        safe_stride_max=0.55,
+        upper_margin=0.02,
+    )
+
+    assert phase is not None
+    torch.testing.assert_close(phase[:, 0], torch.tensor([0.52, 0.41, 0.35, 0.31]))
+    torch.testing.assert_close(phase[:, 1], torch.ones(4))
+    torch.testing.assert_close(phase[:, 2], torch.tensor([2.0, 0.0, 0.0, 1.0]))
+    torch.testing.assert_close(phase[:, 3], torch.tensor([1.0, 0.0, 0.0, 0.0]))
+    torch.testing.assert_close(phase[:, 4], torch.tensor([0.0, 1.0, 1.0, 0.0]))
+    torch.testing.assert_close(phase[:, 5], torch.tensor([0.0, 0.0, 0.0, 1.0]))
+
+
+def test_safe_stride_phase_targets_keep_first_collision_probe_open() -> None:
+    """A first-collision probe target without an upper should still say farther."""
+    latent_obs = torch.zeros(3, 80)
+    latent_obs[:, 70] = 1.0
+    latent_obs[:, 71] = torch.tensor([0.28, 0.20, 0.20])
+    latent_obs[:, 72] = torch.tensor([0.54, 0.36, 0.49])
+    latent_obs[:, 73] = torch.tensor([0.0, 0.30, 0.30])
+    latent_obs[:, 75] = torch.tensor([0.0, 0.34, 0.34])
+    latent_obs[:, 76] = torch.tensor([0.0, 1.0, 1.0])
+    latent_obs[:, 77] = torch.tensor([0.0, 0.46, 0.46])
+    latent_obs[:, 78] = 0.8
+    observations = TensorDict({"latent": latent_obs}, batch_size=[3])
+
+    phase = PPOTeacherKL._safe_stride_phase_targets_from_latent_obs(
+        observations,
+        "latent",
+        safe_stride_min=0.10,
+        safe_stride_max=0.55,
+        upper_margin=0.02,
+    )
+
+    assert phase is not None
+    torch.testing.assert_close(phase[:, 2], torch.tensor([2.0, 1.0, 0.0]))
+    torch.testing.assert_close(phase[:, 3], torch.tensor([1.0, 0.0, 0.0]))
+    torch.testing.assert_close(phase[:, 4], torch.tensor([0.0, 0.0, 1.0]))
+    torch.testing.assert_close(phase[:, 5], torch.tensor([0.0, 1.0, 0.0]))
+
+
+def test_safe_stride_phase_center_prediction_detaches_lower_bound() -> None:
+    """Phase-center gradients should train the open upper bound, not lower."""
+    interval = torch.tensor(
+        [[0.30, 0.50], [0.20, 0.40]],
+        requires_grad=True,
+    )
+    center = PPOTeacherKL._safe_stride_phase_center_prediction(
+        interval.mean(dim=-1, keepdim=True),
+        interval,
+    )
+
+    center.sum().backward()
+
+    assert interval.grad is not None
+    torch.testing.assert_close(interval.grad[:, 0], torch.zeros(2))
+    torch.testing.assert_close(interval.grad[:, 1], torch.full((2,), 0.5))
+
+
+def test_safe_stride_phase_center_loss_tracks_ratchet_target() -> None:
+    """Probe phase should train center toward ratchet[2], not interval center."""
+    alg = _build_teacher_kl({"enabled": False})
+    actor = cast(Any, alg.actor)
+    actor.aux_event_coef = 0.0
+    actor.aux_stair_coef = 0.0
+    actor.aux_future_collision_risk_coef = 0.0
+    actor.aux_future_safe_landing_quality_coef = 0.0
+    actor.aux_stair_shape_coef = 0.0
+    actor.aux_safe_stride_coef = 1.0
+    actor.safe_stride_huber_delta = 0.05
+    actor.safe_stride_phase_center_loss_coef = 1.0
+    actor.safe_stride_min = 0.10
+    actor.safe_stride_max = 0.55
+    actor.latent_obs_set = "latent"
+    actor.get_slow_latent_diagnostics = lambda: {}
+
+    labels = torch.zeros(4, 16)
+    labels[0, 1] = 1.0
+    labels[0, 5] = 0.30
+    labels[0, 6] = 1.0
+    labels[0, 8] = 1.0
+    labels[0, 9] = 0.44
+    labels[0, 15] = 0.0
+    latent = torch.zeros(4, 80)
+    latent[0, 70] = 1.0
+    latent[0, 72] = 0.52
+    latent[0, 78] = 0.8
+    observations = TensorDict(
+        {
+            "latent_labels": labels,
+            "latent": latent,
+        },
+        batch_size=[NUM_ENVS],
+    )
+    good_interval = torch.tensor([
+        [0.30, 0.74],
+        [0.0, 0.0],
+        [0.0, 0.0],
+        [0.0, 0.0],
+    ])
+    bad_interval = torch.tensor([
+        [0.30, 0.44],
+        [0.0, 0.0],
+        [0.0, 0.0],
+        [0.0, 0.0],
+    ])
+
+    actor.get_aux_outputs = lambda: {
+        "safe_stride": torch.tensor([[0.52], [0.0], [0.0], [0.0]]),
+        "safe_stride_interval": good_interval,
+    }
+    good_loss, good_logs = alg._compute_slow_latent_aux_loss(
+        RolloutStorage.Batch(observations=observations, hidden_states=(None, None))
+    )
+    actor.get_aux_outputs = lambda: {
+        "safe_stride": torch.tensor([[0.37], [0.0], [0.0], [0.0]]),
+        "safe_stride_interval": bad_interval,
+    }
+    bad_loss, bad_logs = alg._compute_slow_latent_aux_loss(
+        RolloutStorage.Batch(observations=observations, hidden_states=(None, None))
+    )
+
+    assert good_logs["slow_latent_safe_stride_phase_center_target_mean"] == pytest.approx(0.52)
+    assert good_logs["slow_latent_safe_stride_phase_center_mae"] == pytest.approx(0.0)
+    assert good_loss.item() == pytest.approx(0.0)
+    assert bad_logs["slow_latent_safe_stride_phase_center_mae"] == pytest.approx(0.15)
+    assert bad_loss.item() > good_loss.item()
+
+
+def test_safe_stride_confidence_target_includes_phase_center_valid() -> None:
+    """Probe-phase center targets should make confidence valid before confirmation."""
+    alg = _build_teacher_kl({"enabled": False})
+    actor = cast(Any, alg.actor)
+    actor.aux_event_coef = 0.0
+    actor.aux_stair_coef = 0.0
+    actor.aux_future_collision_risk_coef = 0.0
+    actor.aux_future_safe_landing_quality_coef = 0.0
+    actor.aux_stair_shape_coef = 0.0
+    actor.aux_safe_stride_coef = 1.0
+    actor.safe_stride_huber_delta = 0.05
+    actor.safe_stride_confidence_loss_coef = 1.0
+    actor.safe_stride_phase_center_loss_coef = 0.0
+    actor.safe_stride_min = 0.10
+    actor.safe_stride_max = 0.55
+    actor.latent_obs_set = "latent"
+    actor.get_slow_latent_diagnostics = lambda: {}
+
+    labels = torch.zeros(4, 16)
+    labels[0, 1] = 1.0
+    labels[0, 5] = 0.30
+    labels[0, 6] = 1.0
+    labels[0, 8] = 1.0
+    labels[0, 9] = 0.44
+    labels[0, 15] = 0.0
+    latent = torch.zeros(4, 80)
+    latent[0, 70] = 1.0
+    latent[0, 72] = 0.52
+    latent[0, 78] = 0.8
+    observations = TensorDict(
+        {
+            "latent_labels": labels,
+            "latent": latent,
+        },
+        batch_size=[NUM_ENVS],
+    )
+    interval = torch.tensor([[0.30, 0.44], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]])
+    positive_logits = torch.tensor([[8.0], [-8.0], [-8.0], [-8.0]])
+    negative_logits = torch.full((4, 1), -8.0)
+
+    actor.get_aux_outputs = lambda: {
+        "safe_stride": torch.tensor([[0.52], [0.0], [0.0], [0.0]]),
+        "safe_stride_interval": interval,
+        "safe_stride_confidence_logit": positive_logits,
+    }
+    good_loss, good_logs = alg._compute_slow_latent_aux_loss(
+        RolloutStorage.Batch(observations=observations, hidden_states=(None, None))
+    )
+    actor.get_aux_outputs = lambda: {
+        "safe_stride": torch.tensor([[0.52], [0.0], [0.0], [0.0]]),
+        "safe_stride_interval": interval,
+        "safe_stride_confidence_logit": negative_logits,
+    }
+    bad_loss, bad_logs = alg._compute_slow_latent_aux_loss(
+        RolloutStorage.Batch(observations=observations, hidden_states=(None, None))
+    )
+
+    assert good_logs["slow_latent_safe_stride_confidence_recall"] == pytest.approx(1.0)
+    assert bad_logs["slow_latent_safe_stride_confidence_recall"] == pytest.approx(0.0)
+    assert good_logs["slow_latent_safe_stride_confidence_bce"] < 0.01
+    assert bad_logs["slow_latent_safe_stride_confidence_bce"] > 1.0
+    assert good_loss.item() < bad_loss.item()
+
+
 def test_safe_stride_interval_loss_ignores_invalid_nan_padding() -> None:
     """Invalid interval rows should not leak NaNs through zero weights."""
     predictions = torch.tensor([[0.25, 0.35], [0.10, 0.20]])

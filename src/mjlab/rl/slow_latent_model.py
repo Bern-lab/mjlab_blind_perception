@@ -27,6 +27,7 @@ _SEMANTIC_DIM = _SEMANTIC_STATE_DIM + _SEMANTIC_SHAPE_DIM
 _LEGACY_SAFE_STRIDE_WIDTH_LOGIT = -6.0
 _DYNAMIC_SAFE_STRIDE_WIDTH_LOGIT = -1.4
 _SAFE_STRIDE_CONFIDENCE_LOGIT = -2.0
+_SAFE_STRIDE_TREND_HOLD_LOGIT = 2.0
 GatedHiddenState = torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor] | None
 
 
@@ -95,6 +96,9 @@ class LSTMSlowLatentMLPModel(MLPModel):
     safe_stride_interval_coverage_loss_coef: float = 0.0,
     safe_stride_interval_coverage_margin: float = 0.01,
     safe_stride_confidence_loss_coef: float = 0.30,
+    safe_stride_phase_center_loss_coef: float = 0.0,
+    safe_stride_trend_loss_coef: float = 0.0,
+    safe_stride_dense_trend_loss_coef: float = 1.0,
     safe_stride_std_floor_loss_coef: float = 0.0,
     safe_stride_centered_loss_coef: float = 0.0,
     safe_stride_std_floor_ratio: float = 0.70,
@@ -119,6 +123,7 @@ class LSTMSlowLatentMLPModel(MLPModel):
     future_risk_huber_delta: float = 0.1,
     future_quality_huber_delta: float = 0.1,
     future_horizon: int = 20,
+    slow_latent_metrics: str = "full",
     latent_obs_set: str = "latent",
     **kwargs: Any,
   ) -> None:
@@ -270,6 +275,11 @@ class LSTMSlowLatentMLPModel(MLPModel):
       activation_cls(),
       nn.Linear(64, 1),
     )
+    self.safe_stride_trend_head = nn.Sequential(
+      nn.Linear(dynamic_stride_input_dim, 64),
+      activation_cls(),
+      nn.Linear(64, 3),
+    )
 
     self.alpha_fast = float(alpha_fast)
     self.alpha_write = float(alpha_write)
@@ -347,6 +357,9 @@ class LSTMSlowLatentMLPModel(MLPModel):
       safe_stride_interval_coverage_margin
     )
     self.safe_stride_confidence_loss_coef = float(safe_stride_confidence_loss_coef)
+    self.safe_stride_phase_center_loss_coef = float(safe_stride_phase_center_loss_coef)
+    self.safe_stride_trend_loss_coef = float(safe_stride_trend_loss_coef)
+    self.safe_stride_dense_trend_loss_coef = float(safe_stride_dense_trend_loss_coef)
     self.safe_stride_std_floor_loss_coef = float(safe_stride_std_floor_loss_coef)
     self.safe_stride_centered_loss_coef = float(safe_stride_centered_loss_coef)
     self.safe_stride_std_floor_ratio = float(safe_stride_std_floor_ratio)
@@ -374,6 +387,12 @@ class LSTMSlowLatentMLPModel(MLPModel):
       raise ValueError("safe_stride_interval_coverage_margin must be non-negative.")
     if self.safe_stride_confidence_loss_coef < 0.0:
       raise ValueError("safe_stride_confidence_loss_coef must be non-negative.")
+    if self.safe_stride_phase_center_loss_coef < 0.0:
+      raise ValueError("safe_stride_phase_center_loss_coef must be non-negative.")
+    if self.safe_stride_trend_loss_coef < 0.0:
+      raise ValueError("safe_stride_trend_loss_coef must be non-negative.")
+    if self.safe_stride_dense_trend_loss_coef < 0.0:
+      raise ValueError("safe_stride_dense_trend_loss_coef must be non-negative.")
     if self.safe_stride_std_floor_loss_coef < 0.0:
       raise ValueError("safe_stride_std_floor_loss_coef must be non-negative.")
     if self.safe_stride_centered_loss_coef < 0.0:
@@ -444,6 +463,9 @@ class LSTMSlowLatentMLPModel(MLPModel):
       raise ValueError("Future-label Huber deltas must be positive.")
     if self.future_horizon <= 0:
       raise ValueError("future_horizon must be positive.")
+    self.slow_latent_metrics = str(slow_latent_metrics)
+    if self.slow_latent_metrics not in {"off", "minimal", "full"}:
+      raise ValueError("slow_latent_metrics must be one of off, minimal, full.")
 
     self._hidden_state: tuple[torch.Tensor, torch.Tensor] | None = None
     self._z_memory: torch.Tensor | None = None
@@ -459,6 +481,7 @@ class LSTMSlowLatentMLPModel(MLPModel):
     self._aux_safe_stride_predictions: torch.Tensor | None = None
     self._aux_safe_stride_intervals: torch.Tensor | None = None
     self._aux_safe_stride_confidence_logits: torch.Tensor | None = None
+    self._aux_safe_stride_trend_logits: torch.Tensor | None = None
     self._shadow_semantic: torch.Tensor | None = None
     self._slow_latent_diagnostics: dict[str, torch.Tensor] = {}
 
@@ -602,6 +625,21 @@ class LSTMSlowLatentMLPModel(MLPModel):
   ) -> torch.Tensor:
     return self.safe_stride_confidence_head(safe_stride_features)
 
+  def _decode_safe_stride_trend_logit(
+    self,
+    safe_stride_features: torch.Tensor,
+  ) -> torch.Tensor:
+    return self.safe_stride_trend_head(safe_stride_features)
+
+  @staticmethod
+  def _safe_stride_trend_control(trend_logits: torch.Tensor) -> torch.Tensor:
+    trend_prob = torch.softmax(trend_logits, dim=-1)
+    return torch.clamp(
+      0.5 * trend_prob[..., 1:2] + trend_prob[..., 2:3],
+      0.0,
+      1.0,
+    )
+
   def _decode_safe_stride(self, shape_memory: torch.Tensor) -> torch.Tensor:
     interval = self._decode_safe_stride_interval(shape_memory)
     return 0.5 * (interval[..., 0:1] + interval[..., 1:2])
@@ -629,54 +667,6 @@ class LSTMSlowLatentMLPModel(MLPModel):
   ) -> torch.Tensor:
     return torch.clamp((value - minimum) / (maximum - minimum), 0.0, 1.0)
 
-  @staticmethod
-  def _foot_event_summary_dim(latent_obs: torch.Tensor) -> int:
-    latent_dim = int(latent_obs.shape[-1])
-    if latent_dim < 80:
-      return 0
-    new_foot_only = (latent_dim - 80) % 33 == 0
-    new_with_stair = latent_dim >= 173 and (latent_dim - 173) % 33 == 0
-    return 80 if latent_dim == 80 or new_foot_only or new_with_stair else 0
-
-  def _same_foot_actor_stride_target(
-    self,
-    stair_shape: torch.Tensor,
-    latent_obs: torch.Tensor | None = None,
-  ) -> torch.Tensor:
-    """Fuse the stride head with deployable ratchet evidence for actor input."""
-    target = stair_shape[..., 0:1]
-    if latent_obs is None:
-      return target
-    summary_dim = self._foot_event_summary_dim(latent_obs)
-    if summary_dim < 80:
-      return target
-    summary = torch.nan_to_num(latent_obs[..., -summary_dim:])
-    ratchet = summary[..., 70:80]
-    active = ratchet[..., 0:1] > 0.5
-    lower = ratchet[..., 5:6].clamp(
-      self.same_foot_stride_min,
-      self.same_foot_stride_max,
-    )
-    probe = ratchet[..., 2:3].clamp(
-      self.same_foot_stride_min,
-      self.same_foot_stride_max,
-    )
-    upper_raw = ratchet[..., 7:8]
-    confirmed = ratchet[..., 6:7] > 0.5
-    soft_cap = active & ~confirmed & (upper_raw > 0.0)
-    open_base = torch.maximum(probe, lower)
-    guard_limited = probe <= lower + 1.0e-5
-    open_ceiling = torch.where(guard_limited, probe, open_base + 0.05)
-    open_target = torch.maximum(open_base, torch.minimum(target, open_ceiling))
-    closed_target = probe
-    soft_target = probe
-    ratchet_target = torch.where(
-      confirmed,
-      closed_target,
-      torch.where(soft_cap, soft_target, open_target),
-    )
-    return torch.where(active, ratchet_target, target)
-
   def _build_shadow_semantic(
     self,
     event_prob: torch.Tensor,
@@ -686,6 +676,7 @@ class LSTMSlowLatentMLPModel(MLPModel):
     safe_stride_interval: torch.Tensor,
     safe_stride_confidence: torch.Tensor | None = None,
     latent_obs: torch.Tensor | None = None,
+    safe_stride_trend_logits: torch.Tensor | None = None,
   ) -> torch.Tensor:
     """Build a fixed-position semantic vector without feeding it to the actor."""
     mode = gate_state[..., 0:1]
@@ -726,13 +717,7 @@ class LSTMSlowLatentMLPModel(MLPModel):
       dim=-1,
     )
 
-    same_foot_stride = stair_shape[..., 0:1]
     riser_height = stair_shape[..., 1:2]
-    same_foot_stride_norm = self._normalize_semantic_value(
-      same_foot_stride,
-      self.same_foot_stride_min,
-      self.same_foot_stride_max,
-    )
     riser_height_norm = self._normalize_semantic_value(
       riser_height,
       self.riser_height_min,
@@ -768,20 +753,22 @@ class LSTMSlowLatentMLPModel(MLPModel):
       else safe_stride_confidence
     )
     confidence = torch.clamp(confidence, 0.0, 1.0)
-    same_foot_actor_target_norm = self._normalize_semantic_value(
-      self._same_foot_actor_stride_target(stair_shape, latent_obs),
-      self.same_foot_stride_min,
-      self.same_foot_stride_max,
+    del latent_obs
+    safe_stride_control_norm = stride_center_norm
+    safe_stride_trend_norm = (
+      safe_stride_control_norm
+      if safe_stride_trend_logits is None
+      else self._safe_stride_trend_control(safe_stride_trend_logits)
     )
     shape_semantic = torch.cat(
       [
-        same_foot_stride_norm,
+        safe_stride_control_norm,
         riser_height_norm,
         stride_lower_norm,
         stride_upper_norm,
         stride_center_norm,
         stride_width_norm,
-        same_foot_actor_target_norm,
+        safe_stride_trend_norm,
         confidence,
       ],
       dim=-1,
@@ -940,6 +927,28 @@ class LSTMSlowLatentMLPModel(MLPModel):
           migrated_value.zero_()
         elif name == "2.bias":
           migrated_value.fill_(_SAFE_STRIDE_CONFIDENCE_LOGIT)
+        state_dict[key] = migrated_value
+    for name, value in self.safe_stride_trend_head.state_dict().items():
+      key = f"{prefix}safe_stride_trend_head.{name}"
+      legacy_value = state_dict.get(key)
+      if (
+        name == "0.weight"
+        and legacy_value is not None
+        and legacy_value.shape[0] == value.shape[0]
+        and legacy_value.shape[1] != value.shape[1]
+      ):
+        migrated_value = value.detach().clone()
+        migrated_value.zero_()
+        input_dim = min(legacy_value.shape[1], value.shape[1])
+        migrated_value[:, :input_dim] = legacy_value[:, :input_dim]
+        state_dict[key] = migrated_value
+      elif key not in state_dict:
+        migrated_value = value.detach().clone()
+        if name == "2.weight":
+          migrated_value.zero_()
+        elif name == "2.bias":
+          migrated_value.zero_()
+          migrated_value[1] = _SAFE_STRIDE_TREND_HOLD_LOGIT
         state_dict[key] = migrated_value
     if self.geometry_probe_head is not None:
       for name, value in self.geometry_probe_head.state_dict().items():
@@ -1227,13 +1236,18 @@ class LSTMSlowLatentMLPModel(MLPModel):
     exit_steps: list[torch.Tensor] = []
     event_logits: list[torch.Tensor] = []
     stair_logits: list[torch.Tensor] = []
-    future_risk_logits: list[torch.Tensor] = []
-    future_quality_logits: list[torch.Tensor] = []
+    future_risk_logits: list[torch.Tensor] | None = (
+      [] if self.aux_future_collision_risk_coef != 0.0 else None
+    )
+    future_quality_logits: list[torch.Tensor] | None = (
+      [] if self.aux_future_safe_landing_quality_coef != 0.0 else None
+    )
     stair_shape_predictions: list[torch.Tensor] = []
     geometry_probe_predictions: list[torch.Tensor] = []
     safe_stride_predictions: list[torch.Tensor] = []
     safe_stride_intervals: list[torch.Tensor] = []
     safe_stride_confidence_logits: list[torch.Tensor] = []
+    safe_stride_trend_logits: list[torch.Tensor] = []
 
     valid_masks = masks
     if valid_masks is not None and valid_masks.dim() == 2:
@@ -1272,8 +1286,16 @@ class LSTMSlowLatentMLPModel(MLPModel):
       if valid is not None:
         z_next = torch.where(valid.bool(), z_next, z)
 
-      future_risk_logit = self.future_collision_risk_head(z_next)
-      future_quality_logit = self.future_safe_landing_quality_head(z_next)
+      future_risk_logit = (
+        self.future_collision_risk_head(z_next)
+        if future_risk_logits is not None
+        else None
+      )
+      future_quality_logit = (
+        self.future_safe_landing_quality_head(z_next)
+        if future_quality_logits is not None
+        else None
+      )
       shape_memory = self._shape_memory(z_next)
       stair_shape_prediction = self._decode_stair_shape(shape_memory, h_t)
       geometry_probe_prediction = self._decode_geometry_probe(shape_memory, h_t)
@@ -1289,6 +1311,9 @@ class LSTMSlowLatentMLPModel(MLPModel):
       safe_stride_confidence_logit = self._decode_safe_stride_confidence_logit(
         safe_stride_features
       )
+      safe_stride_trend_logit = self._decode_safe_stride_trend_logit(
+        safe_stride_features
+      )
       safe_stride_prediction = 0.5 * (
         safe_stride_interval[..., 0:1] + safe_stride_interval[..., 1:2]
       )
@@ -1301,14 +1326,17 @@ class LSTMSlowLatentMLPModel(MLPModel):
       gate_steps.append(gate)
       event_logits.append(event_logit)
       stair_logits.append(stair_logit)
-      future_risk_logits.append(future_risk_logit)
-      future_quality_logits.append(future_quality_logit)
+      if future_risk_logits is not None and future_risk_logit is not None:
+        future_risk_logits.append(future_risk_logit)
+      if future_quality_logits is not None and future_quality_logit is not None:
+        future_quality_logits.append(future_quality_logit)
       stair_shape_predictions.append(stair_shape_prediction)
       if geometry_probe_prediction is not None:
         geometry_probe_predictions.append(geometry_probe_prediction)
       safe_stride_predictions.append(safe_stride_prediction)
       safe_stride_intervals.append(safe_stride_interval)
       safe_stride_confidence_logits.append(safe_stride_confidence_logit)
+      safe_stride_trend_logits.append(safe_stride_trend_logit)
 
     z_seq = torch.stack(z_steps, dim=0)
     alpha_seq = torch.stack(alpha_steps, dim=0)
@@ -1342,9 +1370,13 @@ class LSTMSlowLatentMLPModel(MLPModel):
     ).to(gate_seq.dtype)
     self._aux_event_logits = torch.stack(event_logits, dim=0)
     self._aux_stair_logits = torch.stack(stair_logits, dim=0)
-    self._aux_future_collision_risk_logits = torch.stack(future_risk_logits, dim=0)
-    self._aux_future_safe_landing_quality_logits = torch.stack(
-      future_quality_logits, dim=0
+    self._aux_future_collision_risk_logits = (
+      torch.stack(future_risk_logits, dim=0) if future_risk_logits is not None else None
+    )
+    self._aux_future_safe_landing_quality_logits = (
+      torch.stack(future_quality_logits, dim=0)
+      if future_quality_logits is not None
+      else None
     )
     self._aux_stair_shape_predictions = torch.stack(stair_shape_predictions, dim=0)
     self._aux_geometry_probe_predictions = (
@@ -1358,6 +1390,7 @@ class LSTMSlowLatentMLPModel(MLPModel):
       safe_stride_confidence_logits,
       dim=0,
     )
+    self._aux_safe_stride_trend_logits = torch.stack(safe_stride_trend_logits, dim=0)
     semantic = (
       self._build_shadow_semantic(
         torch.sigmoid(self._aux_event_logits),
@@ -1367,6 +1400,7 @@ class LSTMSlowLatentMLPModel(MLPModel):
         self._aux_safe_stride_intervals,
         torch.sigmoid(self._aux_safe_stride_confidence_logits),
         latent_obs,
+        self._aux_safe_stride_trend_logits,
       )
       if self.shadow_semantic_enabled or self.actor_semantic_enabled
       else None
@@ -1392,14 +1426,16 @@ class LSTMSlowLatentMLPModel(MLPModel):
       self._aux_stair_logits = cast(
         torch.Tensor, unpad_trajectories(self._aux_stair_logits, masks)
       )
-      self._aux_future_collision_risk_logits = cast(
-        torch.Tensor,
-        unpad_trajectories(self._aux_future_collision_risk_logits, masks),
-      )
-      self._aux_future_safe_landing_quality_logits = cast(
-        torch.Tensor,
-        unpad_trajectories(self._aux_future_safe_landing_quality_logits, masks),
-      )
+      if self._aux_future_collision_risk_logits is not None:
+        self._aux_future_collision_risk_logits = cast(
+          torch.Tensor,
+          unpad_trajectories(self._aux_future_collision_risk_logits, masks),
+        )
+      if self._aux_future_safe_landing_quality_logits is not None:
+        self._aux_future_safe_landing_quality_logits = cast(
+          torch.Tensor,
+          unpad_trajectories(self._aux_future_safe_landing_quality_logits, masks),
+        )
       self._aux_stair_shape_predictions = cast(
         torch.Tensor,
         unpad_trajectories(self._aux_stair_shape_predictions, masks),
@@ -1421,6 +1457,10 @@ class LSTMSlowLatentMLPModel(MLPModel):
         torch.Tensor,
         unpad_trajectories(self._aux_safe_stride_confidence_logits, masks),
       )
+      self._aux_safe_stride_trend_logits = cast(
+        torch.Tensor,
+        unpad_trajectories(self._aux_safe_stride_trend_logits, masks),
+      )
       if semantic is not None:
         semantic = cast(
           torch.Tensor,
@@ -1439,12 +1479,14 @@ class LSTMSlowLatentMLPModel(MLPModel):
       actor_obs = actor_obs.squeeze(0)
       self._aux_event_logits = self._aux_event_logits.squeeze(0)
       self._aux_stair_logits = self._aux_stair_logits.squeeze(0)
-      self._aux_future_collision_risk_logits = (
-        self._aux_future_collision_risk_logits.squeeze(0)
-      )
-      self._aux_future_safe_landing_quality_logits = (
-        self._aux_future_safe_landing_quality_logits.squeeze(0)
-      )
+      if self._aux_future_collision_risk_logits is not None:
+        self._aux_future_collision_risk_logits = (
+          self._aux_future_collision_risk_logits.squeeze(0)
+        )
+      if self._aux_future_safe_landing_quality_logits is not None:
+        self._aux_future_safe_landing_quality_logits = (
+          self._aux_future_safe_landing_quality_logits.squeeze(0)
+        )
       self._aux_stair_shape_predictions = self._aux_stair_shape_predictions.squeeze(0)
       if self._aux_geometry_probe_predictions is not None:
         self._aux_geometry_probe_predictions = (
@@ -1455,6 +1497,7 @@ class LSTMSlowLatentMLPModel(MLPModel):
       self._aux_safe_stride_confidence_logits = (
         self._aux_safe_stride_confidence_logits.squeeze(0)
       )
+      self._aux_safe_stride_trend_logits = self._aux_safe_stride_trend_logits.squeeze(0)
       if semantic is not None:
         semantic = semantic.squeeze(0)
 
@@ -1507,25 +1550,27 @@ class LSTMSlowLatentMLPModel(MLPModel):
     if (
       self._aux_event_logits is None
       or self._aux_stair_logits is None
-      or self._aux_future_collision_risk_logits is None
-      or self._aux_future_safe_landing_quality_logits is None
       or self._aux_stair_shape_predictions is None
       or self._aux_safe_stride_predictions is None
       or self._aux_safe_stride_confidence_logits is None
+      or self._aux_safe_stride_trend_logits is None
     ):
       self._slow_latent_diagnostics = {}
       return
     diagnostics = {
       "event_prob": torch.sigmoid(self._aux_event_logits.detach()),
       "stair_prob": torch.sigmoid(self._aux_stair_logits.detach()),
-      "future_risk": torch.sigmoid(self._aux_future_collision_risk_logits.detach()),
-      "future_quality": torch.sigmoid(
-        self._aux_future_safe_landing_quality_logits.detach()
-      ),
       "stair_shape": self._aux_stair_shape_predictions.detach(),
       "safe_stride": self._aux_safe_stride_predictions.detach(),
       "safe_stride_confidence": torch.sigmoid(
         self._aux_safe_stride_confidence_logits.detach()
+      ),
+      "safe_stride_trend": self._safe_stride_trend_control(
+        self._aux_safe_stride_trend_logits.detach()
+      ),
+      "safe_stride_trend_prob": torch.softmax(
+        self._aux_safe_stride_trend_logits.detach(),
+        dim=-1,
       ),
       "z_norm": z_seq.detach().norm(dim=-1, keepdim=True),
       "gate_mode": mode_seq.detach(),
@@ -1558,6 +1603,14 @@ class LSTMSlowLatentMLPModel(MLPModel):
       and self._aux_safe_stride_intervals is not None
     ):
       diagnostics["safe_stride_interval"] = self._aux_safe_stride_intervals.detach()
+    if self._aux_future_collision_risk_logits is not None:
+      diagnostics["future_risk"] = torch.sigmoid(
+        self._aux_future_collision_risk_logits.detach()
+      )
+    if self._aux_future_safe_landing_quality_logits is not None:
+      diagnostics["future_quality"] = torch.sigmoid(
+        self._aux_future_safe_landing_quality_logits.detach()
+      )
     self._slow_latent_diagnostics = diagnostics
     if self._shadow_semantic is not None:
       self._slow_latent_diagnostics["shadow_semantic"] = self._shadow_semantic
@@ -1684,6 +1737,8 @@ class LSTMSlowLatentMLPModel(MLPModel):
       outputs["safe_stride_interval"] = self._aux_safe_stride_intervals
     if self._aux_safe_stride_confidence_logits is not None:
       outputs["safe_stride_confidence_logit"] = self._aux_safe_stride_confidence_logits
+    if self._aux_safe_stride_trend_logits is not None:
+      outputs["safe_stride_trend_logit"] = self._aux_safe_stride_trend_logits
     return outputs
 
   def get_slow_latent_diagnostics(self) -> dict[str, torch.Tensor]:
@@ -1722,6 +1777,10 @@ class LSTMSlowLatentMLPModel(MLPModel):
   def aux_safe_stride_confidence_logits(self) -> torch.Tensor | None:
     return self._aux_safe_stride_confidence_logits
 
+  @property
+  def aux_safe_stride_trend_logits(self) -> torch.Tensor | None:
+    return self._aux_safe_stride_trend_logits
+
   def as_onnx(self, verbose: bool = False) -> _OnnxStairLatentModel:
     return _OnnxStairLatentModel(self, verbose)
 
@@ -1749,6 +1808,7 @@ class _OnnxStairLatentModel(nn.Module):
     self.safe_stride_head = copy.deepcopy(model.safe_stride_head)
     self.safe_stride_width_head = copy.deepcopy(model.safe_stride_width_head)
     self.safe_stride_confidence_head = copy.deepcopy(model.safe_stride_confidence_head)
+    self.safe_stride_trend_head = copy.deepcopy(model.safe_stride_trend_head)
     self.mlp = copy.deepcopy(model.mlp)
     self.deterministic_output = (
       model.distribution.as_deterministic_output_module()
@@ -1837,7 +1897,7 @@ class _OnnxStairLatentModel(nn.Module):
     shape_memory: torch.Tensor,
     h_t: torch.Tensor,
     latent_obs: torch.Tensor,
-  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     safe_stride_features = shape_memory
     if self.dynamic_safe_stride_enabled:
       phase_end = self.safe_stride_phase_start + self.safe_stride_phase_dim
@@ -1849,9 +1909,10 @@ class _OnnxStairLatentModel(nn.Module):
       self.safe_stride_max - self.safe_stride_min
     )
     confidence = torch.sigmoid(self.safe_stride_confidence_head(safe_stride_features))
+    trend_logits = self.safe_stride_trend_head(safe_stride_features)
     if not self.structured_safe_stride_enabled:
       interval = torch.cat([lower, lower], dim=-1)
-      return lower, interval, confidence
+      return lower, interval, confidence, trend_logits
     if self.dynamic_safe_stride_enabled:
       assert self.safe_stride_width_head is not None
       width_logit = self.safe_stride_width_head(safe_stride_features)
@@ -1862,7 +1923,7 @@ class _OnnxStairLatentModel(nn.Module):
     upper = lower + width
     interval = torch.cat([lower, upper], dim=-1)
     center = 0.5 * (lower + upper)
-    return center, interval, confidence
+    return center, interval, confidence, trend_logits
 
   def _stair_logit(self, h_t: torch.Tensor) -> torch.Tensor:
     memory_placeholder = h_t.new_zeros((*h_t.shape[:-1], self.state_latent_dim))
@@ -1877,53 +1938,12 @@ class _OnnxStairLatentModel(nn.Module):
     return torch.clamp((value - minimum) / (maximum - minimum), 0.0, 1.0)
 
   @staticmethod
-  def _foot_event_summary_dim(latent_obs: torch.Tensor) -> int:
-    latent_dim = int(latent_obs.shape[-1])
-    if latent_dim < 80:
-      return 0
-    new_foot_only = (latent_dim - 80) % 33 == 0
-    new_with_stair = latent_dim >= 173 and (latent_dim - 173) % 33 == 0
-    return 80 if latent_dim == 80 or new_foot_only or new_with_stair else 0
-
-  def _same_foot_actor_stride_target(
-    self,
-    stair_shape: torch.Tensor,
-    latent_obs: torch.Tensor | None = None,
-  ) -> torch.Tensor:
-    target = stair_shape[..., 0:1]
-    if latent_obs is None:
-      return target
-    summary_dim = self._foot_event_summary_dim(latent_obs)
-    if summary_dim < 80:
-      return target
-    summary = torch.nan_to_num(latent_obs[..., -summary_dim:])
-    ratchet = summary[..., 70:80]
-    active = ratchet[..., 0:1] > 0.5
-    lower = ratchet[..., 5:6].clamp(
-      self.same_foot_stride_min,
-      self.same_foot_stride_max,
-    )
-    probe = ratchet[..., 2:3].clamp(
-      self.same_foot_stride_min,
-      self.same_foot_stride_max,
-    )
-    upper_raw = ratchet[..., 7:8]
-    confirmed = ratchet[..., 6:7] > 0.5
-    soft_cap = active & ~confirmed & (upper_raw > 0.0)
-    open_base = torch.maximum(probe, lower)
-    guard_limited = probe <= lower + 1.0e-5
-    open_ceiling = torch.where(guard_limited, probe, open_base + 0.05)
-    open_target = torch.maximum(open_base, torch.minimum(target, open_ceiling))
-    closed_target = probe
-    soft_target = probe
-    return torch.where(
-      active,
-      torch.where(
-        confirmed,
-        closed_target,
-        torch.where(soft_cap, soft_target, open_target),
-      ),
-      target,
+  def _safe_stride_trend_control(trend_logits: torch.Tensor) -> torch.Tensor:
+    trend_prob = torch.softmax(trend_logits, dim=-1)
+    return torch.clamp(
+      0.5 * trend_prob[..., 1:2] + trend_prob[..., 2:3],
+      0.0,
+      1.0,
     )
 
   def _build_actor_semantic(
@@ -1934,6 +1954,7 @@ class _OnnxStairLatentModel(nn.Module):
     stair_shape: torch.Tensor,
     safe_stride_interval: torch.Tensor,
     safe_stride_confidence: torch.Tensor,
+    safe_stride_trend_logits: torch.Tensor,
     latent_obs: torch.Tensor | None = None,
   ) -> torch.Tensor:
     mode = gate_state[..., 0:1]
@@ -1974,13 +1995,7 @@ class _OnnxStairLatentModel(nn.Module):
       dim=-1,
     )
 
-    same_foot_stride = stair_shape[..., 0:1]
     riser_height = stair_shape[..., 1:2]
-    same_foot_stride_norm = self._normalize_semantic_value(
-      same_foot_stride,
-      self.same_foot_stride_min,
-      self.same_foot_stride_max,
-    )
     riser_height_norm = self._normalize_semantic_value(
       riser_height,
       self.riser_height_min,
@@ -2011,20 +2026,18 @@ class _OnnxStairLatentModel(nn.Module):
       1.0,
     )
     confidence = torch.clamp(safe_stride_confidence, 0.0, 1.0)
-    same_foot_actor_target_norm = self._normalize_semantic_value(
-      self._same_foot_actor_stride_target(stair_shape, latent_obs),
-      self.same_foot_stride_min,
-      self.same_foot_stride_max,
-    )
+    del latent_obs
+    safe_stride_control_norm = stride_center_norm
+    safe_stride_trend_norm = self._safe_stride_trend_control(safe_stride_trend_logits)
     shape_semantic = torch.cat(
       [
-        same_foot_stride_norm,
+        safe_stride_control_norm,
         riser_height_norm,
         stride_lower_norm,
         stride_upper_norm,
         stride_center_norm,
         stride_width_norm,
-        same_foot_actor_target_norm,
+        safe_stride_trend_norm,
         confidence,
       ],
       dim=-1,
@@ -2226,7 +2239,7 @@ class _OnnxStairLatentModel(nn.Module):
     )
     shape_memory = z_out[:, self.state_latent_dim :]
     stair_shape = self._decode_stair_shape(shape_memory, h_t)
-    safe_stride, safe_stride_interval, safe_stride_confidence = (
+    safe_stride, safe_stride_interval, safe_stride_confidence, safe_stride_trend = (
       self._decode_safe_stride_outputs(shape_memory, h_t, latent_obs)
     )
     actor_input_terms = [actor_obs_norm, z_out]
@@ -2239,6 +2252,7 @@ class _OnnxStairLatentModel(nn.Module):
           stair_shape,
           safe_stride_interval,
           safe_stride_confidence,
+          safe_stride_trend,
           latent_obs,
         )
       )

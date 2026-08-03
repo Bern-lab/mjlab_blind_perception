@@ -186,7 +186,7 @@ score_100 =
 + 15 * mean_stair_landing_support_fraction
 + 45 * stair_full_landing_ratio
 + 15 * stair_full_landing_ratio^2
-+ 5 * toe_riser_collision_score
++ 5 - toe_riser_collision_penalty
 ```
 
 The nonlinear full-support term is intentional: a high complete-foot landing
@@ -194,6 +194,16 @@ ratio is a stronger stair-ascent safety signal than small changes in smoothness
 or actuator economy. The publication score intentionally leaves heel/lip
 contacts, base pitch/roll, action smoothness, and torque cost out of the
 headline number, because this eval measures stair completion and foot placement.
+Toe-riser contacts still affect the headline score: the first two toe contacts
+are free by default, then the penalty grows progressively:
+
+```text
+excess = max(0, mean_toe_riser_contacts_per_episode - 2)
+toe_riser_collision_penalty = min(12, 0.35 * excess * (excess + 1) / 2)
+```
+
+This makes an occasional probe contact acceptable while making repeated riser
+kicks increasingly expensive.
 
 Use the auxiliary metrics to explain behavior:
 
@@ -208,8 +218,9 @@ Use the auxiliary metrics to explain behavior:
 - `episode_stair_full_landing_ratio_p10`: worst-tail complete landing quality;
   useful when mean full-landing ratio looks good but some episodes still fail.
 - `toe_riser_collision_over_free_count`: mean toe-riser contacts above the free
-  allowance. Toe contacts have a two-hit free allowance by default, so the score
-  only starts penalizing toe contacts above two events per episode.
+  allowance. Toe contacts have a two-hit free allowance by default.
+- `score_collision_penalties.toe`: progressive score penalty from repeated
+  toe-riser contacts.
 
 The default strict pass thresholds are:
 

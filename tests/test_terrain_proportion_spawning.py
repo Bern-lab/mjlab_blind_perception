@@ -237,3 +237,40 @@ def test_standalone_terrain_gets_half_of_envs_when_weight_matches_grid() -> None
   assert entity.terrain_type_names == ("flat", "runway")
   assert int(entity.is_standalone_env().sum().item()) == 50
   assert int((~entity.is_standalone_env()).sum().item()) == 50
+
+
+def test_standalone_terrain_can_be_excluded_from_low_initial_levels() -> None:
+  cfg = TerrainGeneratorCfg(
+    size=(4.0, 4.0),
+    curriculum=True,
+    num_cols=1,
+    num_rows=5,
+    seed=0,
+    sub_terrains={
+      "flat": BoxFlatTerrainCfg(proportion=1.0, size=(4.0, 4.0)),
+    },
+    standalone_terrains={
+      "runway": BoxLongStairRunwayTerrainCfg(
+        proportion=1.0,
+        size=(6.0, 2.0),
+        step_height_range=(0.1, 0.1),
+        step_width_range=(0.3, 0.3),
+        num_steps=4,
+        flat_patch_sampling={"target": FlatPatchSamplingCfg(num_patches=1)},
+      )
+    },
+  )
+  entity = TerrainEntity(
+    TerrainEntityCfg(
+      terrain_type="generator",
+      terrain_generator=cfg,
+      num_envs=100,
+      max_init_terrain_level=2,
+      standalone_spawn_start_level=3,
+    ),
+    device="cpu",
+  )
+
+  assert int(entity.is_standalone_env().sum().item()) == 0
+  assert int((~entity.is_standalone_env()).sum().item()) == 100
+  assert int(torch.max(entity.terrain_levels).item()) <= 2

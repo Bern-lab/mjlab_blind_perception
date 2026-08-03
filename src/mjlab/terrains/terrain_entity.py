@@ -15,18 +15,29 @@ from mjlab.utils import spec_config as spec_cfg
 def _proportional_counts(num_envs: int, proportions: np.ndarray) -> np.ndarray:
   """Distribute *num_envs* across buckets proportionally.
 
-  Every bucket gets at least one when ``num_envs >= len(proportions)``. Remaining slots
-  are allocated via the Largest Remainder Method.
+  Every positive-weight bucket gets at least one when possible. Remaining slots are
+  allocated via the Largest Remainder Method.
   """
   n = len(proportions)
-  if num_envs >= n:
-    counts = np.ones(n, dtype=int)
-    remaining = num_envs - n
+  positive = proportions > 0.0
+  num_positive = int(positive.sum())
+  if num_positive == 0:
+    positive = np.ones(n, dtype=bool)
+    num_positive = n
+  counts = np.zeros(n, dtype=int)
+  if num_envs >= num_positive:
+    counts[positive] = 1
+    remaining = num_envs - num_positive
   else:
-    counts = np.zeros(n, dtype=int)
     remaining = num_envs
   if remaining > 0:
-    ideal = proportions * remaining
+    eligible_proportions = proportions.copy()
+    eligible_proportions[~positive] = 0.0
+    total = eligible_proportions.sum()
+    if total <= 0.0:
+      eligible_proportions[positive] = 1.0
+      total = eligible_proportions.sum()
+    ideal = (eligible_proportions / total) * remaining
     floor = np.floor(ideal).astype(int)
     counts += floor
     leftover = remaining - floor.sum()
@@ -78,6 +89,10 @@ class TerrainEntityCfg(EntityCfg):
   max_init_terrain_level: int | None = None  # 机器人开始出生在哪个难度等级
   """Maximum initial difficulty level (row index) for environment placement in
   curriculum mode. None uses all available rows."""
+  standalone_spawn_start_level: int | None = None
+  """Optional curriculum row before standalone terrain columns can be used at
+  initialization. This keeps early training on the regular terrain grid while
+  still allowing standalone tracks to exist in the compiled terrain."""
   num_envs: int = 1
   """Number of parallel environments to create. This will get overridden by the
   scene configuration if specified there."""
@@ -139,9 +154,6 @@ class TerrainEntity(Entity):
         self.cfg.terrain_generator, device=self._device
       )
       terrain_generator.compile(self._spec)
-      proportions = terrain_generator.terrain_type_proportions
-      proportions = proportions / proportions.sum()
-      self._configure_env_origins(terrain_generator.terrain_origins, proportions)
       self._terrain_type_names = tuple(terrain_generator.terrain_type_names)
       self._terrain_type_proportions = torch.from_numpy(
         terrain_generator.terrain_type_proportions
@@ -149,6 +161,9 @@ class TerrainEntity(Entity):
       self._standalone_terrain_type_mask = torch.from_numpy(
         terrain_generator.standalone_terrain_type_mask
       ).to(device=self._device, dtype=torch.bool)
+      proportions = terrain_generator.terrain_type_proportions
+      proportions = proportions / proportions.sum()
+      self._configure_env_origins(terrain_generator.terrain_origins, proportions)
       self._terrain_bounds_by_tile = torch.from_numpy(
         terrain_generator.terrain_bounds_by_tile
       ).to(device=self._device, dtype=torch.float)
@@ -429,8 +444,28 @@ class TerrainEntity(Entity):
       0, max_init_level + 1, (num_envs,), device=self._device
     )
 
-    if proportions is not None and len(proportions) == num_cols:
-      counts = _proportional_counts(num_envs, proportions)
+    effective_proportions = proportions
+    standalone_start_level = self.cfg.standalone_spawn_start_level
+    if (
+      standalone_start_level is not None
+      and max_init_level < int(standalone_start_level)
+      and self._standalone_terrain_type_mask.numel() == num_cols
+    ):
+      standalone_mask = self._standalone_terrain_type_mask.cpu().numpy()
+      if standalone_mask.any() and (~standalone_mask).any():
+        if effective_proportions is None or len(effective_proportions) != num_cols:
+          effective_proportions = np.ones(num_cols, dtype=np.float64)
+        else:
+          effective_proportions = np.array(
+            effective_proportions, dtype=np.float64, copy=True
+          )
+        effective_proportions[standalone_mask] = 0.0
+        total = effective_proportions.sum()
+        if total > 0.0:
+          effective_proportions = effective_proportions / total
+
+    if effective_proportions is not None and len(effective_proportions) == num_cols:
+      counts = _proportional_counts(num_envs, effective_proportions)
       self.terrain_types = torch.repeat_interleave(
         torch.arange(num_cols, device=self._device),
         torch.from_numpy(counts).to(self._device),

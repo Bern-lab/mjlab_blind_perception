@@ -103,6 +103,7 @@ def test_slow_latent_actor_forward_updates_state_and_aux_outputs() -> None:
   assert aux["stair_shape"].shape == (4, 2)
   assert aux["safe_stride"].shape == (4, 1)
   assert aux["safe_stride_confidence_logit"].shape == (4, 1)
+  assert aux["safe_stride_trend_logit"].shape == (4, 3)
   assert "safe_stride_interval" not in aux
   assert torch.all(
     (model.same_foot_stride_min <= aux["stair_shape"][..., 0])
@@ -124,6 +125,8 @@ def test_slow_latent_actor_forward_updates_state_and_aux_outputs() -> None:
   assert diagnostics["stair_shape"].shape == (4, 2)
   assert diagnostics["safe_stride"].shape == (4, 1)
   assert diagnostics["safe_stride_confidence"].shape == (4, 1)
+  assert diagnostics["safe_stride_trend"].shape == (4, 1)
+  assert diagnostics["safe_stride_trend_prob"].shape == (4, 3)
   assert "safe_stride_interval" not in diagnostics
   assert diagnostics["z_norm"].shape == (4, 1)
   assert diagnostics["gate_mode"].shape == (4, 1)
@@ -228,6 +231,14 @@ def test_shadow_semantic_uses_fixed_state_positions_and_physical_derivations() -
     ]
   )
   safe_stride_confidence = torch.tensor([[0.0], [1.0], [0.5], [0.25]])
+  safe_stride_trend_logits = torch.tensor(
+    [
+      [100.0, 0.0, 0.0],
+      [0.0, 100.0, 0.0],
+      [0.0, 0.0, 100.0],
+      [0.0, 0.0, 100.0],
+    ]
+  )
 
   semantic = model._build_shadow_semantic(
     event_prob,
@@ -236,6 +247,7 @@ def test_shadow_semantic_uses_fixed_state_positions_and_physical_derivations() -
     stair_shape,
     safe_stride_interval,
     safe_stride_confidence,
+    safe_stride_trend_logits=safe_stride_trend_logits,
   )
 
   assert semantic.shape == (4, 16)
@@ -250,7 +262,7 @@ def test_shadow_semantic_uses_fixed_state_positions_and_physical_derivations() -
   torch.testing.assert_close(semantic[:, :8], expected_state)
   torch.testing.assert_close(
     semantic[:, 8],
-    torch.tensor([0.0, 1.0, 0.5, 0.0]),
+    torch.tensor([0.0, 0.5, 0.75, 0.25]),
   )
   torch.testing.assert_close(
     semantic[:, 9],
@@ -274,12 +286,12 @@ def test_shadow_semantic_uses_fixed_state_positions_and_physical_derivations() -
   )
   torch.testing.assert_close(
     semantic[:, 14],
-    torch.tensor([0.0, 1.0, 0.5, 0.0]),
+    torch.tensor([0.0, 0.5, 1.0, 1.0]),
   )
   torch.testing.assert_close(semantic[:, 15], safe_stride_confidence.squeeze(-1))
 
 
-def test_shadow_semantic_actor_stride_target_uses_ratchet_hint() -> None:
+def test_shadow_semantic_stride_slots_use_safe_stride_control() -> None:
   model = _make_model(
     structured_safe_stride_enabled=True,
     shadow_semantic_enabled=True,
@@ -297,8 +309,25 @@ def test_shadow_semantic_actor_stride_target_uses_ratchet_hint() -> None:
       [0.75, 0.12],
     ]
   )
-  safe_stride_interval = torch.full((batch, 2), 0.20)
+  safe_stride_interval = torch.tensor(
+    [
+      [0.10, 0.20],
+      [0.20, 0.30],
+      [0.30, 0.40],
+      [0.40, 0.50],
+      [0.50, 0.55],
+    ]
+  )
   safe_stride_confidence = torch.zeros(batch, 1)
+  safe_stride_trend_logits = torch.tensor(
+    [
+      [100.0, 0.0, 0.0],
+      [0.0, 100.0, 0.0],
+      [0.0, 0.0, 100.0],
+      [100.0, 0.0, 0.0],
+      [0.0, 100.0, 0.0],
+    ]
+  )
   latent_obs = torch.zeros(batch, 80)
   latent_obs[:, 70] = 1.0
   latent_obs[:, 72] = torch.tensor([0.45, 0.45, 0.42, 0.36, 0.64])
@@ -314,19 +343,18 @@ def test_shadow_semantic_actor_stride_target_uses_ratchet_hint() -> None:
     safe_stride_interval,
     safe_stride_confidence,
     latent_obs,
+    safe_stride_trend_logits,
   )
 
-  stride_range = model.same_foot_stride_max - model.same_foot_stride_min
-  expected = torch.tensor(
-    [
-      (0.50 - model.same_foot_stride_min) / stride_range,
-      (0.50 - model.same_foot_stride_min) / stride_range,
-      (0.42 - model.same_foot_stride_min) / stride_range,
-      (0.36 - model.same_foot_stride_min) / stride_range,
-      (0.64 - model.same_foot_stride_min) / stride_range,
-    ]
+  stride_range = model.safe_stride_max - model.safe_stride_min
+  centers = safe_stride_interval.mean(dim=-1)
+  expected_control = (centers - model.safe_stride_min) / stride_range
+  torch.testing.assert_close(semantic[:, 8], expected_control)
+  torch.testing.assert_close(semantic[:, 12], expected_control)
+  torch.testing.assert_close(
+    semantic[:, 14],
+    torch.tensor([0.0, 0.5, 1.0, 0.0, 0.5]),
   )
-  torch.testing.assert_close(semantic[:, 14], expected)
 
 
 def test_shadow_semantic_diagnostics_do_not_change_actor_output() -> None:
@@ -571,6 +599,7 @@ def test_safe_stride_probe_only_freezes_policy_and_action_distribution() -> None
         "safe_stride_head.",
         "safe_stride_width_head.",
         "safe_stride_confidence_head.",
+        "safe_stride_trend_head.",
       )
     )
   )
@@ -580,6 +609,9 @@ def test_safe_stride_probe_only_freezes_policy_and_action_distribution() -> None
   assert all(
     parameter.requires_grad
     for parameter in actor.safe_stride_confidence_head.parameters()
+  )
+  assert all(
+    parameter.requires_grad for parameter in actor.safe_stride_trend_head.parameters()
   )
   assert actor.safe_stride_width_head is not None
   assert all(

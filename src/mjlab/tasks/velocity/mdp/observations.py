@@ -913,6 +913,7 @@ class FootEventMemoryObs:
     self.noise_enabled = bool(params.get("noise_enabled", True))
     self.include_summary = bool(params.get("include_summary", True))
     self.include_raw_memory = bool(params.get("include_raw_memory", True))
+    self.log_summary_metrics = bool(params.get("log_summary_metrics", True))
 
     self.contact_true_prob_range = tuple(
       params.get("contact_true_prob_range", (0.75, 1.0))
@@ -983,6 +984,24 @@ class FootEventMemoryObs:
       float(params.get("ratchet_probe_increment_m", 0.025)),
       0.0,
     )
+    self.ratchet_first_collision_probe_push_m = max(
+      float(
+        params.get(
+          "ratchet_first_collision_probe_push_m",
+          self.ratchet_probe_increment_m,
+        )
+      ),
+      0.0,
+    )
+    self.ratchet_post_first_collision_probe_increment_m = max(
+      float(
+        params.get(
+          "ratchet_post_first_collision_probe_increment_m",
+          self.ratchet_probe_increment_m,
+        )
+      ),
+      0.0,
+    )
     self.ratchet_no_hit_lower_margin_m = max(
       float(params.get("ratchet_no_hit_lower_margin_m", 0.0)),
       0.0,
@@ -1003,6 +1022,15 @@ class FootEventMemoryObs:
       float(params.get("ratchet_backoff_step_m", 0.025)),
       0.0,
     )
+    self.ratchet_first_collision_backoff_step_m = max(
+      float(
+        params.get(
+          "ratchet_first_collision_backoff_step_m",
+          self.ratchet_backoff_step_m,
+        )
+      ),
+      0.0,
+    )
     self.ratchet_backoff_margin_m = max(
       float(params.get("ratchet_backoff_margin_m", 0.015)),
       0.0,
@@ -1018,9 +1046,68 @@ class FootEventMemoryObs:
     self.ratchet_lock_target_stable_enabled = bool(
       params.get("ratchet_lock_target_stable_enabled", True)
     )
+    self.ratchet_lock_phase_correction_enabled = bool(
+      params.get("ratchet_lock_phase_correction_enabled", True)
+    )
+    self.ratchet_lock_phase_correction_gain = max(
+      float(params.get("ratchet_lock_phase_correction_gain", 0.60)),
+      0.0,
+    )
+    self.ratchet_lock_phase_deadband_m = max(
+      float(params.get("ratchet_lock_phase_deadband_m", 0.005)),
+      0.0,
+    )
+    self.ratchet_lock_phase_initial_front_error_m = max(
+      float(params.get("ratchet_lock_phase_initial_front_error_m", 0.020)),
+      0.0,
+    )
+    self.ratchet_lock_phase_max_backoff_m = max(
+      float(params.get("ratchet_lock_phase_max_backoff_m", 0.030)),
+      0.0,
+    )
+    self.ratchet_lock_phase_max_forward_m = max(
+      float(params.get("ratchet_lock_phase_max_forward_m", 0.015)),
+      0.0,
+    )
+    self.ratchet_lock_phase_max_error_m = max(
+      float(params.get("ratchet_lock_phase_max_error_m", 0.080)),
+      1.0e-6,
+    )
     self.ratchet_soft_upper_ttl_steps = max(
       int(params.get("ratchet_soft_upper_ttl_steps", 2)),
       1,
+    )
+    self.ratchet_first_collision_enters_stair_mode = bool(
+      params.get("ratchet_first_collision_enters_stair_mode", False)
+    )
+    self.ratchet_single_collision_confirms_interval = bool(
+      params.get("ratchet_single_collision_confirms_interval", True)
+    )
+    self.ratchet_two_collision_enabled = bool(
+      params.get("ratchet_two_collision_enabled", True)
+    )
+    self.ratchet_two_collision_interval_margin_m = max(
+      float(params.get("ratchet_two_collision_interval_margin_m", 0.025)),
+      0.0,
+    )
+    self.ratchet_two_collision_stride_layers = max(
+      float(params.get("ratchet_two_collision_stride_layers", 2.0)),
+      1.0,
+    )
+    self.ratchet_two_collision_min_layer_delta = max(
+      int(params.get("ratchet_two_collision_min_layer_delta", 1)),
+      1,
+    )
+    self.ratchet_two_collision_tread_min_m = max(
+      float(params.get("ratchet_two_collision_tread_min_m", 0.18)),
+      1.0e-6,
+    )
+    self.ratchet_two_collision_tread_max_m = max(
+      float(params.get("ratchet_two_collision_tread_max_m", 0.42)),
+      self.ratchet_two_collision_tread_min_m,
+    )
+    self.ratchet_anchor_collision_enabled = bool(
+      params.get("ratchet_anchor_collision_enabled", True)
     )
     self.ratchet_lower_target_lag_margin_m = max(
       float(params.get("ratchet_lower_target_lag_margin_m", 0.005)),
@@ -1036,6 +1123,12 @@ class FootEventMemoryObs:
     )
     self.ratchet_collision_min_confidence = float(
       params.get("ratchet_collision_min_confidence", 0.45)
+    )
+    self.ratchet_post_first_collision_collision_min_confidence = float(
+      params.get(
+        "ratchet_post_first_collision_collision_min_confidence",
+        self.ratchet_collision_min_confidence,
+      )
     )
     self.ratchet_min_interval_width_m = max(
       float(params.get("ratchet_min_interval_width_m", 0.04)),
@@ -1157,6 +1250,8 @@ class FootEventMemoryObs:
     self.ratchet_lock_stable_count = torch.zeros_like(self.ratchet_safe_no_hit_steps)
     self.ratchet_lock_lower_s = torch.zeros_like(self.ratchet_lower_s)
     self.ratchet_lock_upper_s = torch.zeros_like(self.ratchet_lower_s)
+    self.ratchet_lock_phase_error_s = torch.zeros_like(self.ratchet_lower_s)
+    self.ratchet_lock_phase_correction_s = torch.zeros_like(self.ratchet_lower_s)
     self.ratchet_lower_updated = torch.zeros_like(self.ratchet_active)
     self.ratchet_upper_updated = torch.zeros_like(self.ratchet_active)
     self.ratchet_stride_backoff_after_collision = torch.zeros_like(self.ratchet_active)
@@ -1171,6 +1266,29 @@ class FootEventMemoryObs:
     self.ratchet_target_inside_lock = torch.zeros_like(self.ratchet_active)
     self.ratchet_soft_upper_released = torch.zeros_like(self.ratchet_active)
     self.ratchet_lower_target_lag_clamped = torch.zeros_like(self.ratchet_active)
+    self.ratchet_first_collision_stair_signal = torch.zeros_like(self.ratchet_active)
+    self.ratchet_first_collision_seen = torch.zeros_like(self.ratchet_active)
+    self.ratchet_collision_anchor_active = torch.zeros_like(self.ratchet_active)
+    self.ratchet_collision_anchor_s = torch.zeros_like(self.ratchet_lower_s)
+    self.ratchet_collision_anchor_up_steps = torch.zeros_like(
+      self.ratchet_safe_no_hit_steps
+    )
+    self.ratchet_anchor_collision_estimate_valid = torch.zeros_like(self.ratchet_active)
+    self.ratchet_anchor_collision_cross_check_rejected = torch.zeros_like(
+      self.ratchet_active
+    )
+    self.ratchet_anchor_collision_tread_depth_s = torch.zeros_like(self.ratchet_lower_s)
+    self.ratchet_anchor_collision_layer_delta = torch.zeros_like(self.ratchet_lower_s)
+    self.ratchet_anchor_collision_target_stride_s = torch.zeros_like(
+      self.ratchet_lower_s
+    )
+    self.ratchet_two_collision_estimate_valid = torch.zeros_like(self.ratchet_active)
+    self.ratchet_two_collision_cross_check_rejected = torch.zeros_like(
+      self.ratchet_active
+    )
+    self.ratchet_two_collision_tread_depth_s = torch.zeros_like(self.ratchet_lower_s)
+    self.ratchet_two_collision_layer_delta = torch.zeros_like(self.ratchet_lower_s)
+    self.ratchet_two_collision_target_stride_s = torch.zeros_like(self.ratchet_lower_s)
     self.ratchet_collision_upper_anchor_corrected_s = torch.zeros_like(
       self.ratchet_lower_s
     )
@@ -1225,6 +1343,8 @@ class FootEventMemoryObs:
     self.ratchet_lock_stable_count[ids] = 0
     self.ratchet_lock_lower_s[ids] = 0.0
     self.ratchet_lock_upper_s[ids] = 0.0
+    self.ratchet_lock_phase_error_s[ids] = 0.0
+    self.ratchet_lock_phase_correction_s[ids] = 0.0
     self.ratchet_lower_updated[ids] = False
     self.ratchet_upper_updated[ids] = False
     self.ratchet_stride_backoff_after_collision[ids] = False
@@ -1237,6 +1357,21 @@ class FootEventMemoryObs:
     self.ratchet_target_inside_lock[ids] = False
     self.ratchet_soft_upper_released[ids] = False
     self.ratchet_lower_target_lag_clamped[ids] = False
+    self.ratchet_first_collision_stair_signal[ids] = False
+    self.ratchet_first_collision_seen[ids] = False
+    self.ratchet_collision_anchor_active[ids] = False
+    self.ratchet_collision_anchor_s[ids] = 0.0
+    self.ratchet_collision_anchor_up_steps[ids] = 0
+    self.ratchet_anchor_collision_estimate_valid[ids] = False
+    self.ratchet_anchor_collision_cross_check_rejected[ids] = False
+    self.ratchet_anchor_collision_tread_depth_s[ids] = 0.0
+    self.ratchet_anchor_collision_layer_delta[ids] = 0.0
+    self.ratchet_anchor_collision_target_stride_s[ids] = 0.0
+    self.ratchet_two_collision_estimate_valid[ids] = False
+    self.ratchet_two_collision_cross_check_rejected[ids] = False
+    self.ratchet_two_collision_tread_depth_s[ids] = 0.0
+    self.ratchet_two_collision_layer_delta[ids] = 0.0
+    self.ratchet_two_collision_target_stride_s[ids] = 0.0
     self.ratchet_collision_upper_anchor_corrected_s[ids] = 0.0
     self.ratchet_target_to_upper_margin_s[ids] = 0.0
     self.ratchet_same_foot_stride_guard_cap_s[ids] = self.ratchet_max_stride_m
@@ -1420,7 +1555,8 @@ class FootEventMemoryObs:
       new_toe_mark_any=new_toe_mark_any,
       step_dt=float(env.step_dt),
     )
-    self._log_summary_metrics(env, summary, new_footprint_any, new_toe_mark_any)
+    if self.log_summary_metrics:
+      self._log_summary_metrics(env, summary, new_footprint_any, new_toe_mark_any)
     if not self.include_raw_memory:
       return summary
     return torch.cat([raw_memory, summary], dim=-1)
@@ -1661,6 +1797,73 @@ class FootEventMemoryObs:
       )
     return features
 
+  def _two_collision_tread_estimate(
+    self,
+  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Estimate tread depth from two riser toe hits and intervening up-steps."""
+    valid = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+    tread_depth = torch.zeros(
+      self.num_envs,
+      dtype=torch.float32,
+      device=self.device,
+    )
+    layer_delta = torch.zeros_like(tread_depth)
+    if not self.ratchet_two_collision_enabled or self.memory_len < 2:
+      return valid, tread_depth, layer_delta
+
+    latest_toe = self.toe_marks[:, 0]
+    latest_valid = self.toe_valid[:, 0] & (
+      latest_toe[:, 4] >= self.ratchet_collision_min_confidence
+    )
+    latest_age = latest_toe[:, 5]
+    latest_s = latest_toe[:, 9]
+
+    for older_idx in range(1, self.memory_len):
+      older_toe = self.toe_marks[:, older_idx]
+      older_valid = (
+        self.toe_valid[:, older_idx]
+        & (older_toe[:, 4] >= self.ratchet_collision_min_confidence)
+        & (older_toe[:, 5] > latest_age + 1.0e-6)
+      )
+      toe_delta_s = latest_s - older_toe[:, 9]
+      step_count = torch.zeros_like(tread_depth)
+
+      for footprint_idx in range(self.memory_len - 1):
+        newer = self.footprints[:, footprint_idx]
+        older = self.footprints[:, footprint_idx + 1]
+        pair_valid = (
+          self.footprint_valid[:, footprint_idx]
+          & self.footprint_valid[:, footprint_idx + 1]
+        )
+        pair_age = 0.5 * (newer[:, 6] + older[:, 6])
+        pair_stride = newer[:, 10] - older[:, 10]
+        pair_height = newer[:, 9] - older[:, 9]
+        between_toe_hits = (pair_age < older_toe[:, 5] - 1.0e-6) & (
+          pair_age > latest_age + 1.0e-6
+        )
+        forward_up_pair = (
+          pair_valid
+          & (pair_stride >= self.ratchet_min_stride_m)
+          & (pair_height > self.ratchet_height_threshold_m)
+        )
+        step_count = step_count + (between_toe_hits & forward_up_pair).float()
+
+      candidate_tread = toe_delta_s / step_count.clamp_min(1.0)
+      candidate = (
+        latest_valid
+        & older_valid
+        & (toe_delta_s >= self.ratchet_min_stride_m)
+        & (step_count >= float(self.ratchet_two_collision_min_layer_delta))
+        & (candidate_tread >= self.ratchet_two_collision_tread_min_m)
+        & (candidate_tread <= self.ratchet_two_collision_tread_max_m)
+      )
+      replace = candidate & ~valid
+      valid = valid | replace
+      tread_depth = torch.where(replace, candidate_tread, tread_depth)
+      layer_delta = torch.where(replace, step_count, layer_delta)
+
+    return valid, tread_depth, layer_delta
+
   def _update_ratchet_state(
     self,
     pair_features: torch.Tensor,
@@ -1728,15 +1931,23 @@ class FootEventMemoryObs:
       & (torch.abs(latest_height) <= self.ratchet_flat_height_threshold_m)
     )
 
+    toe_mark_candidate = new_toe_mark_any & (toe_features[:, 0] > 0.5)
     toe_relation_valid = toe_features[:, 6] > 0.5
     toe_delta_s = toe_features[:, 7].clamp_min(0.0)
     toe_relation_candidate = (
-      new_toe_mark_any & toe_relation_valid & (toe_delta_s >= self.ratchet_min_stride_m)
+      toe_mark_candidate
+      & toe_relation_valid
+      & (toe_delta_s >= self.ratchet_min_stride_m)
     )
-    toe_context_candidate = toe_relation_candidate & (
-      self.ratchet_active | forward_up_step
+    if self.ratchet_first_collision_enters_stair_mode:
+      toe_context = self.ratchet_active | forward_up_step | toe_relation_candidate
+    else:
+      toe_context = self.ratchet_active | forward_up_step
+    toe_context_candidate = toe_relation_candidate & toe_context
+    toe_hit_context_candidate = toe_mark_candidate & (
+      self.ratchet_active | forward_up_step | toe_context_candidate
     )
-    toe_confident = toe_features[:, 1] >= self.ratchet_collision_min_confidence
+    toe_confidence = toe_features[:, 1]
 
     max_stride = torch.full_like(self.ratchet_upper_s, self.ratchet_max_stride_m)
     min_interval_width = min(
@@ -1783,6 +1994,24 @@ class FootEventMemoryObs:
       torch.zeros_like(self.ratchet_probe_target_s),
     )
     old_interval_confirmed = self.ratchet_active & self.ratchet_interval_confirmed
+    old_first_collision_seen = (
+      self.ratchet_active & self.ratchet_first_collision_seen & ~old_interval_confirmed
+    )
+    old_anchor_active = (
+      self.ratchet_active
+      & self.ratchet_collision_anchor_active
+      & ~old_interval_confirmed
+    )
+    post_first_collision_context = old_first_collision_seen | old_anchor_active
+    toe_confidence_threshold = torch.where(
+      post_first_collision_context,
+      torch.full_like(
+        toe_confidence,
+        self.ratchet_post_first_collision_collision_min_confidence,
+      ),
+      torch.full_like(toe_confidence, self.ratchet_collision_min_confidence),
+    )
+    toe_confident = toe_confidence >= toe_confidence_threshold
     old_soft_upper_active = (
       self.ratchet_active & self.ratchet_soft_upper_active & ~old_interval_confirmed
     )
@@ -1821,14 +2050,19 @@ class FootEventMemoryObs:
       self.ratchet_min_stride_m,
       self.ratchet_max_stride_m,
     )
+    lower_probe_increment = torch.where(
+      old_first_collision_seen,
+      torch.full_like(old_lower, self.ratchet_post_first_collision_probe_increment_m),
+      torch.full_like(old_lower, self.ratchet_probe_increment_m),
+    )
     lower_growth_cap = torch.where(
       self.ratchet_active,
-      old_lower + self.ratchet_probe_increment_m,
+      old_lower + lower_probe_increment,
       lower_target,
     )
     stride_lower_growth_cap = torch.where(
       self.ratchet_active,
-      old_stride_lower + self.ratchet_probe_increment_m,
+      old_stride_lower + lower_probe_increment,
       lower_target,
     )
     lower_upper_cap = torch.where(
@@ -1878,23 +2112,158 @@ class FootEventMemoryObs:
       self.ratchet_max_stride_m,
     )
     collision_upper = torch.minimum(collision_upper_raw, stride_guard_cap)
-    toe_evidence = (
+    two_collision_valid, two_tread_depth, two_layer_delta = (
+      self._two_collision_tread_estimate()
+    )
+    two_stride_center = (
+      two_tread_depth * self.ratchet_two_collision_stride_layers
+    ).clamp(self.ratchet_min_stride_m, self.ratchet_max_stride_m)
+    two_stride_upper = torch.minimum(
+      two_stride_center + self.ratchet_two_collision_interval_margin_m,
+      stride_guard_cap,
+    ).clamp(self.ratchet_min_stride_m, self.ratchet_max_stride_m)
+    two_stride_lower = (
+      two_stride_center - self.ratchet_two_collision_interval_margin_m
+    ).clamp(self.ratchet_min_stride_m, self.ratchet_max_stride_m)
+    two_stride_lower = torch.minimum(
+      two_stride_lower,
+      two_stride_upper - min_width_t,
+    ).clamp(self.ratchet_min_stride_m, self.ratchet_max_stride_m)
+    two_collision_candidate = (
+      toe_hit_context_candidate & toe_confident & two_collision_valid
+    )
+    anchor_steps = self.ratchet_collision_anchor_up_steps.float()
+    anchor_delta_s = toe_features[:, 4] - self.ratchet_collision_anchor_s
+    anchor_tread_depth = anchor_delta_s / anchor_steps.clamp_min(1.0)
+    anchor_enabled = torch.full_like(
+      toe_hit_context_candidate,
+      self.ratchet_anchor_collision_enabled,
+    )
+    anchor_collision_valid = (
+      anchor_enabled
+      & old_anchor_active
+      & toe_hit_context_candidate
+      & toe_confident
+      & (anchor_delta_s >= self.ratchet_min_stride_m)
+      & (anchor_steps >= float(self.ratchet_two_collision_min_layer_delta))
+      & (anchor_tread_depth >= self.ratchet_two_collision_tread_min_m)
+      & (anchor_tread_depth <= self.ratchet_two_collision_tread_max_m)
+    )
+    anchor_stride_center = (
+      anchor_tread_depth * self.ratchet_two_collision_stride_layers
+    ).clamp(self.ratchet_min_stride_m, self.ratchet_max_stride_m)
+    anchor_stride_upper = torch.minimum(
+      anchor_stride_center + self.ratchet_two_collision_interval_margin_m,
+      stride_guard_cap,
+    ).clamp(self.ratchet_min_stride_m, self.ratchet_max_stride_m)
+    anchor_stride_lower = (
+      anchor_stride_center - self.ratchet_two_collision_interval_margin_m
+    ).clamp(self.ratchet_min_stride_m, self.ratchet_max_stride_m)
+    anchor_stride_lower = torch.minimum(
+      anchor_stride_lower,
+      anchor_stride_upper - min_width_t,
+    ).clamp(self.ratchet_min_stride_m, self.ratchet_max_stride_m)
+
+    geometry_collision_candidate = two_collision_candidate | anchor_collision_valid
+    both_geometry_candidates = two_collision_candidate & anchor_collision_valid
+    geometry_stride_lower = torch.where(
+      two_collision_candidate,
+      two_stride_lower,
+      anchor_stride_lower,
+    )
+    geometry_stride_upper = torch.where(
+      two_collision_candidate,
+      two_stride_upper,
+      anchor_stride_upper,
+    )
+    geometry_stride_lower = torch.where(
+      both_geometry_candidates,
+      torch.maximum(two_stride_lower, anchor_stride_lower),
+      geometry_stride_lower,
+    )
+    geometry_stride_upper = torch.where(
+      both_geometry_candidates,
+      torch.minimum(two_stride_upper, anchor_stride_upper),
+      geometry_stride_upper,
+    )
+    geometry_lower_cross = torch.maximum(new_lower, geometry_stride_lower)
+    geometry_stride_lower_cross = torch.maximum(
+      new_stride_lower,
+      geometry_stride_lower,
+    )
+    geometry_interval_evidence = (
+      geometry_collision_candidate
+      & (geometry_stride_upper >= geometry_lower_cross + min_width_t)
+      & (geometry_stride_upper >= geometry_stride_lower_cross + min_width_t)
+      & (geometry_stride_upper >= geometry_stride_lower + min_width_t)
+    )
+    two_interval_evidence = two_collision_candidate & geometry_interval_evidence
+    anchor_interval_evidence = anchor_collision_valid & geometry_interval_evidence
+    two_cross_check_rejected = two_collision_candidate & ~geometry_interval_evidence
+    anchor_cross_check_rejected = anchor_collision_valid & ~geometry_interval_evidence
+    single_collision_interval_ok = (
       toe_context_candidate
       & toe_confident
       & (collision_upper >= new_lower + min_width_t)
       & (collision_upper >= new_stride_lower + min_width_t)
     )
-    soft_upper_evidence = toe_context_candidate & toe_confident & ~toe_evidence
-    has_evidence = forward_up_step | toe_evidence | soft_upper_evidence
+    if self.ratchet_single_collision_confirms_interval:
+      single_interval_evidence = single_collision_interval_ok
+    else:
+      single_interval_evidence = single_collision_interval_ok & old_interval_confirmed
+    toe_evidence = single_interval_evidence | geometry_interval_evidence
+    first_collision_signal = (
+      toe_context_candidate
+      & toe_confident
+      & ~old_interval_confirmed
+      & ~geometry_collision_candidate
+      & ~single_interval_evidence
+    )
+    if not self.ratchet_first_collision_enters_stair_mode:
+      first_collision_signal = torch.zeros_like(first_collision_signal)
+    soft_upper_allowed = (
+      torch.full_like(
+        toe_context_candidate,
+        self.ratchet_single_collision_confirms_interval,
+      )
+      | old_interval_confirmed
+      | two_cross_check_rejected
+      | anchor_cross_check_rejected
+    )
+    soft_upper_evidence = (
+      toe_context_candidate
+      & toe_confident
+      & soft_upper_allowed
+      & ~(toe_evidence | first_collision_signal)
+    )
+    has_evidence = (
+      forward_up_step | toe_evidence | soft_upper_evidence | first_collision_signal
+    )
+    new_lower = torch.where(geometry_interval_evidence, geometry_lower_cross, new_lower)
+    new_stride_lower = torch.where(
+      geometry_interval_evidence,
+      geometry_stride_lower_cross,
+      new_stride_lower,
+    )
     new_upper_candidate = torch.where(
-      toe_evidence,
+      toe_evidence & ~geometry_interval_evidence,
       torch.minimum(old_upper, collision_upper),
       old_upper,
     )
+    new_upper_candidate = torch.where(
+      geometry_interval_evidence,
+      geometry_stride_upper,
+      new_upper_candidate,
+    )
     new_stride_upper_candidate = torch.where(
-      toe_evidence,
+      toe_evidence & ~geometry_interval_evidence,
       torch.minimum(old_stride_upper, collision_upper),
       old_stride_upper,
+    )
+    new_stride_upper_candidate = torch.where(
+      geometry_interval_evidence,
+      geometry_stride_upper,
+      new_stride_upper_candidate,
     )
     new_soft_upper_candidate = torch.where(
       soft_upper_evidence,
@@ -1961,9 +2330,13 @@ class FootEventMemoryObs:
       ),
     ).clamp(0.0, self.ratchet_max_stride_m)
     new_collision_upper = torch.where(
-      toe_evidence | soft_upper_evidence,
-      collision_upper,
-      self.ratchet_collision_upper_s,
+      geometry_interval_evidence,
+      geometry_stride_upper,
+      torch.where(
+        toe_evidence | soft_upper_evidence,
+        collision_upper,
+        self.ratchet_collision_upper_s,
+      ),
     )
     collision_below_lower = (collision_upper < new_lower) | (
       collision_upper < new_stride_lower
@@ -1972,11 +2345,11 @@ class FootEventMemoryObs:
       (collision_upper < new_lower + min_width_t)
       | (collision_upper < new_stride_lower + min_width_t)
     ) & ~collision_below_lower
-    self.ratchet_collision_candidate = toe_context_candidate
+    self.ratchet_collision_candidate = toe_hit_context_candidate
     self.ratchet_collision_accepted = toe_evidence
     self.ratchet_collision_soft_upper = soft_upper_evidence
     self.ratchet_collision_rejected_low_confidence = (
-      toe_context_candidate & ~toe_confident
+      toe_hit_context_candidate & ~toe_confident
     )
     self.ratchet_collision_rejected = self.ratchet_collision_rejected_low_confidence
     self.ratchet_collision_soft_below_lower = (
@@ -1989,6 +2362,41 @@ class FootEventMemoryObs:
       & lower_ratchet_enabled
       & (lower_target > lower_target_lag_cap + 1.0e-5)
     )
+    self.ratchet_first_collision_stair_signal = first_collision_signal
+    self.ratchet_anchor_collision_estimate_valid = anchor_interval_evidence
+    self.ratchet_anchor_collision_cross_check_rejected = anchor_cross_check_rejected
+    self.ratchet_anchor_collision_tread_depth_s = torch.where(
+      anchor_interval_evidence,
+      anchor_tread_depth,
+      torch.zeros_like(anchor_tread_depth),
+    )
+    self.ratchet_anchor_collision_layer_delta = torch.where(
+      anchor_interval_evidence,
+      anchor_steps,
+      torch.zeros_like(anchor_steps),
+    )
+    self.ratchet_anchor_collision_target_stride_s = torch.where(
+      anchor_interval_evidence,
+      anchor_stride_center,
+      torch.zeros_like(anchor_stride_center),
+    )
+    self.ratchet_two_collision_estimate_valid = two_interval_evidence
+    self.ratchet_two_collision_cross_check_rejected = two_cross_check_rejected
+    self.ratchet_two_collision_tread_depth_s = torch.where(
+      two_interval_evidence,
+      two_tread_depth,
+      torch.zeros_like(two_tread_depth),
+    )
+    self.ratchet_two_collision_layer_delta = torch.where(
+      two_interval_evidence,
+      two_layer_delta,
+      torch.zeros_like(two_layer_delta),
+    )
+    self.ratchet_two_collision_target_stride_s = torch.where(
+      two_interval_evidence,
+      two_stride_center,
+      torch.zeros_like(two_stride_center),
+    )
     self.ratchet_upper_updated = toe_evidence | soft_upper_evidence
     self.ratchet_three_step_guard_candidate = guard_context & (
       (forward_up_step & (raw_stride_evidence > stride_guard_cap + 1.0e-5))
@@ -1997,6 +2405,9 @@ class FootEventMemoryObs:
     self.ratchet_same_foot_stride_guard_cap_s = stride_guard_cap
 
     collision_update = toe_evidence | soft_upper_evidence
+    post_first_collision_probe = (
+      old_first_collision_seen | first_collision_signal
+    ) & ~new_interval_confirmed
     backoff_mode_t = torch.full_like(
       self.ratchet_stride_mode,
       _RATCHET_MODE_BACKOFF,
@@ -2024,9 +2435,14 @@ class FootEventMemoryObs:
       torch.zeros_like(new_upper_seen),
       new_upper_seen,
     )
+    probe_increment = torch.where(
+      post_first_collision_probe,
+      torch.full_like(old_probe, self.ratchet_post_first_collision_probe_increment_m),
+      torch.full_like(old_probe, self.ratchet_probe_increment_m),
+    )
     grow_probe = torch.maximum(
-      old_probe + self.ratchet_probe_increment_m,
-      torch.maximum(new_lower, new_stride_lower) + self.ratchet_probe_increment_m,
+      old_probe + probe_increment,
+      torch.maximum(new_lower, new_stride_lower) + probe_increment,
     )
     grow_probe = torch.minimum(grow_probe, stride_guard_cap)
     upper_for_target = torch.where(
@@ -2051,9 +2467,14 @@ class FootEventMemoryObs:
       safe_upper_for_backoff,
     )
     backoff_source = torch.where(self.ratchet_active, old_probe, grow_probe)
+    backoff_step = torch.where(
+      new_interval_confirmed,
+      torch.full_like(backoff_source, self.ratchet_backoff_step_m),
+      torch.full_like(backoff_source, self.ratchet_first_collision_backoff_step_m),
+    )
     backoff_target = torch.minimum(
       backoff_source,
-      torch.maximum(backoff_goal, backoff_source - self.ratchet_backoff_step_m),
+      torch.maximum(backoff_goal, backoff_source - backoff_step),
     )
 
     old_lock_bounds_valid = self.ratchet_active & (
@@ -2069,7 +2490,7 @@ class FootEventMemoryObs:
       self.ratchet_lock_upper_s,
       lock_upper_candidate,
     )
-    lock_target = 0.5 * (effective_lock_lower + effective_lock_upper)
+    lock_center = 0.5 * (effective_lock_lower + effective_lock_upper)
 
     backoff_after_collision = new_mode == _RATCHET_MODE_BACKOFF
     actual_same_stride_valid = forward_up_step & latest_same_valid
@@ -2117,16 +2538,97 @@ class FootEventMemoryObs:
       & lock_interval_valid
       & (new_lock_stable_count >= self.ratchet_lock_stable_steps)
     )
+    lock_enter = lock_enter | (geometry_interval_evidence & lock_interval_valid)
     new_mode = torch.where(lock_enter, lock_mode_t, new_mode)
+    lock_phase_enabled = torch.full_like(
+      lock_enter,
+      self.ratchet_lock_phase_correction_enabled,
+    )
+    previous_lock_active = (
+      self.ratchet_active & (old_mode == _RATCHET_MODE_LOCK) & old_interval_confirmed
+    )
+    old_phase_error = torch.where(
+      previous_lock_active,
+      self.ratchet_lock_phase_error_s,
+      torch.zeros_like(self.ratchet_lock_phase_error_s),
+    )
+    actual_stride_error = step_stride - lock_center
+    updated_phase_error = torch.where(
+      previous_lock_active
+      & actual_same_stride_valid
+      & lock_interval_valid
+      & ~collision_update,
+      old_phase_error + actual_stride_error,
+      old_phase_error,
+    )
+    initial_phase_error = torch.full_like(
+      updated_phase_error,
+      self.ratchet_lock_phase_initial_front_error_m,
+    )
+    new_phase_error = torch.where(
+      lock_enter & geometry_interval_evidence,
+      initial_phase_error,
+      updated_phase_error,
+    )
+    lock_active_next = lock_phase_enabled & (new_mode == _RATCHET_MODE_LOCK)
+    new_phase_error = torch.where(
+      lock_active_next,
+      new_phase_error.clamp(
+        -self.ratchet_lock_phase_max_error_m,
+        self.ratchet_lock_phase_max_error_m,
+      ),
+      torch.zeros_like(new_phase_error),
+    )
+    deadband = self.ratchet_lock_phase_deadband_m
+    correction_raw = torch.where(
+      new_phase_error > deadband,
+      (new_phase_error - deadband) * self.ratchet_lock_phase_correction_gain,
+      torch.where(
+        new_phase_error < -deadband,
+        (new_phase_error + deadband) * self.ratchet_lock_phase_correction_gain,
+        torch.zeros_like(new_phase_error),
+      ),
+    )
+    lock_phase_correction = torch.where(
+      lock_active_next,
+      correction_raw.clamp(
+        -self.ratchet_lock_phase_max_forward_m,
+        self.ratchet_lock_phase_max_backoff_m,
+      ),
+      torch.zeros_like(correction_raw),
+    )
+    lock_target = (lock_center - lock_phase_correction).clamp(
+      self.ratchet_min_stride_m,
+      self.ratchet_max_stride_m,
+    )
+    lock_target = torch.maximum(
+      effective_lock_lower,
+      torch.minimum(lock_target, effective_lock_upper),
+    )
     self.ratchet_lock_entered = lock_enter
     self.ratchet_actual_stride_inside_lock = actual_stride_inside_lock
     self.ratchet_target_inside_lock = target_stride_inside_lock
     self.ratchet_soft_upper_released = soft_upper_released
 
+    first_collision_probe_candidate = (
+      toe_delta_s + self.ratchet_first_collision_probe_push_m
+    ).clamp(
+      self.ratchet_min_stride_m,
+      self.ratchet_max_stride_m,
+    )
+    first_collision_probe = torch.where(
+      self.ratchet_active,
+      torch.maximum(self.ratchet_probe_target_s, first_collision_probe_candidate),
+      first_collision_probe_candidate,
+    )
     open_target = torch.where(
       forward_up_step,
       grow_probe,
-      self.ratchet_probe_target_s,
+      torch.where(
+        first_collision_signal,
+        first_collision_probe,
+        self.ratchet_probe_target_s,
+      ),
     )
     new_probe = torch.where(
       new_mode == _RATCHET_MODE_LOCK,
@@ -2182,20 +2684,21 @@ class FootEventMemoryObs:
       step_height.clamp_min(0.0),
       self.ratchet_last_forward_up_height,
     )
+    collision_or_signal = toe_evidence | soft_upper_evidence | first_collision_signal
     new_no_hit_steps = torch.where(
-      forward_up_step & ~(toe_evidence | soft_upper_evidence),
+      forward_up_step & ~collision_or_signal,
       self.ratchet_safe_no_hit_steps + 1,
       self.ratchet_safe_no_hit_steps,
     )
     new_no_hit_steps = torch.where(
-      toe_evidence | soft_upper_evidence,
+      collision_or_signal,
       torch.zeros_like(new_no_hit_steps),
       new_no_hit_steps,
     )
     evidence_confidence = torch.maximum(
       torch.where(forward_up_step, step_score, torch.zeros_like(step_score)),
       torch.where(
-        toe_evidence | soft_upper_evidence,
+        collision_or_signal,
         toe_features[:, 1].clamp(0.0, 1.0),
         torch.zeros_like(step_score),
       ),
@@ -2221,6 +2724,31 @@ class FootEventMemoryObs:
       torch.zeros_like(new_flat_steps),
       new_flat_steps,
     )
+    new_first_collision_seen = (
+      old_first_collision_seen | first_collision_signal
+    ) & ~new_interval_confirmed
+    old_anchor_steps = torch.where(
+      old_anchor_active,
+      self.ratchet_collision_anchor_up_steps,
+      torch.zeros_like(self.ratchet_collision_anchor_up_steps),
+    )
+    anchor_step_increment = (
+      old_anchor_active & forward_up_step & ~collision_or_signal
+    ).long()
+    new_anchor_steps = old_anchor_steps + anchor_step_increment
+    new_anchor_s = torch.where(
+      first_collision_signal,
+      toe_features[:, 4],
+      self.ratchet_collision_anchor_s,
+    )
+    new_anchor_steps = torch.where(
+      first_collision_signal,
+      torch.zeros_like(new_anchor_steps),
+      new_anchor_steps,
+    )
+    new_anchor_active = (
+      old_anchor_active | first_collision_signal
+    ) & ~new_interval_confirmed
 
     stale = self.ratchet_active & (aged >= self.age_norm_s) & ~has_evidence
     flat_reset = self.ratchet_active & (new_flat_steps >= self.ratchet_reset_flat_pairs)
@@ -2277,6 +2805,18 @@ class FootEventMemoryObs:
       torch.zeros_like(new_no_hit_steps),
     )
     self.ratchet_interval_confirmed = active & new_interval_confirmed
+    self.ratchet_first_collision_seen = active & new_first_collision_seen
+    self.ratchet_collision_anchor_active = active & new_anchor_active
+    self.ratchet_collision_anchor_s = torch.where(
+      active & new_anchor_active,
+      new_anchor_s,
+      torch.zeros_like(new_anchor_s),
+    )
+    self.ratchet_collision_anchor_up_steps = torch.where(
+      active & new_anchor_active,
+      new_anchor_steps,
+      torch.zeros_like(new_anchor_steps),
+    )
     self.ratchet_soft_upper_active = active & new_soft_upper_active
     self.ratchet_soft_upper_ttl_remaining = torch.where(
       active & new_soft_upper_active,
@@ -2299,6 +2839,16 @@ class FootEventMemoryObs:
       active & (new_mode == _RATCHET_MODE_LOCK),
       effective_lock_upper,
       torch.zeros_like(effective_lock_upper),
+    )
+    self.ratchet_lock_phase_error_s = torch.where(
+      active & (new_mode == _RATCHET_MODE_LOCK),
+      new_phase_error,
+      torch.zeros_like(new_phase_error),
+    )
+    self.ratchet_lock_phase_correction_s = torch.where(
+      active & (new_mode == _RATCHET_MODE_LOCK),
+      lock_phase_correction,
+      torch.zeros_like(lock_phase_correction),
     )
     self.ratchet_collision_upper_anchor_corrected_s = torch.where(
       active,
@@ -2729,6 +3279,7 @@ class FootEventMemoryObs:
       self.ratchet_stride_mode == _RATCHET_MODE_LOCK
     ).float() * ratchet_active_f
     mode_backoff_denom = mode_backoff_f.sum().clamp_min(1.0)
+    mode_lock_denom = mode_lock_f.sum().clamp_min(1.0)
     log["Metrics/foot_event_ratchet_mode_probe_ratio"] = (
       mode_probe_f.sum() / ratchet_denom
     )
@@ -2738,9 +3289,23 @@ class FootEventMemoryObs:
     log["Metrics/foot_event_ratchet_mode_lock_ratio"] = (
       mode_lock_f.sum() / ratchet_denom
     )
+    log["Metrics/foot_event_ratchet_lock_phase_error_mean"] = (
+      self.ratchet_lock_phase_error_s * mode_lock_f
+    ).sum() / mode_lock_denom
+    log["Metrics/foot_event_ratchet_lock_phase_correction_mean"] = (
+      self.ratchet_lock_phase_correction_s * mode_lock_f
+    ).sum() / mode_lock_denom
+    log["Metrics/foot_event_ratchet_lock_phase_backoff_ratio"] = (
+      (self.ratchet_lock_phase_correction_s > 1.0e-5).float() * mode_lock_f
+    ).sum() / mode_lock_denom
+    log["Metrics/foot_event_ratchet_lock_phase_forward_ratio"] = (
+      (self.ratchet_lock_phase_correction_s < -1.0e-5).float() * mode_lock_f
+    ).sum() / mode_lock_denom
+    mode_backoff_or_lock_f = mode_backoff_f + mode_lock_f
+    mode_backoff_or_lock_denom = mode_backoff_or_lock_f.sum().clamp_min(1.0)
     log["Metrics/foot_event_ratchet_lock_stable_count_mean"] = (
-      self.ratchet_lock_stable_count.float() * mode_backoff_f
-    ).sum() / mode_backoff_denom
+      self.ratchet_lock_stable_count.float() * mode_backoff_or_lock_f
+    ).sum() / mode_backoff_or_lock_denom
     log["Metrics/foot_event_ratchet_post_collision_probe_growth_violation_ratio"] = (
       self.ratchet_post_collision_probe_growth_violation.float().mean()
     )
@@ -2753,12 +3318,40 @@ class FootEventMemoryObs:
     log["Metrics/foot_event_ratchet_lock_collision_reopen_rate"] = (
       self.ratchet_lock_collision_reopen.float().mean()
     )
-    log["Metrics/foot_event_ratchet_actual_stride_inside_lock_ratio"] = (
+    backoff_actual_inside_ratio = (
       self.ratchet_actual_stride_inside_lock.float() * mode_backoff_f
     ).sum() / mode_backoff_denom
-    log["Metrics/foot_event_ratchet_target_stride_inside_lock_ratio"] = (
+    backoff_target_inside_ratio = (
       self.ratchet_target_inside_lock.float() * mode_backoff_f
     ).sum() / mode_backoff_denom
+    log["Metrics/foot_event_ratchet_actual_stride_inside_lock_ratio"] = (
+      backoff_actual_inside_ratio
+    )
+    log["Metrics/foot_event_ratchet_target_stride_inside_lock_ratio"] = (
+      backoff_target_inside_ratio
+    )
+    log["Metrics/foot_event_ratchet_backoff_actual_stride_inside_interval_ratio"] = (
+      backoff_actual_inside_ratio
+    )
+    log["Metrics/foot_event_ratchet_backoff_target_stride_inside_interval_ratio"] = (
+      backoff_target_inside_ratio
+    )
+    lock_bounds_valid_f = (
+      mode_lock_f * (self.ratchet_lock_upper_s > self.ratchet_lock_lower_s).float()
+    )
+    lock_bounds_denom = lock_bounds_valid_f.sum().clamp_min(1.0)
+    lock_actual_stride_inside = (
+      self.ratchet_last_forward_up_stride >= self.ratchet_lock_lower_s
+    ) & (self.ratchet_last_forward_up_stride <= self.ratchet_lock_upper_s)
+    lock_target_inside = (self.ratchet_probe_target_s >= self.ratchet_lock_lower_s) & (
+      self.ratchet_probe_target_s <= self.ratchet_lock_upper_s
+    )
+    log["Metrics/foot_event_ratchet_lock_actual_stride_inside_interval_ratio"] = (
+      lock_actual_stride_inside.float() * lock_bounds_valid_f
+    ).sum() / lock_bounds_denom
+    log["Metrics/foot_event_ratchet_lock_target_inside_interval_ratio"] = (
+      lock_target_inside.float() * lock_bounds_valid_f
+    ).sum() / lock_bounds_denom
     log["Metrics/foot_event_ratchet_soft_upper_release_rate"] = (
       self.ratchet_soft_upper_released.float().mean()
     )
@@ -2774,6 +3367,52 @@ class FootEventMemoryObs:
     log["Metrics/foot_event_ratchet_upper_update_rate"] = (
       self.ratchet_upper_updated.float().mean()
     )
+    log["Metrics/foot_event_ratchet_first_collision_stair_signal_ratio"] = (
+      self.ratchet_first_collision_stair_signal.float().mean()
+    )
+    log["Metrics/foot_event_ratchet_first_collision_seen_ratio"] = (
+      self.ratchet_first_collision_seen.float().mean()
+    )
+    log["Metrics/foot_event_ratchet_anchor_collision_active_ratio"] = (
+      self.ratchet_collision_anchor_active.float().mean()
+    )
+    log["Metrics/foot_event_ratchet_anchor_collision_step_count_mean"] = (
+      self.ratchet_collision_anchor_up_steps.float() * ratchet_active_f
+    ).sum() / ratchet_denom
+    anchor_collision_f = self.ratchet_anchor_collision_estimate_valid.float()
+    anchor_collision_denom = anchor_collision_f.sum().clamp_min(1.0)
+    log["Metrics/foot_event_ratchet_anchor_collision_estimate_ratio"] = (
+      anchor_collision_f.mean()
+    )
+    log["Metrics/foot_event_ratchet_anchor_collision_cross_reject_ratio"] = (
+      self.ratchet_anchor_collision_cross_check_rejected.float().mean()
+    )
+    log["Metrics/foot_event_ratchet_anchor_collision_tread_depth_mean"] = (
+      self.ratchet_anchor_collision_tread_depth_s * anchor_collision_f
+    ).sum() / anchor_collision_denom
+    log["Metrics/foot_event_ratchet_anchor_collision_layer_delta_mean"] = (
+      self.ratchet_anchor_collision_layer_delta * anchor_collision_f
+    ).sum() / anchor_collision_denom
+    log["Metrics/foot_event_ratchet_anchor_collision_target_stride_mean"] = (
+      self.ratchet_anchor_collision_target_stride_s * anchor_collision_f
+    ).sum() / anchor_collision_denom
+    two_collision_f = self.ratchet_two_collision_estimate_valid.float()
+    two_collision_denom = two_collision_f.sum().clamp_min(1.0)
+    log["Metrics/foot_event_ratchet_two_collision_estimate_ratio"] = (
+      two_collision_f.mean()
+    )
+    log["Metrics/foot_event_ratchet_two_collision_cross_reject_ratio"] = (
+      self.ratchet_two_collision_cross_check_rejected.float().mean()
+    )
+    log["Metrics/foot_event_ratchet_two_collision_tread_depth_mean"] = (
+      self.ratchet_two_collision_tread_depth_s * two_collision_f
+    ).sum() / two_collision_denom
+    log["Metrics/foot_event_ratchet_two_collision_layer_delta_mean"] = (
+      self.ratchet_two_collision_layer_delta * two_collision_f
+    ).sum() / two_collision_denom
+    log["Metrics/foot_event_ratchet_two_collision_target_stride_mean"] = (
+      self.ratchet_two_collision_target_stride_s * two_collision_f
+    ).sum() / two_collision_denom
     collision_candidate_f = self.ratchet_collision_candidate.float()
     collision_candidate_denom = collision_candidate_f.sum().clamp_min(1.0)
     log["Metrics/foot_event_ratchet_upper_after_collision_valid_ratio"] = (

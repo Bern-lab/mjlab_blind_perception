@@ -135,6 +135,14 @@ class PPOTeacherKL(PPO):
             if safe_stride_confidence_head is not None:
                 for parameter in safe_stride_confidence_head.parameters():
                     parameter.requires_grad_(True)
+            safe_stride_trend_head = getattr(
+                self.actor,
+                "safe_stride_trend_head",
+                None,
+            )
+            if safe_stride_trend_head is not None:
+                for parameter in safe_stride_trend_head.parameters():
+                    parameter.requires_grad_(True)
             probe_parameters = safe_stride_head.parameters()
             if safe_stride_width_head is not None:
                 probe_parameters = chain(
@@ -145,6 +153,11 @@ class PPOTeacherKL(PPO):
                 probe_parameters = chain(
                     probe_parameters,
                     safe_stride_confidence_head.parameters(),
+                )
+            if safe_stride_trend_head is not None:
+                probe_parameters = chain(
+                    probe_parameters,
+                    safe_stride_trend_head.parameters(),
                 )
             self.optimizer = torch.optim.Adam(
                 probe_parameters,
@@ -181,6 +194,7 @@ class PPOTeacherKL(PPO):
                 "safe_stride_head.",
                 "safe_stride_width_head.",
                 "safe_stride_confidence_head.",
+                "safe_stride_trend_head.",
             )):
                 frozen[f"actor.{name}"] = value.detach().cpu().clone()
         for name, value in self.critic.state_dict().items():
@@ -767,6 +781,47 @@ class PPOTeacherKL(PPO):
         return 0.5 * (positive_loss + negative_loss)
 
     @staticmethod
+    def _compute_safe_stride_phase_center_loss(
+        predictions: torch.Tensor,
+        target: torch.Tensor,
+        valid: torch.Tensor,
+        importance: torch.Tensor,
+        huber_delta: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Regress the phase-aware stride intent decoded from ratchet memory."""
+        finite_valid = torch.isfinite(predictions) & torch.isfinite(target)
+        predictions = torch.nan_to_num(predictions)
+        target = torch.nan_to_num(target)
+        error = functional.smooth_l1_loss(
+            predictions,
+            target,
+            reduction="none",
+            beta=huber_delta,
+        )
+        weighted_valid = (
+            torch.nan_to_num(valid).clamp_min(0.0)
+            * torch.nan_to_num(importance, nan=1.0).clamp_min(1.0)
+            * finite_valid.to(error.dtype)
+        )
+        weighted_count = weighted_valid.sum().clamp_min(1.0)
+        loss = (error * weighted_valid).sum() / weighted_count
+        valid_f = torch.nan_to_num(valid).clamp_min(0.0) * finite_valid.to(error.dtype)
+        mae = (torch.abs(predictions - target) * valid_f).sum() / valid_f.sum().clamp_min(1.0)
+        return loss, mae
+
+    @staticmethod
+    def _safe_stride_phase_center_prediction(
+        safe_stride_predictions: torch.Tensor,
+        safe_stride_interval_predictions: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Use the open upper bound for phase-center gradients when available."""
+        if safe_stride_interval_predictions is None:
+            return safe_stride_predictions
+        predicted_lower = safe_stride_interval_predictions[..., 0:1]
+        predicted_upper = safe_stride_interval_predictions[..., 1:2]
+        return 0.5 * (predicted_lower.detach() + predicted_upper)
+
+    @staticmethod
     def _compute_masked_centered_spread_losses(
         predictions: torch.Tensor,
         labels: torch.Tensor,
@@ -906,6 +961,250 @@ class PPOTeacherKL(PPO):
         lower_over_mae = (lower_over * weighted_valid).sum() / weighted_valid.sum().clamp_min(1.0)
         upper_shortfall_mae = (upper_shortfall * weighted_valid).sum() / weighted_valid.sum().clamp_min(1.0)
         return 0.5 * (lower_loss + upper_loss), lower_over_mae, upper_shortfall_mae
+
+    @staticmethod
+    def _compute_stride_trend_metrics(
+        predictions: torch.Tensor,
+        labels: torch.Tensor,
+        reference: torch.Tensor,
+        valid: torch.Tensor,
+        margin: float,
+    ) -> dict[str, torch.Tensor]:
+        """Compare whether predicted stride should move farther, closer, or hold."""
+        finite_valid = torch.isfinite(predictions) & torch.isfinite(labels) & torch.isfinite(reference)
+        valid_f = torch.nan_to_num(valid).clamp_min(0.0) * finite_valid.to(predictions.dtype)
+        margin_t = predictions.new_tensor(max(float(margin), 0.0))
+        pred_delta = torch.nan_to_num(predictions - reference)
+        label_delta = torch.nan_to_num(labels - reference)
+        zeros = torch.zeros_like(pred_delta)
+        ones = torch.ones_like(pred_delta)
+        pred_class = torch.where(
+            pred_delta > margin_t,
+            ones,
+            torch.where(pred_delta < -margin_t, -ones, zeros),
+        )
+        label_class = torch.where(
+            label_delta > margin_t,
+            ones,
+            torch.where(label_delta < -margin_t, -ones, zeros),
+        )
+        valid_count = valid_f.sum().clamp_min(1.0)
+        same_class = pred_class == label_class
+        target_farther = label_class > 0.0
+        target_closer = label_class < 0.0
+        target_hold = label_class == 0.0
+        target_active = target_farther | target_closer
+        pred_farther = pred_class > 0.0
+        pred_closer = pred_class < 0.0
+        pred_hold = pred_class == 0.0
+
+        def _ratio(mask: torch.Tensor) -> torch.Tensor:
+            mask_f = mask.to(valid_f.dtype) * valid_f
+            return mask_f.sum() / valid_count
+
+        def _class_accuracy(
+            target_mask: torch.Tensor,
+            pred_mask: torch.Tensor,
+        ) -> torch.Tensor:
+            target_f = target_mask.to(valid_f.dtype) * valid_f
+            return (target_f * pred_mask.to(valid_f.dtype)).sum() / target_f.sum().clamp_min(1.0)
+
+        active_f = target_active.to(valid_f.dtype) * valid_f
+        return {
+            "valid_ratio": valid_f.mean(),
+            "accuracy": (same_class.to(valid_f.dtype) * valid_f).sum() / valid_count,
+            "active_accuracy": (same_class.to(valid_f.dtype) * active_f).sum() / active_f.sum().clamp_min(1.0),
+            "farther_ratio": _ratio(target_farther),
+            "closer_ratio": _ratio(target_closer),
+            "hold_ratio": _ratio(target_hold),
+            "farther_recall": _class_accuracy(target_farther, pred_farther),
+            "closer_recall": _class_accuracy(target_closer, pred_closer),
+            "hold_accuracy": _class_accuracy(target_hold, pred_hold),
+        }
+
+    @staticmethod
+    def _stride_trend_target_class(
+        labels: torch.Tensor,
+        reference: torch.Tensor,
+        valid: torch.Tensor,
+        margin: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        finite_valid = torch.isfinite(labels) & torch.isfinite(reference)
+        valid_f = torch.nan_to_num(valid).clamp_min(0.0) * finite_valid.to(labels.dtype)
+        margin_t = labels.new_tensor(max(float(margin), 0.0))
+        label_delta = torch.nan_to_num(labels - reference)
+        target = torch.where(
+            label_delta > margin_t,
+            torch.full_like(label_delta, 2, dtype=torch.long),
+            torch.where(
+                label_delta < -margin_t,
+                torch.zeros_like(label_delta, dtype=torch.long),
+                torch.ones_like(label_delta, dtype=torch.long),
+            ),
+        )
+        return target.squeeze(-1), valid_f.squeeze(-1)
+
+    @classmethod
+    def _compute_stride_trend_head_loss(
+        cls,
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+        reference: torch.Tensor,
+        valid: torch.Tensor,
+        margin: float,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        target, valid_f = cls._stride_trend_target_class(labels, reference, valid, margin)
+        return cls._compute_stride_trend_class_head_loss(logits, target, valid_f)
+
+    @staticmethod
+    def _compute_stride_trend_class_head_loss(
+        logits: torch.Tensor,
+        target: torch.Tensor,
+        valid: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if target.dim() == logits.dim():
+            target = target.squeeze(-1)
+        if valid.dim() == logits.dim():
+            valid = valid.squeeze(-1)
+        target = target.long().clamp(0, 2)
+        valid_f = torch.nan_to_num(valid.float()).clamp_min(0.0)
+        logits = torch.nan_to_num(logits)
+        ce = functional.cross_entropy(
+            logits.reshape(-1, logits.shape[-1]),
+            target.reshape(-1),
+            reduction="none",
+        ).reshape_as(valid_f)
+        counts = torch.stack([((target == class_index).to(valid_f.dtype) * valid_f).sum() for class_index in range(3)])
+        valid_count = valid_f.sum().clamp_min(1.0)
+        class_weights = valid_count / (3.0 * counts.clamp_min(1.0))
+        sample_weights = class_weights[target] * valid_f
+        loss = (ce * sample_weights).sum() / sample_weights.sum().clamp_min(1.0)
+
+        pred = torch.argmax(logits, dim=-1)
+        same = pred == target
+
+        def _ratio(mask: torch.Tensor) -> torch.Tensor:
+            mask_f = mask.to(valid_f.dtype) * valid_f
+            return mask_f.sum() / valid_count
+
+        def _recall(class_index: int) -> torch.Tensor:
+            target_mask = target == class_index
+            target_f = target_mask.to(valid_f.dtype) * valid_f
+            return (target_f * (pred == class_index).to(valid_f.dtype)).sum() / target_f.sum().clamp_min(1.0)
+
+        active = ((target == 0) | (target == 2)).to(valid_f.dtype) * valid_f
+        metrics = {
+            "valid_ratio": valid_f.mean(),
+            "loss": loss,
+            "accuracy": (same.to(valid_f.dtype) * valid_f).sum() / valid_count,
+            "active_accuracy": (same.to(valid_f.dtype) * active).sum() / active.sum().clamp_min(1.0),
+            "closer_ratio": _ratio(target == 0),
+            "hold_ratio": _ratio(target == 1),
+            "farther_ratio": _ratio(target == 2),
+            "closer_recall": _recall(0),
+            "hold_accuracy": _recall(1),
+            "farther_recall": _recall(2),
+        }
+        return loss, metrics
+
+    @staticmethod
+    def _safe_stride_dense_trend_from_latent_obs(
+        observations: TensorDict | None,
+        latent_obs_key: str,
+        margin: float,
+    ) -> torch.Tensor | None:
+        """Extract dense closer/hold/farther trend labels from ratchet state.
+
+        Class layout is [0]=closer, [1]=hold, [2]=farther.  Before the first
+        usable upper bound, the label stays farther so the actor learns to keep
+        probing after stair entry.  Once a soft/confirmed upper exists, the
+        label switches to closer or hold so collision response remains learned
+        through latent semantics instead of a direct control bypass.
+        """
+        phase_targets = PPOTeacherKL._safe_stride_phase_targets_from_latent_obs(
+            observations,
+            latent_obs_key,
+            safe_stride_min=0.0,
+            safe_stride_max=1.0e6,
+            upper_margin=margin,
+        )
+        if phase_targets is None:
+            return None
+        return torch.cat(
+            [
+                phase_targets[..., 2:3],
+                phase_targets[..., 1:2],
+            ],
+            dim=-1,
+        )
+
+    @staticmethod
+    def _safe_stride_phase_targets_from_latent_obs(
+        observations: TensorDict | None,
+        latent_obs_key: str,
+        safe_stride_min: float,
+        safe_stride_max: float,
+        upper_margin: float = 0.0,
+    ) -> torch.Tensor | None:
+        """Extract phase-aware center and trend labels from ratchet summary obs.
+
+        Returned columns are:
+        [center_target, ratchet_valid, trend_class, probe, backoff, lock].
+        Trend class layout is [0]=closer, [1]=hold, [2]=farther.
+        """
+        if observations is None or latent_obs_key not in observations:
+            return None
+        latent_obs = observations[latent_obs_key]
+        latent_dim = int(latent_obs.shape[-1])
+        if latent_dim < 80:
+            return None
+        new_foot_only = (latent_dim - 80) % 33 == 0
+        new_with_stair = latent_dim >= 173 and (latent_dim - 173) % 33 == 0
+        if latent_dim != 80 and not new_foot_only and not new_with_stair:
+            return None
+
+        summary = torch.nan_to_num(latent_obs[..., -80:])
+        ratchet = summary[..., 70:80]
+        active = ratchet[..., 0:1] > 0.5
+        confidence = ratchet[..., 8:9]
+        ratchet_valid = active & (confidence > 0.05)
+        lower = torch.maximum(
+            ratchet[..., 1:2].clamp_min(0.0),
+            ratchet[..., 5:6].clamp_min(0.0),
+        )
+        center_target = ratchet[..., 2:3].clamp(
+            float(safe_stride_min),
+            float(safe_stride_max),
+        )
+        confirmed = ratchet[..., 6:7] > 0.5
+        upper = torch.maximum(
+            ratchet[..., 3:4].clamp_min(0.0),
+            ratchet[..., 7:8].clamp_min(0.0),
+        )
+        has_upper = upper > max(float(upper_margin), 0.0)
+        interval_center = 0.5 * (lower + upper)
+        margin = center_target.new_tensor(max(float(upper_margin), 0.0))
+        target_above_center = center_target >= interval_center + margin
+        still_backing_off = has_upper & (~confirmed | target_above_center)
+        closer = torch.zeros_like(center_target)
+        hold = torch.ones_like(center_target)
+        farther = torch.full_like(center_target, 2.0)
+        trend_class = torch.where(still_backing_off, closer, torch.where(has_upper | confirmed, hold, farther))
+        probe = ratchet_valid & ~confirmed & ~has_upper
+        backoff = ratchet_valid & still_backing_off
+        lock = ratchet_valid & confirmed & ~still_backing_off
+        valid_f = ratchet_valid.to(center_target.dtype)
+        return torch.cat(
+            [
+                center_target,
+                valid_f,
+                trend_class,
+                probe.to(center_target.dtype),
+                backoff.to(center_target.dtype),
+                lock.to(center_target.dtype),
+            ],
+            dim=-1,
+        )
 
     @staticmethod
     def _safe_stride_deployable_hint_from_latent_obs(
@@ -1517,13 +1816,12 @@ class PPOTeacherKL(PPO):
           whether the current mini-batch produced logits, whether latent labels are
           present in rollout storage, and whether shapes match.
         """
-        logs: dict[str, float] = self._compute_slow_latent_diagnostic_logs()
-
         get_aux_outputs = getattr(self.actor, "get_aux_outputs", None)
         get_diagnostics = getattr(self.actor, "get_slow_latent_diagnostics", None)
 
         aux_outputs = get_aux_outputs() if get_aux_outputs is not None else {}
         diagnostics = get_diagnostics() if get_diagnostics is not None else {}
+        logs: dict[str, float] = {}
 
         event_coef = float(getattr(self.actor, "aux_event_coef", 0.0))
         stair_coef = float(getattr(self.actor, "aux_stair_coef", 0.0))
@@ -1706,6 +2004,13 @@ class PPOTeacherKL(PPO):
             float(getattr(self.actor, "safe_stride_min", 0.10)),
             float(getattr(self.actor, "safe_stride_max", 0.55)),
         )
+        phase_targets_padded = self._safe_stride_phase_targets_from_latent_obs(
+            observations,
+            str(getattr(self.actor, "latent_obs_set", "latent")),
+            float(getattr(self.actor, "safe_stride_min", 0.10)),
+            float(getattr(self.actor, "safe_stride_max", 0.55)),
+            float(getattr(self.actor, "safe_stride_deployable_hint_margin", 0.02)),
+        )
         same_foot_hint_padded = self._same_foot_stride_deployable_hint_from_latent_obs(
             observations,
             str(getattr(self.actor, "latent_obs_set", "latent")),
@@ -1716,6 +2021,13 @@ class PPOTeacherKL(PPO):
             deployable_hint_padded = torch.zeros(
                 *labels.shape[:-1],
                 2,
+                device=labels.device,
+                dtype=labels.dtype,
+            )
+        if phase_targets_padded is None:
+            phase_targets_padded = torch.zeros(
+                *labels.shape[:-1],
+                6,
                 device=labels.device,
                 dtype=labels.dtype,
             )
@@ -1747,17 +2059,27 @@ class PPOTeacherKL(PPO):
             landing_touchdown_now = torch.zeros_like(event_labels_padded)
             landing_quality_now = torch.zeros_like(event_labels_padded)
         future_horizon = int(getattr(self.actor, "future_horizon", 20))
-        future_risk_padded = self._compute_future_max_labels(
-            collision_risk_now,
-            batch.masks,
-            future_horizon,
-        )
-        future_quality_padded, future_touchdown_found_padded = self._compute_future_first_touchdown_quality(
-            landing_touchdown_now,
-            landing_quality_now,
-            batch.masks,
-            future_horizon,
-        )
+        if future_risk_coef != 0.0:
+            future_risk_padded = self._compute_future_max_labels(
+                collision_risk_now,
+                batch.masks,
+                future_horizon,
+            )
+        else:
+            future_risk_padded = torch.zeros_like(event_labels_padded)
+        if future_quality_coef != 0.0:
+            (
+                future_quality_padded,
+                future_touchdown_found_padded,
+            ) = self._compute_future_first_touchdown_quality(
+                landing_touchdown_now,
+                landing_quality_now,
+                batch.masks,
+                future_horizon,
+            )
+        else:
+            future_quality_padded = torch.zeros_like(event_labels_padded)
+            future_touchdown_found_padded = torch.zeros_like(event_labels_padded)
 
         if batch.masks is not None:
             event_labels_raw = cast(
@@ -1842,6 +2164,13 @@ class PPOTeacherKL(PPO):
                     batch.masks,
                 ),
             )
+            phase_targets = cast(
+                torch.Tensor,
+                unpad_trajectories(
+                    phase_targets_padded,
+                    batch.masks,
+                ),
+            )
             same_foot_hint = cast(
                 torch.Tensor,
                 unpad_trajectories(
@@ -1869,40 +2198,23 @@ class PPOTeacherKL(PPO):
             depth_confirmation_age = depth_confirmation_age_padded
             adjacent_pair_evidence = adjacent_pair_evidence_padded
             deployable_hint = deployable_hint_padded
+            phase_targets = phase_targets_padded
             same_foot_hint = same_foot_hint_padded
 
         total_loss = torch.zeros((), device=self.device)
         logs: dict[str, float] = {}
-        self._add_slow_latent_phase_alignment_logs(
-            logs,
-            diagnostics,
-            event_labels_raw,
-            stair_labels,
-            batch.dones,
-            batch.masks,
-        )
+        full_aux_metrics = str(getattr(self.actor, "slow_latent_metrics", "full")) == "full"
+        if full_aux_metrics:
+            self._add_slow_latent_phase_alignment_logs(
+                logs,
+                diagnostics,
+                event_labels_raw,
+                stair_labels,
+                batch.dones,
+                batch.masks,
+            )
         if event_coef != 0.0 and "event_logit" in aux_outputs:
-            event_prob = torch.sigmoid(aux_outputs["event_logit"].detach())
-            event_labels_detached = event_labels.detach()
-            event_labels_raw_detached = event_labels_raw.detach()
-            event_positive = event_labels_detached > 0.5
-            event_positive_raw = event_labels_raw_detached > 0.5
-            event_negative = ~event_positive
-            event_pred_0p6 = event_prob > 0.6
-            event_pred_0p4 = event_prob > 0.4
-            event_on_threshold = float(getattr(self.actor, "event_on_threshold", 0.6))
             event_pos_weight = float(getattr(self.actor, "aux_event_pos_weight", 1.0))
-            event_pred_on_threshold = event_prob > event_on_threshold
-            event_pos_count = event_positive.float().sum().clamp_min(1.0)
-            event_raw_pos_count = event_positive_raw.float().sum().clamp_min(1.0)
-            event_neg_count = event_negative.float().sum().clamp_min(1.0)
-            event_pred_on_count = event_pred_on_threshold.float().sum().clamp_min(1.0)
-            event_pred_0p6_count = event_pred_0p6.float().sum().clamp_min(1.0)
-            event_true_positive_on = (event_pred_on_threshold & event_positive).float().sum()
-            event_raw_true_positive_on = (event_pred_on_threshold & event_positive_raw).float().sum()
-            event_true_positive_0p6 = (event_pred_0p6 & event_positive).float().sum()
-            event_raw_true_positive_0p6 = (event_pred_0p6 & event_positive_raw).float().sum()
-            flat_event_prob = event_prob.float().reshape(-1)
             event_loss_raw = functional.binary_cross_entropy_with_logits(
                 aux_outputs["event_logit"],
                 event_labels,
@@ -1913,74 +2225,85 @@ class PPOTeacherKL(PPO):
             logs["slow_latent_event_bce"] = self._distributed_mean_scalar(event_loss_raw).item()
             logs["slow_latent_event_loss"] = self._distributed_mean_scalar(event_loss).item()
             logs["slow_latent_event_pos_weight"] = event_pos_weight
-            logs["slow_latent_event_label_window_steps"] = float(event_label_window_steps)
-            logs["slow_latent_event_raw_label_mean"] = self._distributed_mean_scalar(
-                event_labels_raw_detached.float().mean()
-            ).item()
-            logs["slow_latent_event_raw_label_positive_count"] = self._distributed_mean_scalar(
-                event_positive_raw.float().sum()
-            ).item()
-            logs["slow_latent_event_label_mean"] = self._distributed_mean_scalar(
-                event_labels_detached.float().mean()
-            ).item()
-            logs["slow_latent_event_raw_label_positive_ratio"] = self._distributed_mean_scalar(
-                event_positive_raw.float().mean()
-            ).item()
-            logs["slow_latent_event_label_positive_ratio"] = self._distributed_mean_scalar(
-                event_positive.float().mean()
-            ).item()
-            logs["slow_latent_event_prob_max"] = self._distributed_mean_scalar(flat_event_prob.max()).item()
-            logs["slow_latent_event_prob_p99"] = self._distributed_mean_scalar(
-                torch.quantile(flat_event_prob, 0.99)
-            ).item()
-            logs["slow_latent_event_prob_gt_on_threshold_ratio"] = self._distributed_mean_scalar(
-                event_pred_on_threshold.float().mean()
-            ).item()
-            logs["slow_latent_event_prob_gt_0p6_ratio"] = self._distributed_mean_scalar(
-                event_pred_0p6.float().mean()
-            ).item()
-            logs["slow_latent_event_prob_gt_0p4_ratio"] = self._distributed_mean_scalar(
-                event_pred_0p4.float().mean()
-            ).item()
-            logs["slow_latent_event_recall_at_on_threshold"] = self._distributed_mean_scalar(
-                event_true_positive_on / event_pos_count
-            ).item()
-            logs["slow_latent_event_raw_recall_at_on_threshold"] = self._distributed_mean_scalar(
-                event_raw_true_positive_on / event_raw_pos_count
-            ).item()
-            logs["slow_latent_event_precision_at_on_threshold"] = self._distributed_mean_scalar(
-                event_true_positive_on / event_pred_on_count
-            ).item()
-            logs["slow_latent_event_prob_pos_mean"] = self._distributed_mean_scalar(
-                (event_prob * event_positive.float()).sum() / event_pos_count
-            ).item()
-            logs["slow_latent_event_prob_raw_pos_mean"] = self._distributed_mean_scalar(
-                (event_prob * event_positive_raw.float()).sum() / event_raw_pos_count
-            ).item()
-            logs["slow_latent_event_prob_neg_mean"] = self._distributed_mean_scalar(
-                (event_prob * event_negative.float()).sum() / event_neg_count
-            ).item()
-            logs["slow_latent_event_recall_at_0p6"] = self._distributed_mean_scalar(
-                event_true_positive_0p6 / event_pos_count
-            ).item()
-            logs["slow_latent_event_raw_recall_at_0p6"] = self._distributed_mean_scalar(
-                event_raw_true_positive_0p6 / event_raw_pos_count
-            ).item()
-            logs["slow_latent_event_precision_at_0p6"] = self._distributed_mean_scalar(
-                event_true_positive_0p6 / event_pred_0p6_count
-            ).item()
+            if full_aux_metrics:
+                event_prob = torch.sigmoid(aux_outputs["event_logit"].detach())
+                event_labels_detached = event_labels.detach()
+                event_labels_raw_detached = event_labels_raw.detach()
+                event_positive = event_labels_detached > 0.5
+                event_positive_raw = event_labels_raw_detached > 0.5
+                event_negative = ~event_positive
+                event_pred_0p6 = event_prob > 0.6
+                event_pred_0p4 = event_prob > 0.4
+                event_on_threshold = float(getattr(self.actor, "event_on_threshold", 0.6))
+                event_pred_on_threshold = event_prob > event_on_threshold
+                event_pos_count = event_positive.float().sum().clamp_min(1.0)
+                event_raw_pos_count = event_positive_raw.float().sum().clamp_min(1.0)
+                event_neg_count = event_negative.float().sum().clamp_min(1.0)
+                event_pred_on_count = event_pred_on_threshold.float().sum().clamp_min(1.0)
+                event_pred_0p6_count = event_pred_0p6.float().sum().clamp_min(1.0)
+                event_true_positive_on = (event_pred_on_threshold & event_positive).float().sum()
+                event_raw_true_positive_on = (event_pred_on_threshold & event_positive_raw).float().sum()
+                event_true_positive_0p6 = (event_pred_0p6 & event_positive).float().sum()
+                event_raw_true_positive_0p6 = (event_pred_0p6 & event_positive_raw).float().sum()
+                flat_event_prob = event_prob.float().reshape(-1)
+                logs["slow_latent_event_label_window_steps"] = float(event_label_window_steps)
+                logs["slow_latent_event_raw_label_mean"] = self._distributed_mean_scalar(
+                    event_labels_raw_detached.float().mean()
+                ).item()
+                logs["slow_latent_event_raw_label_positive_count"] = self._distributed_mean_scalar(
+                    event_positive_raw.float().sum()
+                ).item()
+                logs["slow_latent_event_label_mean"] = self._distributed_mean_scalar(
+                    event_labels_detached.float().mean()
+                ).item()
+                logs["slow_latent_event_raw_label_positive_ratio"] = self._distributed_mean_scalar(
+                    event_positive_raw.float().mean()
+                ).item()
+                logs["slow_latent_event_label_positive_ratio"] = self._distributed_mean_scalar(
+                    event_positive.float().mean()
+                ).item()
+                logs["slow_latent_event_prob_max"] = self._distributed_mean_scalar(flat_event_prob.max()).item()
+                logs["slow_latent_event_prob_p99"] = self._distributed_mean_scalar(
+                    torch.quantile(flat_event_prob, 0.99)
+                ).item()
+                logs["slow_latent_event_prob_gt_on_threshold_ratio"] = self._distributed_mean_scalar(
+                    event_pred_on_threshold.float().mean()
+                ).item()
+                logs["slow_latent_event_prob_gt_0p6_ratio"] = self._distributed_mean_scalar(
+                    event_pred_0p6.float().mean()
+                ).item()
+                logs["slow_latent_event_prob_gt_0p4_ratio"] = self._distributed_mean_scalar(
+                    event_pred_0p4.float().mean()
+                ).item()
+                logs["slow_latent_event_recall_at_on_threshold"] = self._distributed_mean_scalar(
+                    event_true_positive_on / event_pos_count
+                ).item()
+                logs["slow_latent_event_raw_recall_at_on_threshold"] = self._distributed_mean_scalar(
+                    event_raw_true_positive_on / event_raw_pos_count
+                ).item()
+                logs["slow_latent_event_precision_at_on_threshold"] = self._distributed_mean_scalar(
+                    event_true_positive_on / event_pred_on_count
+                ).item()
+                logs["slow_latent_event_prob_pos_mean"] = self._distributed_mean_scalar(
+                    (event_prob * event_positive.float()).sum() / event_pos_count
+                ).item()
+                logs["slow_latent_event_prob_raw_pos_mean"] = self._distributed_mean_scalar(
+                    (event_prob * event_positive_raw.float()).sum() / event_raw_pos_count
+                ).item()
+                logs["slow_latent_event_prob_neg_mean"] = self._distributed_mean_scalar(
+                    (event_prob * event_negative.float()).sum() / event_neg_count
+                ).item()
+                logs["slow_latent_event_recall_at_0p6"] = self._distributed_mean_scalar(
+                    event_true_positive_0p6 / event_pos_count
+                ).item()
+                logs["slow_latent_event_raw_recall_at_0p6"] = self._distributed_mean_scalar(
+                    event_raw_true_positive_0p6 / event_raw_pos_count
+                ).item()
+                logs["slow_latent_event_precision_at_0p6"] = self._distributed_mean_scalar(
+                    event_true_positive_0p6 / event_pred_0p6_count
+                ).item()
         if stair_coef != 0.0 and "stair_logit" in aux_outputs:
-            stair_prob = torch.sigmoid(aux_outputs["stair_logit"].detach())
-            stair_labels_detached = stair_labels.detach()
-            stair_positive = stair_labels_detached > 0.5
-            stair_negative = ~stair_positive
-            stair_pos_count = stair_positive.float().sum().clamp_min(1.0)
-            stair_neg_count = stair_negative.float().sum().clamp_min(1.0)
             stair_pos_weight = float(getattr(self.actor, "aux_stair_pos_weight", 1.0))
-            stair_on_threshold = float(getattr(self.actor, "stair_on_threshold", 0.35))
-            stair_pred_on = stair_prob > stair_on_threshold
-            stair_pred_on_count = stair_pred_on.float().sum().clamp_min(1.0)
-            stair_true_positive_on = (stair_pred_on & stair_positive).float().sum()
             stair_loss_raw = functional.binary_cross_entropy_with_logits(
                 aux_outputs["stair_logit"],
                 stair_labels,
@@ -1991,32 +2314,43 @@ class PPOTeacherKL(PPO):
             logs["slow_latent_stair_bce"] = self._distributed_mean_scalar(stair_loss_raw).item()
             logs["slow_latent_stair_loss"] = self._distributed_mean_scalar(stair_loss).item()
             logs["slow_latent_stair_pos_weight"] = stair_pos_weight
-            logs["slow_latent_stair_on_threshold"] = stair_on_threshold
-            logs["slow_latent_stair_confirm_steps"] = float(getattr(self.actor, "stair_confirm_steps", 1.0))
-            logs["slow_latent_stair_label_mean"] = self._distributed_mean_scalar(
-                stair_labels_detached.float().mean()
-            ).item()
-            logs["slow_latent_stair_label_positive_count"] = self._distributed_mean_scalar(
-                stair_positive.float().sum()
-            ).item()
-            logs["slow_latent_stair_prob_pos_mean"] = self._distributed_mean_scalar(
-                (stair_prob * stair_positive.float()).sum() / stair_pos_count
-            ).item()
-            logs["slow_latent_stair_prob_neg_mean"] = self._distributed_mean_scalar(
-                (stair_prob * stair_negative.float()).sum() / stair_neg_count
-            ).item()
-            logs["slow_latent_stair_prob_gt_0p4_ratio"] = self._distributed_mean_scalar(
-                (stair_prob > 0.4).float().mean()
-            ).item()
-            logs["slow_latent_stair_prob_gt_on_threshold_ratio"] = self._distributed_mean_scalar(
-                stair_pred_on.float().mean()
-            ).item()
-            logs["slow_latent_stair_recall_at_on_threshold"] = self._distributed_mean_scalar(
-                stair_true_positive_on / stair_pos_count
-            ).item()
-            logs["slow_latent_stair_precision_at_on_threshold"] = self._distributed_mean_scalar(
-                stair_true_positive_on / stair_pred_on_count
-            ).item()
+            if full_aux_metrics:
+                stair_prob = torch.sigmoid(aux_outputs["stair_logit"].detach())
+                stair_labels_detached = stair_labels.detach()
+                stair_positive = stair_labels_detached > 0.5
+                stair_negative = ~stair_positive
+                stair_pos_count = stair_positive.float().sum().clamp_min(1.0)
+                stair_neg_count = stair_negative.float().sum().clamp_min(1.0)
+                stair_on_threshold = float(getattr(self.actor, "stair_on_threshold", 0.35))
+                stair_pred_on = stair_prob > stair_on_threshold
+                stair_pred_on_count = stair_pred_on.float().sum().clamp_min(1.0)
+                stair_true_positive_on = (stair_pred_on & stair_positive).float().sum()
+                logs["slow_latent_stair_on_threshold"] = stair_on_threshold
+                logs["slow_latent_stair_confirm_steps"] = float(getattr(self.actor, "stair_confirm_steps", 1.0))
+                logs["slow_latent_stair_label_mean"] = self._distributed_mean_scalar(
+                    stair_labels_detached.float().mean()
+                ).item()
+                logs["slow_latent_stair_label_positive_count"] = self._distributed_mean_scalar(
+                    stair_positive.float().sum()
+                ).item()
+                logs["slow_latent_stair_prob_pos_mean"] = self._distributed_mean_scalar(
+                    (stair_prob * stair_positive.float()).sum() / stair_pos_count
+                ).item()
+                logs["slow_latent_stair_prob_neg_mean"] = self._distributed_mean_scalar(
+                    (stair_prob * stair_negative.float()).sum() / stair_neg_count
+                ).item()
+                logs["slow_latent_stair_prob_gt_0p4_ratio"] = self._distributed_mean_scalar(
+                    (stair_prob > 0.4).float().mean()
+                ).item()
+                logs["slow_latent_stair_prob_gt_on_threshold_ratio"] = self._distributed_mean_scalar(
+                    stair_pred_on.float().mean()
+                ).item()
+                logs["slow_latent_stair_recall_at_on_threshold"] = self._distributed_mean_scalar(
+                    stair_true_positive_on / stair_pos_count
+                ).item()
+                logs["slow_latent_stair_precision_at_on_threshold"] = self._distributed_mean_scalar(
+                    stair_true_positive_on / stair_pred_on_count
+                ).item()
         if future_risk_coef != 0.0 and "future_collision_risk_logit" in aux_outputs:
             risk_loss_raw, risk_mae = self._compute_weighted_bounded_huber(
                 aux_outputs["future_collision_risk_logit"],
@@ -2313,14 +2647,28 @@ class PPOTeacherKL(PPO):
             std_floor_ratio = float(getattr(self.actor, "safe_stride_std_floor_ratio", 0.70))
             hint_loss_coef = float(getattr(self.actor, "safe_stride_deployable_hint_loss_coef", 0.0))
             hint_margin = float(getattr(self.actor, "safe_stride_deployable_hint_margin", 0.02))
+            phase_center_loss_coef = float(getattr(self.actor, "safe_stride_phase_center_loss_coef", 0.0))
+            trend_loss_coef = float(getattr(self.actor, "safe_stride_trend_loss_coef", 0.0))
+            dense_trend_loss_coef = float(getattr(self.actor, "safe_stride_dense_trend_loss_coef", 1.0))
             safe_stride_predictions = aux_outputs["safe_stride"]
             safe_stride_interval_predictions = aux_outputs.get("safe_stride_interval")
             safe_stride_confidence_logit = aux_outputs.get("safe_stride_confidence_logit")
+            safe_stride_trend_logit = aux_outputs.get("safe_stride_trend_logit")
             safe_stride_target_center = 0.5 * (safe_stride_labels + safe_stride_upper)
+            phase_center_target = phase_targets[..., 0:1]
+            ratchet_phase_valid = phase_targets[..., 1:2]
+            phase_trend_target = phase_targets[..., 2].long()
+            stair_positive_for_phase = (stair_labels > 0.5).to(safe_stride_valid.dtype)
+            phase_center_valid = ratchet_phase_valid * safe_stride_valid * stair_positive_for_phase
+            phase_probe = phase_targets[..., 3:4] * phase_center_valid
+            phase_backoff = phase_targets[..., 4:5] * phase_center_valid
+            phase_lock = phase_targets[..., 5:6] * phase_center_valid
             interval_valid = safe_stride_valid * safe_stride_interval_valid
             lower_loss_raw = safe_stride_predictions.new_zeros(())
             width_loss_raw = safe_stride_predictions.new_zeros(())
             confidence_loss_raw = safe_stride_predictions.new_zeros(())
+            phase_center_loss_raw = safe_stride_predictions.new_zeros(())
+            phase_center_mae = safe_stride_predictions.new_zeros(())
             center_centered_loss_raw = safe_stride_predictions.new_zeros(())
             center_std_floor_loss_raw = safe_stride_predictions.new_zeros(())
             lower_centered_loss_raw = safe_stride_predictions.new_zeros(())
@@ -2330,6 +2678,11 @@ class PPOTeacherKL(PPO):
             coverage_upper_shortfall = safe_stride_predictions.new_zeros(())
             deployable_hint_loss_raw = safe_stride_predictions.new_zeros(())
             deployable_hint_shortfall = safe_stride_predictions.new_zeros(())
+            trend_head_loss_raw = safe_stride_predictions.new_zeros(())
+            sparse_trend_head_loss_raw = safe_stride_predictions.new_zeros(())
+            dense_trend_head_loss_raw = safe_stride_predictions.new_zeros(())
+            trend_head_metrics: dict[str, torch.Tensor] = {}
+            dense_trend_head_metrics: dict[str, torch.Tensor] = {}
             width_loss_coef = 1.0
             if safe_stride_interval_predictions is not None:
                 width_loss_coef = float(getattr(self.actor, "safe_stride_width_loss_coef", 1.0))
@@ -2402,6 +2755,21 @@ class PPOTeacherKL(PPO):
                     + centered_loss_coef * (center_centered_loss_raw + lower_centered_loss_raw)
                     + std_floor_loss_coef * (center_std_floor_loss_raw + lower_std_floor_loss_raw)
                 )
+            (
+                phase_center_loss_raw,
+                phase_center_mae,
+            ) = self._compute_safe_stride_phase_center_loss(
+                self._safe_stride_phase_center_prediction(
+                    safe_stride_predictions,
+                    safe_stride_interval_predictions,
+                ),
+                phase_center_target,
+                phase_center_valid,
+                safe_stride_importance,
+                safe_stride_delta,
+            )
+            if phase_center_loss_coef != 0.0:
+                safe_stride_loss_raw = safe_stride_loss_raw + phase_center_loss_coef * phase_center_loss_raw
             deployable_hint_valid = deployable_hint[..., 1:2] * safe_stride_valid
             if hint_loss_coef != 0.0:
                 (
@@ -2418,7 +2786,9 @@ class PPOTeacherKL(PPO):
                 safe_stride_loss_raw = safe_stride_loss_raw + hint_loss_coef * deployable_hint_loss_raw
             if safe_stride_confidence_logit is not None:
                 confidence_target = (
-                    interval_valid if safe_stride_interval_predictions is not None else safe_stride_valid
+                    torch.maximum(interval_valid, phase_center_valid)
+                    if safe_stride_interval_predictions is not None
+                    else torch.maximum(safe_stride_valid, phase_center_valid)
                 )
                 confidence_loss_raw = self._compute_safe_stride_confidence_loss(
                     safe_stride_confidence_logit,
@@ -2429,6 +2799,24 @@ class PPOTeacherKL(PPO):
                 safe_stride_loss_raw = safe_stride_loss_raw + confidence_loss_coef * confidence_loss_raw
             else:
                 confidence_loss_coef = 0.0
+            trend_valid = center_valid * deployable_hint[..., 1:2]
+            if safe_stride_trend_logit is not None:
+                dense_trend_head_loss_raw, dense_trend_head_metrics = self._compute_stride_trend_class_head_loss(
+                    safe_stride_trend_logit,
+                    phase_trend_target,
+                    phase_center_valid.squeeze(-1),
+                )
+                trend_head_loss_raw = dense_trend_loss_coef * dense_trend_head_loss_raw
+                if full_aux_metrics:
+                    sparse_trend_head_loss_raw, trend_head_metrics = self._compute_stride_trend_head_loss(
+                        safe_stride_trend_logit,
+                        safe_stride_target_center,
+                        deployable_hint[..., 0:1],
+                        trend_valid,
+                        hint_margin,
+                    )
+                if trend_loss_coef != 0.0:
+                    safe_stride_loss_raw = safe_stride_loss_raw + trend_loss_coef * trend_head_loss_raw
             safe_stride_mae, safe_stride_huber = self._compute_stair_shape_component_errors(
                 safe_stride_predictions,
                 safe_stride_target_center,
@@ -2473,6 +2861,46 @@ class PPOTeacherKL(PPO):
                 safe_stride_loss_raw
             ).item()
             logs["slow_latent_safe_stride_loss"] = self._distributed_mean_scalar(safe_stride_loss).item()
+            phase_valid_count = phase_center_valid.sum().clamp_min(1.0)
+            phase_farther = (phase_trend_target == 2).to(phase_center_valid.dtype).unsqueeze(-1)
+            phase_closer = (phase_trend_target == 0).to(phase_center_valid.dtype).unsqueeze(-1)
+            phase_hold = (phase_trend_target == 1).to(phase_center_valid.dtype).unsqueeze(-1)
+            logs["slow_latent_safe_stride_phase_center_loss_coef"] = phase_center_loss_coef
+            logs["slow_latent_safe_stride_phase_center_huber"] = self._distributed_mean_scalar(
+                phase_center_loss_raw
+            ).item()
+            logs["slow_latent_safe_stride_phase_center_valid_ratio"] = self._distributed_mean_scalar(
+                phase_center_valid.mean()
+            ).item()
+            logs["slow_latent_safe_stride_phase_center_target_mean"] = self._distributed_mean_scalar(
+                (phase_center_target * phase_center_valid).sum() / phase_valid_count
+            ).item()
+            phase_center_prediction = self._safe_stride_phase_center_prediction(
+                safe_stride_predictions,
+                safe_stride_interval_predictions,
+            )
+            logs["slow_latent_safe_stride_phase_center_pred_mean"] = self._distributed_mean_scalar(
+                (phase_center_prediction * phase_center_valid).sum() / phase_valid_count
+            ).item()
+            logs["slow_latent_safe_stride_phase_center_mae"] = self._distributed_mean_scalar(phase_center_mae).item()
+            logs["slow_latent_safe_stride_phase_probe_ratio"] = self._distributed_mean_scalar(
+                phase_probe.sum() / phase_valid_count
+            ).item()
+            logs["slow_latent_safe_stride_phase_backoff_ratio"] = self._distributed_mean_scalar(
+                phase_backoff.sum() / phase_valid_count
+            ).item()
+            logs["slow_latent_safe_stride_phase_lock_ratio"] = self._distributed_mean_scalar(
+                phase_lock.sum() / phase_valid_count
+            ).item()
+            logs["slow_latent_safe_stride_phase_trend_farther_ratio"] = self._distributed_mean_scalar(
+                (phase_farther * phase_center_valid).sum() / phase_valid_count
+            ).item()
+            logs["slow_latent_safe_stride_phase_trend_closer_ratio"] = self._distributed_mean_scalar(
+                (phase_closer * phase_center_valid).sum() / phase_valid_count
+            ).item()
+            logs["slow_latent_safe_stride_phase_trend_hold_ratio"] = self._distributed_mean_scalar(
+                (phase_hold * phase_center_valid).sum() / phase_valid_count
+            ).item()
             if safe_stride_interval_predictions is not None:
                 logs["slow_latent_safe_stride_lower_huber"] = self._distributed_mean_scalar(lower_loss_raw).item()
                 logs["slow_latent_safe_stride_width_huber"] = self._distributed_mean_scalar(width_loss_raw).item()
@@ -2524,7 +2952,9 @@ class PPOTeacherKL(PPO):
             if safe_stride_confidence_logit is not None:
                 confidence_prob = torch.sigmoid(safe_stride_confidence_logit)
                 confidence_target = (
-                    interval_valid if safe_stride_interval_predictions is not None else safe_stride_valid
+                    torch.maximum(interval_valid, phase_center_valid)
+                    if safe_stride_interval_predictions is not None
+                    else torch.maximum(safe_stride_valid, phase_center_valid)
                 )
                 confidence_positive = confidence_target > 0.5
                 confidence_negative = ~confidence_positive
@@ -2586,6 +3016,42 @@ class PPOTeacherKL(PPO):
             logs["slow_latent_safe_stride_interval_width_mean"] = self._distributed_mean_scalar(
                 ((safe_stride_upper - safe_stride_labels) * center_valid).sum() / valid_count
             ).item()
+            if full_aux_metrics:
+                trend_metrics = self._compute_stride_trend_metrics(
+                    safe_stride_predictions,
+                    safe_stride_target_center,
+                    deployable_hint[..., 0:1],
+                    trend_valid,
+                    hint_margin,
+                )
+                for trend_name, trend_value in trend_metrics.items():
+                    logs[f"slow_latent_safe_stride_trend_{trend_name}"] = self._distributed_mean_scalar(
+                        trend_value
+                    ).item()
+            if safe_stride_trend_logit is not None:
+                logs["slow_latent_safe_stride_trend_head_loss_coef"] = trend_loss_coef
+                logs["slow_latent_safe_stride_dense_trend_loss_coef"] = dense_trend_loss_coef
+                logs["slow_latent_safe_stride_phase_trend_ce"] = self._distributed_mean_scalar(
+                    dense_trend_head_loss_raw
+                ).item()
+                logs["slow_latent_safe_stride_dense_trend_head_loss"] = self._distributed_mean_scalar(
+                    dense_trend_head_loss_raw
+                ).item()
+                if full_aux_metrics:
+                    logs["slow_latent_safe_stride_sparse_trend_head_loss"] = self._distributed_mean_scalar(
+                        sparse_trend_head_loss_raw
+                    ).item()
+                    for trend_name, trend_value in trend_head_metrics.items():
+                        logs[f"slow_latent_safe_stride_trend_head_{trend_name}"] = self._distributed_mean_scalar(
+                            trend_value
+                        ).item()
+                for trend_name, trend_value in dense_trend_head_metrics.items():
+                    logs[f"slow_latent_safe_stride_dense_trend_{trend_name}"] = self._distributed_mean_scalar(
+                        trend_value
+                    ).item()
+                    logs[f"slow_latent_safe_stride_phase_trend_{trend_name}"] = self._distributed_mean_scalar(
+                        trend_value
+                    ).item()
             if safe_stride_interval_predictions is not None:
                 target_width = safe_stride_upper - safe_stride_labels
                 predicted_width = predicted_upper - predicted_lower
@@ -2716,6 +3182,10 @@ class PPOTeacherKL(PPO):
 
     def _compute_slow_latent_diagnostic_logs(self) -> dict[str, float]:
         """Summarize slow-latent rollout/update diagnostics for training logs."""
+        log_level = str(getattr(self.actor, "slow_latent_metrics", "full"))
+        if log_level == "off":
+            return {}
+        full_logs = log_level == "full"
         get_diagnostics = getattr(self.actor, "get_slow_latent_diagnostics", None)
         if get_diagnostics is None:
             return {}
@@ -2735,13 +3205,14 @@ class PPOTeacherKL(PPO):
         add_mean("slow_latent_stair_prob_mean", diagnostics.get("stair_prob"))
         future_risk = diagnostics.get("future_risk")
         future_quality = diagnostics.get("future_quality")
-        add_mean("slow_latent_future_collision_risk_mean", future_risk)
-        add_mean("slow_latent_future_safe_landing_quality_mean", future_quality)
-        if future_risk is not None and future_quality is not None:
-            add_mean(
-                "slow_latent_future_risk_quality_overlap_mean",
-                future_risk * future_quality,
-            )
+        if full_logs:
+            add_mean("slow_latent_future_collision_risk_mean", future_risk)
+            add_mean("slow_latent_future_safe_landing_quality_mean", future_quality)
+            if future_risk is not None and future_quality is not None:
+                add_mean(
+                    "slow_latent_future_risk_quality_overlap_mean",
+                    future_risk * future_quality,
+                )
         add_mean("slow_latent_z_norm_mean", diagnostics.get("z_norm"))
 
         stair_shape = diagnostics.get("stair_shape")
@@ -2772,7 +3243,7 @@ class PPOTeacherKL(PPO):
             )
 
         shadow_semantic = diagnostics.get("shadow_semantic")
-        if shadow_semantic is not None and shadow_semantic.shape[-1] == 16:
+        if full_logs and shadow_semantic is not None and shadow_semantic.shape[-1] == 16:
             semantic_names = (
                 "event_on",
                 "stair_on",
@@ -2782,13 +3253,13 @@ class PPOTeacherKL(PPO):
                 "write_progress",
                 "memory_age",
                 "release_progress",
-                "same_foot_stride_norm",
+                "safe_stride_control_norm",
                 "riser_height_norm",
                 "safe_stride_lower_norm",
                 "safe_stride_upper_norm",
                 "safe_stride_center_norm",
                 "safe_stride_width_norm",
-                "clearance_height_norm",
+                "safe_stride_trend_norm",
                 "safe_stride_confidence",
             )
             for index, name in enumerate(semantic_names):
@@ -2798,18 +3269,19 @@ class PPOTeacherKL(PPO):
                 )
 
         z_norm = diagnostics.get("z_norm")
-        if z_norm is not None and z_norm.numel() > 0:
+        if full_logs and z_norm is not None and z_norm.numel() > 0:
             logs["slow_latent_z_norm_max"] = self._distributed_mean_scalar(z_norm.float().max()).item()
 
         alpha = diagnostics.get("alpha")
-        if alpha is not None and alpha.numel() > 0:
+        if full_logs and alpha is not None and alpha.numel() > 0:
             alpha = alpha.float()
             logs["slow_latent_alpha_mean"] = self._distributed_mean_scalar(alpha.mean()).item()
             logs["slow_latent_alpha_std"] = self._distributed_mean_scalar(alpha.std(unbiased=False)).item()
             logs["slow_latent_alpha_min"] = self._distributed_mean_scalar(alpha.min()).item()
             logs["slow_latent_alpha_max"] = self._distributed_mean_scalar(alpha.max()).item()
-        add_mean("slow_latent_alpha_state_mean", diagnostics.get("alpha_state"))
-        add_mean("slow_latent_alpha_shape_mean", diagnostics.get("alpha_shape"))
+        if full_logs:
+            add_mean("slow_latent_alpha_state_mean", diagnostics.get("alpha_state"))
+            add_mean("slow_latent_alpha_shape_mean", diagnostics.get("alpha_shape"))
         add_mean(
             "slow_latent_episode_write_ever_ratio",
             diagnostics.get("episode_write_ever"),
@@ -2844,7 +3316,7 @@ class PPOTeacherKL(PPO):
             logs["slow_latent_gate_write_confirm_rate"] = self._distributed_mean_scalar(confirm_rate).item()
 
         memory_age = diagnostics.get("gate_memory_age")
-        if memory_age is not None and memory_age.numel() > 0:
+        if full_logs and memory_age is not None and memory_age.numel() > 0:
             positive_age = memory_age.float()[memory_age.float() > 0.0]
             if positive_age.numel() > 0:
                 logs["slow_latent_memory_age_mean"] = self._distributed_mean_scalar(positive_age.mean()).item()
@@ -3043,6 +3515,16 @@ class PPOTeacherKL(PPO):
                     probe_parameters,
                     safe_stride_confidence_head.parameters(),
                 )
+            safe_stride_trend_head = getattr(
+                self.actor,
+                "safe_stride_trend_head",
+                None,
+            )
+            if safe_stride_trend_head is not None:
+                probe_parameters = chain(
+                    probe_parameters,
+                    safe_stride_trend_head.parameters(),
+                )
             torch.nn.utils.clip_grad_norm_(
                 probe_parameters,
                 self.max_grad_norm,
@@ -3229,6 +3711,13 @@ class PPOTeacherKL(PPO):
             )
             if safe_stride_confidence_head is not None:
                 safe_stride_confidence_head.train()
+            safe_stride_trend_head = getattr(
+                self.actor,
+                "safe_stride_trend_head",
+                None,
+            )
+            if safe_stride_trend_head is not None:
+                safe_stride_trend_head.train()
             self._freeze_teacher()
             return
         if self.geometry_probe_only:
