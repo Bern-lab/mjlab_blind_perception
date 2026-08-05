@@ -382,6 +382,13 @@ uv run python scripts/velocity_eval/train_footprint_detector_v3.py \
   --steps 9000
 ```
 
+The bundled `base111/model_51000.pt` is an older slow-latent policy with
+`latent_dim=16`. Keep its adjacent `params/agent.yaml` with the checkpoint: the
+online trainer reads that saved actor config before constructing the rollout
+policy. Passing the `.pt` from a directory without the matching params will make
+the loader fall back to the current `latent_dim=24` config and fail on actor
+shape mismatches.
+
 The default output directory for this preset is
 `eval_outputs/stair_stage2/model51000_seed42_footprint_deploy_v3_fixed_pool_v1`.
 Curriculum logs include `fixed_pool_*` metrics for checking the actual 70/30
