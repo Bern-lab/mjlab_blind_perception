@@ -31,6 +31,11 @@ from mjlab.tasks.velocity.config.g1.blind_rough_step_danger_env_cfg import (
   G1StepDangerToeRiserSlabPenaltyParams,
   unitree_g1_blind_rough_target_navigation_step_danger_env_cfg,
 )
+from mjlab.tasks.velocity.config.g1.footprint_detector_env_cfg import (
+  FOOTPRINT_DETECTOR_LEVEL_WEIGHTS,
+  FOOTPRINT_DETECTOR_STANDALONE_FRACTION,
+  unitree_g1_footprint_detector_env_cfg,
+)
 from mjlab.tasks.velocity.config.g1.rl_cfg import (
   G1SlowLatentPolicyModelParams,
   G1SlowLatentRunnerParams,
@@ -326,6 +331,52 @@ def test_g1_high_stairs_tasks_enable_mixed_terrain_replay() -> None:
     assert params["mixed_replay_start_level"] == 8
     assert params["mixed_replay_level_ranges"] == ((0, 2), (3, 5), (6, 9))
     assert params["mixed_replay_weights"] == (0.2, 0.3, 0.5)
+
+
+def test_g1_footprint_detector_task_uses_fixed_terrain_pools() -> None:
+  cfg = unitree_g1_footprint_detector_env_cfg()
+  main_cfg = load_env_cfg(
+    "Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1"
+  )
+
+  assert cfg.scene.terrain is not None
+  assert cfg.scene.terrain.max_init_terrain_level is None
+  assert cfg.scene.terrain.standalone_spawn_start_level == 0
+  assert main_cfg.scene.terrain is not None
+  assert main_cfg.scene.terrain.standalone_spawn_start_level == 3
+
+  terrain_generator = cfg.scene.terrain.terrain_generator
+  assert terrain_generator is not None
+  runway_names = sorted(
+    name
+    for name in terrain_generator.standalone_terrains
+    if name.startswith("long_stair_runway_w")
+  )
+  assert len(runway_names) == len(BLIND_HIGH_STAIRS_TREAD_DEPTHS)
+  assert sum(
+    terrain_generator.standalone_terrains[name].proportion for name in runway_names
+  ) == pytest.approx(FOOTPRINT_DETECTOR_STANDALONE_FRACTION)
+  assert sum(
+    sub_cfg.proportion for sub_cfg in terrain_generator.sub_terrains.values()
+  ) == pytest.approx(1.0 - FOOTPRINT_DETECTOR_STANDALONE_FRACTION)
+  assert terrain_generator.sub_terrains["flat"].proportion > 0.0
+
+  for index, name in enumerate(runway_names):
+    runway = terrain_generator.standalone_terrains[name]
+    assert isinstance(runway, BoxLongStairRunwayTerrainCfg)
+    width = BLIND_HIGH_STAIRS_TREAD_DEPTHS[index]
+    assert runway.step_width_range == (width, width)
+    assert runway.size == (10.9, 2.5)
+
+  terrain_params = cfg.curriculum["terrain_levels"].params
+  assert cfg.curriculum["terrain_levels"].func.__name__ == (
+    "fixed_pool_terrain_levels_vel"
+  )
+  assert terrain_params["standalone_fraction"] == pytest.approx(
+    FOOTPRINT_DETECTOR_STANDALONE_FRACTION
+  )
+  assert terrain_params["level_ranges"] == ((0, 2), (3, 5), (6, 9))
+  assert terrain_params["level_weights"] == FOOTPRINT_DETECTOR_LEVEL_WEIGHTS
 
 
 def _assert_eight_stair_depth_variants(terrain_generator) -> None:

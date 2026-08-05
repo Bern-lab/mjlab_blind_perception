@@ -17,6 +17,9 @@ Added
   six-logit compatible dummy toe outputs.
 - Added footprint-detector deployment contracts, label-conflict audits, and
   touchdown-only stair hard-negative sampling for footprint-only training.
+- Added a footprint-detector-only G1 rollout task with fixed 70/30
+  long-stair/grid terrain pools, hard-biased difficulty sampling, and explicit
+  long-stair tread-depth variants for deployable footprint detector retraining.
 - Added Stage 2D touchdown timing/footprint-anchor validation metrics and
   touchdown false-positive hard-negative mining for footprint detector training.
 - Added ``STAIRS_TERRAINS_CFG`` terrain preset for progressive stair

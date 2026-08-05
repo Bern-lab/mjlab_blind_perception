@@ -15,6 +15,8 @@ if TYPE_CHECKING:
 _DEFAULT_SCENE_CFG = SceneEntityCfg("robot")
 _MIXED_REPLAY_ACTIVE_KEY = "terrain_mixed_replay_active"
 _STANDALONE_REPLAY_ACTIVE_KEY = "terrain_standalone_replay_active"
+_FIXED_TERRAIN_POOL_MASK_KEY = "terrain_fixed_pool_standalone_mask"
+_FIXED_TERRAIN_POOL_FRACTION_KEY = "terrain_fixed_pool_standalone_fraction"
 _MIXED_REPLAY_BUCKET_NAMES = ("low", "mid", "high")
 
 
@@ -90,6 +92,26 @@ def _mixed_replay_bucket_ratios(
     name = _MIXED_REPLAY_BUCKET_NAMES[i] if i < 3 else f"bucket_{i}"
     in_bucket = (levels >= min_level) & (levels <= max_level)
     result[f"mixed_replay_{name}_ratio"] = torch.mean(in_bucket.float())
+  return result
+
+
+def _level_bucket_ratios(
+  levels: torch.Tensor,
+  level_ranges: tuple[tuple[int, int], ...],
+  prefix: str,
+) -> dict[str, torch.Tensor]:
+  result: dict[str, torch.Tensor] = {}
+  if levels.numel() == 0:
+    zero = torch.tensor(0.0, device=levels.device)
+    for i in range(len(level_ranges)):
+      name = _MIXED_REPLAY_BUCKET_NAMES[i] if i < 3 else f"bucket_{i}"
+      result[f"{prefix}_{name}_ratio"] = zero
+    return result
+
+  for i, (min_level, max_level) in enumerate(level_ranges):
+    name = _MIXED_REPLAY_BUCKET_NAMES[i] if i < 3 else f"bucket_{i}"
+    in_bucket = (levels >= min_level) & (levels <= max_level)
+    result[f"{prefix}_{name}_ratio"] = torch.mean(in_bucket.float())
   return result
 
 
@@ -195,6 +217,182 @@ def _standalone_spawn_probability(
   if total <= 0.0:
     return 0.5
   return float((standalone_weight / total).item())
+
+
+def _fixed_fraction_mask(
+  num_envs: int,
+  fraction: float,
+  device: torch.device,
+) -> torch.Tensor:
+  fraction = max(0.0, min(1.0, float(fraction)))
+  standalone_count = int(round(num_envs * fraction))
+  mask = torch.zeros(num_envs, dtype=torch.bool, device=device)
+  if standalone_count <= 0:
+    return mask
+  if standalone_count >= num_envs:
+    mask[:] = True
+    return mask
+
+  env_ids = torch.arange(num_envs, dtype=torch.float32, device=device)
+  scores = torch.frac(env_ids * 0.6180339887498949)
+  selected = torch.argsort(scores)[:standalone_count]
+  mask[selected] = True
+  return mask
+
+
+def _get_fixed_terrain_pool_mask(
+  env: ManagerBasedRlEnv,
+  standalone_fraction: float,
+  device: torch.device,
+) -> torch.Tensor:
+  extras = getattr(env, "extras", None)
+  if extras is None:
+    extras = {}
+    env.extras = extras
+
+  fraction = max(0.0, min(1.0, float(standalone_fraction)))
+  mask = extras.get(_FIXED_TERRAIN_POOL_MASK_KEY)
+  stored_fraction = extras.get(_FIXED_TERRAIN_POOL_FRACTION_KEY)
+  if (
+    not isinstance(mask, torch.Tensor)
+    or mask.shape != (env.num_envs,)
+    or mask.device != device
+    or stored_fraction != fraction
+  ):
+    mask = _fixed_fraction_mask(env.num_envs, fraction, device)
+    extras[_FIXED_TERRAIN_POOL_MASK_KEY] = mask
+    extras[_FIXED_TERRAIN_POOL_FRACTION_KEY] = fraction
+  return mask
+
+
+def _terrain_type_level_metrics(terrain, terrain_generator) -> dict[str, torch.Tensor]:
+  result: dict[str, torch.Tensor] = {}
+  compiled_terrain_names = getattr(terrain, "terrain_type_names", ())
+  terrain_type_names = list(compiled_terrain_names)
+  if not terrain_type_names:
+    terrain_type_names = list(terrain_generator.sub_terrains.keys())
+    standalone_terrains = getattr(terrain_generator, "standalone_terrains", {})
+    terrain_type_names.extend(standalone_terrains.keys())
+  terrain_origins = terrain.terrain_origins
+  assert terrain_origins is not None
+  num_cols = terrain_origins.shape[1]
+  if num_cols != len(terrain_type_names):
+    return result
+
+  levels = terrain.terrain_levels.float()
+  types = terrain.terrain_types
+  family_masks: dict[str, torch.Tensor] = {}
+  for i, name in enumerate(terrain_type_names):
+    mask = types == i
+    if mask.any():
+      result[name] = torch.mean(levels[mask])
+      family = _terrain_family_name(name)
+      if family != name:
+        family_masks[family] = family_masks.get(family, torch.zeros_like(mask)) | mask
+  for family, mask in family_masks.items():
+    result[family] = torch.mean(levels[mask])
+  return result
+
+
+def _apply_fixed_pool_terrain_replay(
+  env: ManagerBasedRlEnv,
+  env_ids: torch.Tensor,
+  terrain,
+  standalone_fraction: float,
+  level_ranges: tuple[tuple[int, int], ...],
+  level_weights: tuple[float, ...],
+) -> dict[str, torch.Tensor]:
+  terrain_origins = terrain.terrain_origins
+  if terrain_origins is None:
+    return {}
+
+  standalone_mask = getattr(terrain, "standalone_terrain_type_mask", None)
+  if not isinstance(standalone_mask, torch.Tensor):
+    return {}
+  num_levels, num_cols = terrain_origins.shape[:2]
+  if standalone_mask.numel() != num_cols:
+    return {}
+
+  device = terrain.terrain_types.device
+  standalone_mask = standalone_mask.to(device=device, dtype=torch.bool)
+  if not standalone_mask.any() or not (~standalone_mask).any():
+    return {}
+
+  type_proportions = getattr(terrain, "terrain_type_proportions", None)
+  if (
+    not isinstance(type_proportions, torch.Tensor)
+    or type_proportions.numel() != num_cols
+  ):
+    type_proportions = torch.ones(num_cols, device=device, dtype=torch.float)
+  else:
+    type_proportions = type_proportions.to(device=device, dtype=torch.float)
+
+  _validate_mixed_replay_cfg(level_ranges, level_weights)
+  clamped_ranges = _clamp_mixed_replay_ranges(level_ranges, num_levels)
+  env_ids = env_ids.to(device=device)
+  pool_mask = _get_fixed_terrain_pool_mask(env, standalone_fraction, device)
+  use_standalone = pool_mask[env_ids]
+  num_resets = int(env_ids.numel())
+
+  sampled_levels = _sample_mixed_replay_levels(
+    num_resets,
+    clamped_ranges,
+    level_weights,
+    device,
+  )
+  sampled_types = torch.empty(num_resets, device=device, dtype=torch.long)
+  if use_standalone.any():
+    sampled_types[use_standalone] = _sample_terrain_types_from_mask(
+      standalone_mask,
+      type_proportions,
+      int(use_standalone.sum().item()),
+    )
+  if (~use_standalone).any():
+    sampled_types[~use_standalone] = _sample_terrain_types_from_mask(
+      ~standalone_mask,
+      type_proportions,
+      int((~use_standalone).sum().item()),
+    )
+
+  terrain.terrain_levels[env_ids] = sampled_levels
+  terrain.terrain_types[env_ids] = sampled_types
+  origins = terrain_origins[sampled_levels, sampled_types]
+  terrain_env_origins = getattr(terrain, "env_origins", None)
+  if terrain_env_origins is not None:
+    terrain_env_origins[env_ids] = origins
+  scene_env_origins = getattr(env.scene, "env_origins", None)
+  if scene_env_origins is not None:
+    scene_env_origins[env_ids] = origins
+
+  current_standalone = standalone_mask[terrain.terrain_types]
+  levels = terrain.terrain_levels.float()
+  zero = torch.tensor(0.0, device=device)
+  standalone_level_mean = (
+    torch.mean(levels[current_standalone]) if current_standalone.any() else zero
+  )
+  grid_level_mean = (
+    torch.mean(levels[~current_standalone]) if (~current_standalone).any() else zero
+  )
+  result = {
+    "fixed_pool_standalone_fraction": torch.tensor(
+      max(0.0, min(1.0, float(standalone_fraction))),
+      device=device,
+    ),
+    "fixed_pool_standalone_env_ratio": torch.mean(pool_mask.float()),
+    "fixed_pool_grid_env_ratio": torch.mean((~pool_mask).float()),
+    "fixed_pool_standalone_reset_ratio": torch.mean(use_standalone.float()),
+    "fixed_pool_current_standalone_ratio": torch.mean(current_standalone.float()),
+    "fixed_pool_standalone_level_mean": standalone_level_mean,
+    "fixed_pool_grid_level_mean": grid_level_mean,
+  }
+  result.update(
+    _level_bucket_ratios(
+      sampled_levels.float(),
+      clamped_ranges,
+      "fixed_pool_reset",
+    )
+  )
+  return result
 
 
 def _apply_standalone_terrain_replay(
@@ -445,6 +643,38 @@ def terrain_levels_vel(
     for family, mask in family_masks.items():
       result[family] = torch.mean(levels[mask])
 
+  return result
+
+
+def fixed_pool_terrain_levels_vel(
+  env: ManagerBasedRlEnv,
+  env_ids: torch.Tensor,
+  standalone_fraction: float = 0.7,
+  level_ranges: tuple[tuple[int, int], ...] = ((0, 2), (3, 5), (6, 9)),
+  level_weights: tuple[float, ...] = (0.15, 0.25, 0.60),
+) -> dict[str, torch.Tensor]:
+  """Reset envs from persistent standalone/grid pools with weighted levels."""
+  terrain = env.scene.terrain
+  assert terrain is not None
+  terrain_generator = terrain.cfg.terrain_generator
+  assert terrain_generator is not None
+
+  fixed_pool_result = _apply_fixed_pool_terrain_replay(
+    env,
+    env_ids,
+    terrain,
+    standalone_fraction,
+    level_ranges,
+    level_weights,
+  )
+
+  levels = terrain.terrain_levels.float()
+  result: dict[str, torch.Tensor] = {
+    "mean": torch.mean(levels),
+    "max": torch.max(levels),
+    **fixed_pool_result,
+  }
+  result.update(_terrain_type_level_metrics(terrain, terrain_generator))
   return result
 
 

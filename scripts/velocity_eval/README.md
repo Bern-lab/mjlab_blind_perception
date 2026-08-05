@@ -344,6 +344,19 @@ It uses the existing online detector trainer, but pins the task to
 `footprint_deploy_v3`, enables gait phase, expects a `134`-D detector input,
 uses a `16`-frame history, and turns on `--footprint-only-model`.
 
+The preset now defaults to the detector-only task
+`Mjlab-Velocity-Blind-Rough-TargetNavigation-FootprintDetector-SlowLatent-TeacherKL-Unitree-G1`.
+This task leaves the main slow-latent policy task unchanged, but changes the
+rollout terrain distribution used to collect supervised detector samples:
+`70%` of envs are assigned once to standalone continuous long-stair runways and
+remain in that pool for every reset, while the remaining `30%` stay in the
+regular tiled terrain grid. Difficulty rows are sampled from low/mid/high
+buckets with weights `0.15/0.25/0.60`, so hard rows appear more often than easy
+rows from the start of data collection. The standalone stair pool uses eight
+fixed tread-depth variants spanning the high-stair training range, so width
+coverage is explicit instead of relying on an opaque per-mesh random draw. The
+grid pool keeps a small positive flat-terrain weight for flat touchdown examples.
+
 The exported network still has the standard six-logit layout:
 
 ```text
@@ -368,6 +381,11 @@ uv run python scripts/velocity_eval/train_footprint_detector_v3.py \
   --num-envs 512 \
   --steps 9000
 ```
+
+The default output directory for this preset is
+`eval_outputs/stair_stage2/model51000_seed42_footprint_deploy_v3_fixed_pool_v1`.
+Curriculum logs include `fixed_pool_*` metrics for checking the actual 70/30
+pool split and low/mid/high reset distribution before trusting a long run.
 
 The v3 observation intentionally does not embed the legacy 91/93-D
 `stair_latent` vector. It is built from signals available on the robot side:

@@ -14,6 +14,7 @@ from mjlab.envs.mdp.events import randomize_terrain
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.tasks.velocity.mdp.curriculums import (
   _terrain_family_name,
+  fixed_pool_terrain_levels_vel,
   terrain_levels_vel,
 )
 from mjlab.tasks.velocity.mdp.stair_geometry import (
@@ -405,6 +406,58 @@ def test_terrain_levels_vel_logs_compiled_standalone_type_levels() -> None:
   assert result["long_stair_runway"].item() == torch.tensor(3.0).item()
   assert result["standalone_replay_level_mean"].item() == torch.tensor(3.0).item()
   assert result["standalone_replay_grid_level_mean"].item() == torch.tensor(1.0).item()
+
+
+def test_fixed_pool_terrain_levels_keeps_envs_in_assigned_pool() -> None:
+  command_term = SimpleNamespace(command=torch.zeros(10, 3))
+  env, terrain = _make_env(
+    torch.zeros(10, 2),
+    command_term,
+    num_levels=10,
+    num_cols=2,
+    standalone_mask=(False, True),
+    type_proportions=(1.0, 1.0),
+    terrain_type_names=(
+      "grid_flat",
+      "long_stair_runway_w00",
+    ),
+  )
+
+  result = fixed_pool_terrain_levels_vel(
+    cast(Any, env),
+    torch.arange(10),
+    standalone_fraction=0.7,
+    level_ranges=((0, 0), (3, 3), (9, 9)),
+    level_weights=(0.0, 0.0, 1.0),
+  )
+  assigned_standalone = terrain.is_standalone_env()
+
+  assert int(assigned_standalone.sum().item()) == 7
+  assert result["fixed_pool_standalone_env_ratio"].item() == pytest.approx(0.7)
+  assert result["fixed_pool_grid_env_ratio"].item() == pytest.approx(0.3)
+  assert result["fixed_pool_reset_high_ratio"].item() == pytest.approx(1.0)
+  assert terrain.terrain_levels.tolist() == [9] * 10
+  assert all(
+    name in result
+    for name in (
+      "grid_flat",
+      "long_stair_runway_w00",
+      "long_stair_runway",
+    )
+  )
+
+  subset = torch.tensor([0, 1, 2, 3, 4])
+  fixed_pool_terrain_levels_vel(
+    cast(Any, env),
+    subset,
+    standalone_fraction=0.7,
+    level_ranges=((0, 0), (3, 3), (9, 9)),
+    level_weights=(1.0, 0.0, 0.0),
+  )
+
+  assert (
+    terrain.is_standalone_env(subset).tolist() == assigned_standalone[subset].tolist()
+  )
 
 
 def test_randomize_terrain_can_sample_weighted_level_buckets() -> None:

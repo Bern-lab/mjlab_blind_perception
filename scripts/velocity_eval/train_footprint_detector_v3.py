@@ -14,10 +14,11 @@ from scripts.velocity_eval.train_foot_event_detector_online import (
 from mjlab.tasks.registry import list_tasks
 
 DEFAULT_TASK_ID = (
-  "Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1"
+  "Mjlab-Velocity-Blind-Rough-TargetNavigation-FootprintDetector-"
+  "SlowLatent-TeacherKL-Unitree-G1"
 )
 DEFAULT_OUTPUT_DIR = (
-  "eval_outputs/stair_stage2/model51000_seed42_footprint_deploy_v3_footprint_only_v1"
+  "eval_outputs/stair_stage2/model51000_seed42_footprint_deploy_v3_fixed_pool_v1"
 )
 
 
