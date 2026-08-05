@@ -33,11 +33,11 @@ def _with_footprint_v3_defaults(
     output_dir=output_dir,
     input_schema="footprint_deploy_v3",
     include_gait_phase=True,
-    expected_obs_dim=128,
+    expected_obs_dim=134,
     footprint_only_model=True,
     toe_only_finetune=False,
     toe_riser_only_model=False,
-    history_len=24
+    history_len=16
     if cfg.history_len == OnlineFootEventDetectorConfig.history_len
     else cfg.history_len,
     frame_hidden_dim=256
@@ -50,7 +50,7 @@ def _with_footprint_v3_defaults(
     if cfg.head_hidden_dim == OnlineFootEventDetectorConfig.head_hidden_dim
     else cfg.head_hidden_dim,
     selection_metric=(
-      "high_recall_footprint_score"
+      "touchdown_timing_guarded_score"
       if cfg.selection_metric == OnlineFootEventDetectorConfig.selection_metric
       else cfg.selection_metric
     ),
@@ -64,6 +64,14 @@ def _with_footprint_v3_defaults(
     val_buffer_capacity=80_000
     if cfg.val_buffer_capacity == OnlineFootEventDetectorConfig.val_buffer_capacity
     else cfg.val_buffer_capacity,
+    toe_hit_pos_weight=None,
+    toe_positive_fraction=0.0,
+    toe_soft_positive_fraction=0.0,
+    false_negative_toe_hard_positive_fraction=0.0,
+    soft_toe_hit_radius=0,
+    mine_false_positive_hard_negatives=False,
+    mine_false_negative_toe_hard_positives=False,
+    baseline_toe_metric="",
     false_negative_hard_positive_fraction=0.20
     if cfg.false_negative_hard_positive_fraction
     == OnlineFootEventDetectorConfig.false_negative_hard_positive_fraction

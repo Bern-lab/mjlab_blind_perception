@@ -21,11 +21,12 @@ from scripts.velocity_eval.export_foot_event_detector_dataset import (
   FootEventDetectorObsSchema,
   foot_event_detector_obs,
   foot_event_input_feature_groups,
+  foot_event_input_feature_scale_groups,
+  foot_event_input_feature_scales,
   foot_event_labels_from_env,
   resolve_foot_event_detector_obs_dim,
 )
 from scripts.velocity_eval.export_stair_probe_dataset import (
-  STAIR_CURRENT_GROUND_CONTACT_KEY,
   STAIR_CURRENT_STAIR_SUPPORT_KEY,
   STAIR_CURRENT_SUPPORT_FRACTION_KEY,
   StairProbeHistoryBuffer,
@@ -922,6 +923,44 @@ def _training_loss(
   tversky_beta: float,
   train_label_indices: tuple[int, ...] | None = None,
 ) -> torch.Tensor:
+  if train_label_indices == (0, 1, 2, 3):
+    contact_logits = logits[:, 0:2]
+    contact_labels = labels[:, 0:2]
+    touchdown_logits = logits[:, 2:4]
+    touchdown_labels = labels[:, 2:4]
+    contact_bce = F.binary_cross_entropy_with_logits(
+      contact_logits,
+      contact_labels,
+      pos_weight=pos_weight[0:2],
+    )
+    touchdown_bce = F.binary_cross_entropy_with_logits(
+      touchdown_logits,
+      touchdown_labels,
+      pos_weight=pos_weight[2:4],
+    )
+    focal = _asymmetric_focal_loss_with_logits(
+      touchdown_logits,
+      touchdown_labels,
+      gamma_pos=focal_gamma_pos,
+      gamma_neg=focal_gamma_neg,
+    )
+    tversky = _tversky_loss_from_logits(
+      touchdown_logits,
+      touchdown_labels,
+      alpha=tversky_alpha,
+      beta=tversky_beta,
+    )
+    consistency = torch.relu(
+      torch.sigmoid(touchdown_logits) - torch.sigmoid(contact_logits)
+    ).mean()
+    return (
+      contact_bce
+      + touchdown_bce
+      + focal_loss_weight * focal
+      + tversky_loss_weight * tversky
+      + 0.05 * consistency
+    )
+
   if train_label_indices is not None:
     label_indices = list(train_label_indices)
     logits = logits[:, label_indices]
@@ -1826,6 +1865,16 @@ def _mine_false_negative_toe_hard_positives(
   return buffer.mark_false_negative_toe_hard_positives(hard_mask)
 
 
+def _should_mine_touchdown_false_positive_hard_negatives(
+  cfg: OnlineFootEventDetectorConfig,
+) -> bool:
+  return (
+    cfg.mine_false_positive_touchdown_hard_negatives
+    and not cfg.toe_only_finetune
+    and not cfg.toe_riser_only_model
+  )
+
+
 def _metric_improved(
   *,
   metric_value: float,
@@ -1921,6 +1970,9 @@ def _baseline_guard_passed(
     actual = float(metrics[key])
     if actual < required:
       failures.append(f"{key} {actual:.4f} < {required:.4f}")
+
+  if not toe_metric:
+    return len(failures) == 0, tuple(failures)
 
   if toe_metric not in baseline_metrics or toe_metric not in metrics:
     failures.append(f"{toe_metric}=missing")
@@ -2336,13 +2388,7 @@ def run_online_train(
           footprint_anchor_w=footprint_anchor_w[ids],
         )
 
-      current_contact = _tensor_extra(
-        raw_env,
-        STAIR_CURRENT_GROUND_CONTACT_KEY,
-        (2,),
-        torch.bool,
-        False,
-      ).bool()
+      current_contact = labels[:, 0:2].bool()
       previous_contact.copy_(
         torch.where(
           reset_mask[:, None],
@@ -2450,7 +2496,7 @@ def run_online_train(
         if cfg.save_eval_checkpoints:
           torch.save(model.state_dict(), eval_checkpoint_dir / f"step_{eval_step}.pt")
         mined_hard_negatives = 0
-        if cfg.mine_false_positive_hard_negatives:
+        if cfg.mine_false_positive_hard_negatives and not cfg.footprint_only_model:
           mined_hard_negatives = _mine_false_positive_hard_negatives(
             model,
             train_buffer,
@@ -2461,10 +2507,7 @@ def run_online_train(
             max_peaks=cfg.hard_negative_mining_max_peaks,
           )
         mined_touchdown_hard_negatives = 0
-        if (
-          cfg.mine_false_positive_touchdown_hard_negatives
-          and train_label_indices is None
-        ):
+        if _should_mine_touchdown_false_positive_hard_negatives(cfg):
           mined_touchdown_hard_negatives = (
             _mine_false_positive_touchdown_hard_negatives(
               model,
@@ -2491,7 +2534,7 @@ def run_online_train(
             max_peaks=cfg.hard_positive_mining_max_peaks,
           )
         mined_toe_hard_positives = 0
-        if cfg.mine_false_negative_toe_hard_positives:
+        if cfg.mine_false_negative_toe_hard_positives and not cfg.footprint_only_model:
           mined_toe_hard_positives = _mine_false_negative_toe_hard_positives(
             model,
             train_buffer,
@@ -2626,6 +2669,14 @@ def run_online_train(
     "checkpoint_path": str(checkpoint_path),
     "label_names": list(FOOT_EVENT_LABEL_NAMES),
     "input_feature_groups": foot_event_input_feature_groups(
+      include_gait_phase=cfg.include_gait_phase,
+      input_schema=cfg.input_schema,
+    ),
+    "input_feature_scale_groups": foot_event_input_feature_scale_groups(
+      include_gait_phase=cfg.include_gait_phase,
+      input_schema=cfg.input_schema,
+    ),
+    "input_feature_scales": foot_event_input_feature_scales(
       include_gait_phase=cfg.include_gait_phase,
       input_schema=cfg.input_schema,
     ),

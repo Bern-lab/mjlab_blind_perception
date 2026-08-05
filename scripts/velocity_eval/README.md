@@ -341,8 +341,8 @@ available and Viser otherwise.
 `train_footprint_detector_v3.py` is the preset entrypoint for retraining the
 footprint-only Stage 2D detector with deployment-friendly proprioceptive inputs.
 It uses the existing online detector trainer, but pins the task to
-`footprint_deploy_v3`, enables gait phase, expects a `128`-D detector input,
-and turns on `--footprint-only-model`.
+`footprint_deploy_v3`, enables gait phase, expects a `134`-D detector input,
+uses a `16`-frame history, and turns on `--footprint-only-model`.
 
 The exported network still has the standard six-logit layout:
 
@@ -371,17 +371,27 @@ uv run python scripts/velocity_eval/train_footprint_detector_v3.py \
 
 The v3 observation intentionally does not embed the legacy 91/93-D
 `stair_latent` vector. It is built from signals available on the robot side:
-IMU projected gravity, base angular velocity and delta, command `vx/vy/wz`, gait
-phase, FK toe/heel/sole-center positions, finite-difference endpoint velocities,
-per-foot vertical height/velocity relative to gravity, sole shape proxies, last
-leg action/action delta, joint tracking error, and leg joint velocity. It does
-not use contact bits, terrain height, support fraction, camera/raycast data, or
-any other external perception.
+IMU projected gravity, body-frame base angular velocity and delta, command
+`vx/vy/wz`, gait phase, body-frame FK toe/heel/sole-center positions,
+body-frame endpoint velocities and velocity deltas, per-foot
+gravity-projected height/vertical-velocity scalars, last leg action/action
+delta, joint tracking error, and leg joint velocity. Fixed input multipliers are
+written to `input_feature_scale_groups` and `input_feature_scales` in the JSON
+metadata and must be applied identically in deployment. The observation does not
+use contact bits, terrain height, support fraction, camera/raycast data, or any
+other external perception. It also does not require global root position or
+terrain odometry; endpoint positions come from body-frame FK and the scalar
+height terms come from dot products with IMU gravity.
 
 The deploy runner must build the same feature order from its local state
 estimator, FK, command, action history, and joint encoder data. Keep the feature
 group metadata from the exported ONNX/JSON as the source of truth when wiring the
 C++ observation builder.
+
+Training labels are still simulation-only: contact/touchdown are built from
+horizontal support contact, excluding toe-riser contact and using the ground
+contact sensor's vertical force when available. Those contact signals are never
+fed to the detector input.
 
 ## Collect Latents
 

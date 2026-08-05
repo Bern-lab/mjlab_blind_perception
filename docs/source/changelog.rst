@@ -12,8 +12,9 @@ Added
   detector training, extending the deployable touchdown inputs with heel/sole
   kinematics, full planar command context, and leg action deltas.
 - Added a ``footprint_deploy_v3`` footprint-only detector training preset with
-  a deploy-friendly proprioceptive/FK observation schema and six-logit
-  compatible dummy toe outputs.
+  a 134-dimensional body-frame proprioceptive/FK observation schema, fixed
+  deploy-side input scaling metadata, horizontal-support touchdown labels, and
+  six-logit compatible dummy toe outputs.
 - Added Stage 2D touchdown timing/footprint-anchor validation metrics and
   touchdown false-positive hard-negative mining for footprint detector training.
 - Added ``STAIRS_TERRAINS_CFG`` terrain preset for progressive stair
