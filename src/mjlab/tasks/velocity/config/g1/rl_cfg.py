@@ -142,11 +142,11 @@ class G1SlowLatentPolicyModelParams:
   """Slack, in meters, before open same-foot stride hints are penalized."""
   safe_stride_min: float = 0.10
   """Minimum decoded safe-stride estimate, in meters."""
-  safe_stride_max: float = 0.55
+  safe_stride_max: float = 0.85
   """Maximum decoded safe-stride estimate, in meters."""
   same_foot_stride_min: float = 0.10
   """Minimum decoded same-foot stair stride, in meters."""
-  same_foot_stride_max: float = 0.80
+  same_foot_stride_max: float = 0.90
   """Maximum decoded same-foot stair stride, in meters."""
   structured_safe_stride_enabled: bool = True
   """Use the ordered lower-plus-width SafeStride head."""
@@ -278,9 +278,9 @@ def _unitree_g1_gated_stair_latent_policy_model_cfg(
   same_foot_stride_deployable_hint_loss_coef: float = 0.0,
   same_foot_stride_deployable_hint_margin: float = 0.02,
   safe_stride_min: float = 0.10,
-  safe_stride_max: float = 0.55,
+  safe_stride_max: float = 0.85,
   same_foot_stride_min: float = 0.10,
-  same_foot_stride_max: float = 0.80,
+  same_foot_stride_max: float = 0.90,
   structured_safe_stride_enabled: bool = True,
   dynamic_stair_shape_enabled: bool = True,
   dynamic_safe_stride_enabled: bool = True,
@@ -561,9 +561,9 @@ def unitree_g1_blind_rough_target_navigation_slow_latent_teacherkl_runner_cfg(
   same_foot_stride_deployable_hint_loss_coef: float = 0.0,
   same_foot_stride_deployable_hint_margin: float = 0.02,
   safe_stride_min: float = 0.10,
-  safe_stride_max: float = 0.55,
+  safe_stride_max: float = 0.85,
   same_foot_stride_min: float = 0.10,
-  same_foot_stride_max: float = 0.80,
+  same_foot_stride_max: float = 0.90,
   structured_safe_stride_enabled: bool = True,
   dynamic_stair_shape_enabled: bool = True,
   dynamic_safe_stride_enabled: bool = True,

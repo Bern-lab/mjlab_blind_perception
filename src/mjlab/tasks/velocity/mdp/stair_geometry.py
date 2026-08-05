@@ -99,6 +99,10 @@ OBSERVED_STEP_STRIDE_KEY = "slow_latent_observed_step_stride"
 COLLISION_RISK_KEY = "slow_latent_collision_risk_now"
 LANDING_TOUCHDOWN_KEY = "slow_latent_landing_touchdown_now"
 LANDING_QUALITY_KEY = "slow_latent_landing_quality_now"
+STAIR_PROBE_STRIDE_REWARD_KEY = "slow_latent_stair_probe_stride_reward"
+STAIR_PROBE_STRIDE_REWARD_EVENT_ID_KEY = (
+  "slow_latent_stair_probe_stride_reward_event_id"
+)
 _STAIR_SHAPE_CACHE_KEY = "_privileged_stair_shape_cache"
 
 

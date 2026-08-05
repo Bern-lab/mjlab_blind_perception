@@ -11,6 +11,7 @@ import mjlab.tasks.velocity.mdp.rewards as velocity_rewards
 import mjlab.tasks.velocity.mdp.temporal_stair_rewards as temporal_stair_rewards
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.envs.mdp.events import randomize_terrain
+from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.tasks.velocity.mdp.curriculums import (
   _terrain_family_name,
   terrain_levels_vel,
@@ -36,6 +37,8 @@ from mjlab.tasks.velocity.mdp.stair_geometry import (
   STAIR_ENTRY_EVIDENCE_ASCENT_DIR_KEY,
   STAIR_ENTRY_RECENT_EVIDENCE_KEY,
   STAIR_PHASE_KEY,
+  STAIR_PROBE_STRIDE_REWARD_EVENT_ID_KEY,
+  STAIR_PROBE_STRIDE_REWARD_KEY,
   STAIR_RISER_HEIGHT_LABEL_KEY,
   STAIR_SAME_FOOT_STRIDE_LABEL_KEY,
   STAIR_SHAPE_LABEL_VALID_KEY,
@@ -611,6 +614,31 @@ def test_nonflat_stride_reset_keeps_stair_phase_and_shape_context() -> None:
   assert term._minimum_safe_stride_valid.tolist() == [False]
   assert term._minimum_safe_stride_interval_valid.tolist() == [False]
   assert term._minimum_safe_stride_raw.tolist() == [0.0]
+
+
+def test_stair_probe_stride_growth_reward_consumes_events_once() -> None:
+  env = SimpleNamespace(
+    num_envs=2,
+    device=torch.device("cpu"),
+    extras={
+      STAIR_PROBE_STRIDE_REWARD_KEY: torch.tensor([1.0, -0.5]),
+      STAIR_PROBE_STRIDE_REWARD_EVENT_ID_KEY: torch.tensor([1, 2]),
+    },
+  )
+  term = temporal_stair_rewards.stair_probe_stride_growth_reward(
+    RewardTermCfg(
+      func=temporal_stair_rewards.stair_probe_stride_growth_reward,
+      weight=1.0,
+    ),
+    env,
+  )
+
+  torch.testing.assert_close(term(env), torch.tensor([1.0, -0.5]))
+  torch.testing.assert_close(term(env), torch.tensor([0.0, 0.0]))
+
+  env.extras[STAIR_PROBE_STRIDE_REWARD_KEY] = torch.tensor([0.25, 0.75])
+  env.extras[STAIR_PROBE_STRIDE_REWARD_EVENT_ID_KEY] = torch.tensor([1, 3])
+  torch.testing.assert_close(term(env), torch.tensor([0.0, 0.75]))
 
 
 def test_stair_entry_tread_support_fraction_detects_sixty_percent() -> None:

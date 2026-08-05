@@ -127,6 +127,14 @@ class PPOTeacherKL(PPO):
             if safe_stride_width_head is not None:
                 for parameter in safe_stride_width_head.parameters():
                     parameter.requires_grad_(True)
+            safe_stride_control_head = getattr(
+                self.actor,
+                "safe_stride_control_head",
+                None,
+            )
+            if safe_stride_control_head is not None:
+                for parameter in safe_stride_control_head.parameters():
+                    parameter.requires_grad_(True)
             safe_stride_confidence_head = getattr(
                 self.actor,
                 "safe_stride_confidence_head",
@@ -148,6 +156,11 @@ class PPOTeacherKL(PPO):
                 probe_parameters = chain(
                     probe_parameters,
                     safe_stride_width_head.parameters(),
+                )
+            if safe_stride_control_head is not None:
+                probe_parameters = chain(
+                    probe_parameters,
+                    safe_stride_control_head.parameters(),
                 )
             if safe_stride_confidence_head is not None:
                 probe_parameters = chain(
@@ -193,6 +206,7 @@ class PPOTeacherKL(PPO):
             if not name.startswith((
                 "safe_stride_head.",
                 "safe_stride_width_head.",
+                "safe_stride_control_head.",
                 "safe_stride_confidence_head.",
                 "safe_stride_trend_head.",
             )):
@@ -814,12 +828,9 @@ class PPOTeacherKL(PPO):
         safe_stride_predictions: torch.Tensor,
         safe_stride_interval_predictions: torch.Tensor | None,
     ) -> torch.Tensor:
-        """Use the open upper bound for phase-center gradients when available."""
-        if safe_stride_interval_predictions is None:
-            return safe_stride_predictions
-        predicted_lower = safe_stride_interval_predictions[..., 0:1]
-        predicted_upper = safe_stride_interval_predictions[..., 1:2]
-        return 0.5 * (predicted_lower.detach() + predicted_upper)
+        """Return the independent SafeStride control output for phase targets."""
+        del safe_stride_interval_predictions
+        return safe_stride_predictions
 
     @staticmethod
     def _compute_masked_centered_spread_losses(
@@ -1151,6 +1162,7 @@ class PPOTeacherKL(PPO):
         Returned columns are:
         [center_target, ratchet_valid, trend_class, probe, backoff, lock].
         Trend class layout is [0]=closer, [1]=hold, [2]=farther.
+        Ratchet slot 9 carries phase mode: probe=0.0, backoff=0.5, lock=1.0.
         """
         if observations is None or latent_obs_key not in observations:
             return None
@@ -1168,10 +1180,6 @@ class PPOTeacherKL(PPO):
         active = ratchet[..., 0:1] > 0.5
         confidence = ratchet[..., 8:9]
         ratchet_valid = active & (confidence > 0.05)
-        lower = torch.maximum(
-            ratchet[..., 1:2].clamp_min(0.0),
-            ratchet[..., 5:6].clamp_min(0.0),
-        )
         center_target = ratchet[..., 2:3].clamp(
             float(safe_stride_min),
             float(safe_stride_max),
@@ -1182,17 +1190,21 @@ class PPOTeacherKL(PPO):
             ratchet[..., 7:8].clamp_min(0.0),
         )
         has_upper = upper > max(float(upper_margin), 0.0)
-        interval_center = 0.5 * (lower + upper)
-        margin = center_target.new_tensor(max(float(upper_margin), 0.0))
-        target_above_center = center_target >= interval_center + margin
-        still_backing_off = has_upper & (~confirmed | target_above_center)
+        mode_code = ratchet[..., 9:10].clamp(0.0, 1.0)
+        mode_probe = mode_code < 0.25
+        mode_backoff = (mode_code >= 0.25) & (mode_code < 0.75)
+        mode_lock = mode_code >= 0.75
         closer = torch.zeros_like(center_target)
         hold = torch.ones_like(center_target)
         farther = torch.full_like(center_target, 2.0)
-        trend_class = torch.where(still_backing_off, closer, torch.where(has_upper | confirmed, hold, farther))
-        probe = ratchet_valid & ~confirmed & ~has_upper
-        backoff = ratchet_valid & still_backing_off
-        lock = ratchet_valid & confirmed & ~still_backing_off
+        trend_class = torch.where(
+            mode_backoff,
+            closer,
+            torch.where(mode_lock | has_upper | confirmed, hold, farther),
+        )
+        probe = ratchet_valid & mode_probe & ~confirmed & ~has_upper
+        backoff = ratchet_valid & mode_backoff
+        lock = ratchet_valid & mode_lock & confirmed
         valid_f = ratchet_valid.to(center_target.dtype)
         return torch.cat(
             [
@@ -2729,6 +2741,16 @@ class PPOTeacherKL(PPO):
                 predicted_upper = safe_stride_predictions
                 safe_stride_target_center = safe_stride_labels
                 center_valid = safe_stride_valid
+            safe_stride_control_target = torch.where(
+                phase_center_valid > 0.0,
+                phase_center_target,
+                safe_stride_target_center,
+            )
+            safe_stride_control_valid = torch.where(
+                phase_center_valid > 0.0,
+                phase_center_valid,
+                center_valid,
+            )
             safe_stride_base_loss_raw = safe_stride_loss_raw
             if centered_loss_coef != 0.0 or std_floor_loss_coef != 0.0:
                 (
@@ -2736,8 +2758,8 @@ class PPOTeacherKL(PPO):
                     center_std_floor_loss_raw,
                 ) = self._compute_masked_centered_spread_losses(
                     safe_stride_predictions,
-                    safe_stride_target_center,
-                    center_valid,
+                    safe_stride_control_target,
+                    safe_stride_control_valid,
                     std_floor_ratio,
                 )
                 if safe_stride_interval_predictions is not None:
@@ -2819,16 +2841,16 @@ class PPOTeacherKL(PPO):
                     safe_stride_loss_raw = safe_stride_loss_raw + trend_loss_coef * trend_head_loss_raw
             safe_stride_mae, safe_stride_huber = self._compute_stair_shape_component_errors(
                 safe_stride_predictions,
-                safe_stride_target_center,
-                center_valid,
+                safe_stride_control_target,
+                safe_stride_control_valid,
                 safe_stride_delta,
             )
             safe_stride_loss = safe_stride_coef * safe_stride_loss_raw
             total_loss = total_loss + safe_stride_loss
             self._accumulate_safe_stride_update_statistics(
                 safe_stride_predictions,
-                safe_stride_target_center,
-                center_valid,
+                safe_stride_control_target,
+                safe_stride_control_valid,
             )
             if safe_stride_interval_predictions is not None:
                 self._accumulate_safe_stride_update_statistics(
@@ -3120,8 +3142,8 @@ class PPOTeacherKL(PPO):
                 float(getattr(self.actor, "safe_stride_max", 0.55))
             ])
             safe_stride_out_of_range = self._compute_label_out_of_range_ratios(
-                safe_stride_target_center,
-                center_valid,
+                safe_stride_control_target,
+                safe_stride_control_valid,
                 safe_stride_lower,
                 safe_stride_head_upper,
             )
@@ -3130,20 +3152,21 @@ class PPOTeacherKL(PPO):
             ).item()
             safe_stride_statistics = self._compute_masked_regression_statistics(
                 safe_stride_predictions.detach(),
-                safe_stride_target_center.detach(),
-                center_valid.detach(),
+                safe_stride_control_target.detach(),
+                safe_stride_control_valid.detach(),
             )
             label_std, prediction_std, correlation, r_squared = safe_stride_statistics
-            label_mean = (safe_stride_target_center * center_valid).sum() / valid_count
-            prediction_mean = (safe_stride_predictions * center_valid).sum() / valid_count
+            control_valid_count = safe_stride_control_valid.sum().clamp_min(1.0)
+            label_mean = (safe_stride_control_target * safe_stride_control_valid).sum() / control_valid_count
+            prediction_mean = (safe_stride_predictions * safe_stride_control_valid).sum() / control_valid_count
             exact_count = exact_valid.sum().clamp_min(1.0)
-            prediction_error = safe_stride_predictions - safe_stride_target_center
-            signed_error = (prediction_error * center_valid).sum() / valid_count
+            prediction_error = safe_stride_predictions - safe_stride_control_target
+            signed_error = (prediction_error * safe_stride_control_valid).sum() / control_valid_count
             exact_mae = (prediction_error.abs() * exact_valid).sum() / exact_count
             exact_signed_error = (prediction_error * exact_valid).sum() / exact_count
             exact_statistics = self._compute_masked_regression_statistics(
                 safe_stride_predictions.detach(),
-                safe_stride_target_center.detach(),
+                safe_stride_control_target.detach(),
                 exact_valid.detach(),
             )
             (
@@ -3505,6 +3528,16 @@ class PPOTeacherKL(PPO):
                     probe_parameters,
                     safe_stride_width_head.parameters(),
                 )
+            safe_stride_control_head = getattr(
+                self.actor,
+                "safe_stride_control_head",
+                None,
+            )
+            if safe_stride_control_head is not None:
+                probe_parameters = chain(
+                    probe_parameters,
+                    safe_stride_control_head.parameters(),
+                )
             safe_stride_confidence_head = getattr(
                 self.actor,
                 "safe_stride_confidence_head",
@@ -3704,6 +3737,13 @@ class PPOTeacherKL(PPO):
             )
             if safe_stride_width_head is not None:
                 safe_stride_width_head.train()
+            safe_stride_control_head = getattr(
+                self.actor,
+                "safe_stride_control_head",
+                None,
+            )
+            if safe_stride_control_head is not None:
+                safe_stride_control_head.train()
             safe_stride_confidence_head = getattr(
                 self.actor,
                 "safe_stride_confidence_head",

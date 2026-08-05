@@ -172,11 +172,11 @@ class RslRlGatedStairLatentModelCfg(RslRlSlowLatentModelCfg):
   """Slack, in meters, before open same-foot stride hints are penalized."""
   safe_stride_min: float = 0.10
   """Minimum decoded safe stride, in meters."""
-  safe_stride_max: float = 0.55
+  safe_stride_max: float = 0.85
   """Maximum decoded safe stride, in meters."""
   same_foot_stride_min: float = 0.10
   """Minimum decoded same-foot stair stride, in meters."""
-  same_foot_stride_max: float = 0.80
+  same_foot_stride_max: float = 0.90
   """Maximum decoded same-foot stair stride, in meters."""
   structured_safe_stride_enabled: bool = False
   """Predict ordered SafeStride bounds instead of the legacy scalar point."""

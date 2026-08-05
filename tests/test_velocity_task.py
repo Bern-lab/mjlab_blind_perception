@@ -42,6 +42,7 @@ from mjlab.tasks.velocity.config.g1.rl_cfg import (
 from mjlab.tasks.velocity.mdp import (
   UniformVelocityCommandCfg,
   stair_aware_feet_gait,
+  stair_probe_stride_growth_reward,
   stair_sequence_event_logger,
   target_tread_midline_shaping,
 )
@@ -422,12 +423,12 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert foot_event_params["ratchet_interval_target_margin_m"] == 0.01
   assert foot_event_params["ratchet_collision_margin_m"] == 0.02
   assert foot_event_params["ratchet_toe_anchor_offset_m"] == 0.085
-  assert foot_event_params["ratchet_backoff_step_m"] == 0.025
+  assert foot_event_params["ratchet_backoff_step_m"] == 0.07
   assert foot_event_params["ratchet_first_collision_backoff_step_m"] == 0.025
-  assert foot_event_params["ratchet_backoff_margin_m"] == 0.015
+  assert foot_event_params["ratchet_backoff_margin_m"] == 0.03
   assert foot_event_params["ratchet_lock_margin_m"] == 0.005
-  assert foot_event_params["ratchet_lock_stable_steps"] == 1
-  assert foot_event_params["ratchet_lock_target_stable_enabled"] is True
+  assert foot_event_params["ratchet_lock_stable_steps"] == 2
+  assert foot_event_params["ratchet_lock_target_stable_enabled"] is False
   assert foot_event_params["ratchet_soft_upper_ttl_steps"] == 5
   assert foot_event_params["ratchet_first_collision_enters_stair_mode"] is True
   assert foot_event_params["ratchet_single_collision_confirms_interval"] is False
@@ -435,6 +436,8 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert foot_event_params["ratchet_two_collision_interval_margin_m"] == 0.025
   assert foot_event_params["ratchet_two_collision_stride_layers"] == 2.0
   assert foot_event_params["ratchet_two_collision_min_layer_delta"] == 1
+  assert foot_event_params["ratchet_two_collision_min_height_delta_m"] == 0.055
+  assert foot_event_params["ratchet_second_collision_requires_up_step"] is True
   assert foot_event_params["ratchet_two_collision_tread_min_m"] == 0.18
   assert foot_event_params["ratchet_two_collision_tread_max_m"] == 0.42
   assert foot_event_params["ratchet_lower_target_lag_margin_m"] == 0.0
@@ -444,9 +447,15 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert (
     foot_event_params["ratchet_post_first_collision_collision_min_confidence"] == 0.30
   )
+  assert foot_event_params["ratchet_post_first_collision_actual_stride_margin_m"] == (
+    0.04
+  )
+  assert foot_event_params["ratchet_first_layer_stride_scale"] == 2.0
+  assert foot_event_params["ratchet_probe_reward_min_growth_m"] == 0.04
+  assert foot_event_params["ratchet_probe_reward_target_tolerance_m"] == 0.04
   assert foot_event_params["ratchet_min_interval_width_m"] == 0.04
   assert foot_event_params["ratchet_min_stride_m"] == 0.10
-  assert foot_event_params["ratchet_max_stride_m"] == 0.80
+  assert foot_event_params["ratchet_max_stride_m"] == 0.85
   assert "latent_labels" in env_cfg.observations
   assert tuple(env_cfg.observations["latent_labels"].terms) == (
     "toe_riser_event",
@@ -485,8 +494,8 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert toe_reward_params["stair_touchdown_height_tolerance"] == 0.08
   assert toe_reward_params["stair_touchdown_lateral_margin"] == 0.03
   assert toe_reward_params["stair_min_safe_stride"] == 0.10
-  assert toe_reward_params["stair_max_safe_stride"] == 0.55
-  assert toe_reward_params["stair_max_tracking_stride"] == 0.80
+  assert toe_reward_params["stair_max_safe_stride"] == 0.85
+  assert toe_reward_params["stair_max_tracking_stride"] == 0.85
   assert toe_reward_params["stair_touchdown_lip_clearance"] == 0.02
   assert toe_reward_params["stair_touchdown_lip_height_band"] == 0.06
   assert toe_reward_params["safe_stride_containment_margin"] == 0.003
@@ -515,6 +524,9 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert shank_params["asset_cfg"].preserve_order is True
   skip_reward = env_cfg.rewards["stair_skip_layer_penalty"]
   assert skip_reward.weight == -1.0
+  probe_reward = env_cfg.rewards["stair_probe_stride_growth_reward"]
+  assert probe_reward.func is stair_probe_stride_growth_reward
+  assert probe_reward.weight == 0.40
   midline_reward = env_cfg.rewards["target_tread_midline_shaping"]
   assert midline_reward.func is target_tread_midline_shaping
   assert midline_reward.weight == 1.2
@@ -612,7 +624,7 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert actor_cfg.same_foot_stride_deployable_hint_loss_coef == 0.0
   assert actor_cfg.same_foot_stride_deployable_hint_margin == 0.02
   assert actor_cfg.safe_stride_min == 0.10
-  assert actor_cfg.safe_stride_max == 0.55
+  assert actor_cfg.safe_stride_max == 0.85
   assert actor_cfg.actor_semantic_enabled is True
 
 
@@ -844,7 +856,7 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
   toe_params = env_cfg.rewards["toe_step_riser_slab_penalty"].params
   assert toe_params["contact_penalty_scale"] == 0.7
   assert toe_params["stair_min_safe_stride"] == 0.14
-  assert toe_params["stair_max_safe_stride"] == 0.55
+  assert toe_params["stair_max_safe_stride"] == 0.85
   assert toe_params["stair_entry_evidence_time"] == 0.9
   replay_params = train_env_cfg.curriculum["terrain_levels"].params
   assert replay_params["mixed_replay_start_level"] == 7

@@ -14,9 +14,12 @@ from scripts.velocity_eval.eval_metrics import (
 from scripts.velocity_eval.eval_policy_goal_pyramid import (
   GoalPyramidEvalConfig,
   GoalPyramidToeRiserContactMarkers,
+  _normalize_float_list_flag,
   _refresh_goal_respawn_observations,
   _score_policy,
   _summarize_batches,
+  _summarize_probe_trace_batches,
+  _summarize_step_width_sweep,
 )
 
 
@@ -182,3 +185,125 @@ def test_goal_pyramid_summary_reports_landing_quality_and_score():
   assert "collision_heel" not in summary["score_components"]
   assert "collision_lip" not in summary["score_components"]
   assert 0.0 < summary["score_100"] < 100.0
+
+
+def test_goal_pyramid_step_width_sweep_helpers():
+  args = [
+    "--checkpoint-file",
+    "model.pt",
+    "--step-widths",
+    "0.27",
+    "0.30",
+    "0.33",
+    "--episodes",
+    "3",
+  ]
+  assert _normalize_float_list_flag(args, "--step-widths") == [
+    "--checkpoint-file",
+    "model.pt",
+    "--step-widths",
+    "[0.27, 0.30, 0.33]",
+    "--episodes",
+    "3",
+  ]
+
+  runs = [
+    {
+      "step_width": 0.27,
+      "summary": {
+        "score_100": 70.0,
+        "success_rate": 1.0,
+        "stair_safe_pass_rate": 0.2,
+        "landing_index_100": 65.0,
+        "mean_stair_landing_support_fraction": 0.7,
+        "stair_full_landing_ratio": 0.6,
+        "stair_incomplete_landing_ratio": 0.4,
+        "toe_riser_collision_count": 3.0,
+        "score_collision_penalties": {"toe": 0.7},
+      },
+    },
+    {
+      "step_width": 0.33,
+      "summary": {
+        "score_100": 90.0,
+        "success_rate": 1.0,
+        "stair_safe_pass_rate": 0.8,
+        "landing_index_100": 85.0,
+        "mean_stair_landing_support_fraction": 0.9,
+        "stair_full_landing_ratio": 0.8,
+        "stair_incomplete_landing_ratio": 0.2,
+        "toe_riser_collision_count": 1.0,
+        "score_collision_penalties": {"toe": 0.0},
+      },
+    },
+  ]
+  summary = _summarize_step_width_sweep(runs)
+  assert summary["num_widths"] == 2
+  assert summary["mean_score_100"] == pytest.approx(80.0)
+  assert summary["best_step_width"] == pytest.approx(0.33)
+  assert summary["worst_step_width"] == pytest.approx(0.27)
+
+
+def test_goal_pyramid_probe_trace_summary_reports_probe_growth():
+  cfg = GoalPyramidEvalConfig(write_probe_trace=True)
+  batches = [
+    {
+      "probe_trace": {
+        "episodes": [
+          {
+            "first_collision_step": 10,
+            "higher_riser_collision_step": 20,
+            "post_first_probe_strides": [0.24, 0.54, 0.60],
+            "post_first_probe_targets": [0.52, 0.58, 0.64],
+            "post_higher_strides": [0.59],
+            "post_higher_targets": [0.60],
+            "events": [
+              {
+                "kind": "first_collision",
+                "ratchet_target": 0.52,
+              },
+              {
+                "kind": "higher_riser_collision",
+                "ratchet_target": 0.60,
+              },
+            ],
+          },
+          {
+            "first_collision_step": 8,
+            "higher_riser_collision_step": None,
+            "post_first_probe_strides": [0.50],
+            "post_first_probe_targets": [0.55],
+            "post_higher_strides": [],
+            "post_higher_targets": [],
+            "events": [
+              {
+                "kind": "first_collision",
+                "ratchet_target": 0.55,
+              }
+            ],
+          },
+        ]
+      }
+    }
+  ]
+
+  trace = _summarize_probe_trace_batches(cfg, batches)
+  summary = trace["summary"]
+
+  assert summary["episodes"] == 2
+  assert summary["episodes_with_first_collision_rate"] == 1.0
+  assert summary["episodes_with_higher_riser_collision_rate"] == 0.5
+  assert summary["mean_post_first_probe_raw_stride"] == pytest.approx(0.47)
+  assert summary["mean_post_first_probe_entry_scaled_stride"] == pytest.approx(0.74)
+  assert summary["mean_post_first_probe_stride"] == pytest.approx(0.57)
+  assert summary["mean_post_first_probe_stride_growth"] == pytest.approx(0.06)
+  assert summary["mean_post_first_probe_entry_scaled_stride_growth"] == pytest.approx(
+    0.12
+  )
+  assert summary["post_first_probe_monotonic_episode_rate"] == 1.0
+  assert summary["post_first_probe_entry_scaled_monotonic_episode_rate"] == 1.0
+  assert summary["mean_first_to_higher_collision_steps"] == pytest.approx(10.0)
+  assert summary["mean_first_collision_ratchet_target"] == pytest.approx(0.535)
+  episodes = trace["episodes"]
+  assert episodes[0]["post_first_probe_strides_excluding_entry"] == [0.54, 0.60]
+  assert episodes[0]["post_first_probe_strides_entry_scaled"] == [0.48, 0.54, 0.60]

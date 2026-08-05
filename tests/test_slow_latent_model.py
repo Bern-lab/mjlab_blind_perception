@@ -176,6 +176,35 @@ def test_geometry_probe_is_added_during_strict_legacy_load() -> None:
   assert probe.geometry_probe_head is not None
 
 
+def test_safe_stride_control_head_is_backfilled_for_legacy_checkpoints() -> None:
+  source = _make_model(
+    structured_safe_stride_enabled=True,
+    dynamic_safe_stride_enabled=True,
+  )
+  target = _make_model(
+    structured_safe_stride_enabled=True,
+    dynamic_safe_stride_enabled=True,
+  )
+  legacy_state = {
+    key: value.detach().clone()
+    for key, value in source.state_dict().items()
+    if not key.startswith("safe_stride_control_head.")
+  }
+
+  target.load_state_dict(legacy_state, strict=True)
+
+  control_output = cast(torch.nn.Linear, target.safe_stride_control_head[2])
+  assert control_output.bias is not None
+  torch.testing.assert_close(
+    control_output.weight,
+    torch.zeros_like(control_output.weight),
+  )
+  torch.testing.assert_close(
+    control_output.bias,
+    torch.zeros_like(control_output.bias),
+  )
+
+
 def test_geometry_probe_construction_does_not_shift_policy_rng() -> None:
   torch.manual_seed(17)
   baseline = _make_model()
@@ -245,6 +274,7 @@ def test_shadow_semantic_uses_fixed_state_positions_and_physical_derivations() -
     stair_prob,
     gate,
     stair_shape,
+    safe_stride_interval.mean(dim=-1, keepdim=True),
     safe_stride_interval,
     safe_stride_confidence,
     safe_stride_trend_logits=safe_stride_trend_logits,
@@ -340,6 +370,7 @@ def test_shadow_semantic_stride_slots_use_safe_stride_control() -> None:
     stair_prob,
     gate,
     stair_shape,
+    latent_obs[:, 72:73],
     safe_stride_interval,
     safe_stride_confidence,
     latent_obs,
@@ -347,8 +378,7 @@ def test_shadow_semantic_stride_slots_use_safe_stride_control() -> None:
   )
 
   stride_range = model.safe_stride_max - model.safe_stride_min
-  centers = safe_stride_interval.mean(dim=-1)
-  expected_control = (centers - model.safe_stride_min) / stride_range
+  expected_control = (latent_obs[:, 72] - model.safe_stride_min) / stride_range
   torch.testing.assert_close(semantic[:, 8], expected_control)
   torch.testing.assert_close(semantic[:, 12], expected_control)
   torch.testing.assert_close(
@@ -598,6 +628,7 @@ def test_safe_stride_probe_only_freezes_policy_and_action_distribution() -> None
       (
         "safe_stride_head.",
         "safe_stride_width_head.",
+        "safe_stride_control_head.",
         "safe_stride_confidence_head.",
         "safe_stride_trend_head.",
       )
@@ -609,6 +640,9 @@ def test_safe_stride_probe_only_freezes_policy_and_action_distribution() -> None
   assert all(
     parameter.requires_grad
     for parameter in actor.safe_stride_confidence_head.parameters()
+  )
+  assert all(
+    parameter.requires_grad for parameter in actor.safe_stride_control_head.parameters()
   )
   assert all(
     parameter.requires_grad for parameter in actor.safe_stride_trend_head.parameters()
@@ -1232,9 +1266,9 @@ def test_slow_latent_export_metadata() -> None:
   assert metadata["policy_stair_riser_height_min"] == "0.088"
   assert metadata["policy_stair_riser_height_max"] == "0.25"
   assert metadata["policy_stair_safe_stride_min"] == "0.1"
-  assert metadata["policy_stair_safe_stride_max"] == "0.55"
+  assert metadata["policy_stair_safe_stride_max"] == "0.85"
   assert metadata["policy_stair_same_foot_stride_min"] == "0.1"
-  assert metadata["policy_stair_same_foot_stride_max"] == "0.8"
+  assert metadata["policy_stair_same_foot_stride_max"] == "0.9"
   assert metadata["policy_onnx_input_names"] == [
     "actor_obs",
     "latent_obs",

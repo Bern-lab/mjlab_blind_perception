@@ -712,6 +712,7 @@ def test_safe_stride_dense_trend_uses_ratchet_probe_backoff_lock() -> None:
     latent_obs[:, 76] = torch.tensor([0.0, 0.0, 1.0, 0.0])
     latent_obs[:, 77] = torch.tensor([0.0, 0.42, 0.48, 0.0])
     latent_obs[:, 78] = torch.tensor([0.8, 0.8, 0.8, 0.0])
+    latent_obs[:, 79] = torch.tensor([0.0, 0.5, 1.0, 0.0])
     observations = TensorDict({"latent": latent_obs}, batch_size=[4])
 
     trend = PPOTeacherKL._safe_stride_dense_trend_from_latent_obs(
@@ -735,6 +736,7 @@ def test_safe_stride_phase_targets_read_ratchet_center_and_phase() -> None:
     latent_obs[:, 76] = torch.tensor([0.0, 0.0, 0.0, 1.0])
     latent_obs[:, 77] = torch.tensor([0.0, 0.0, 0.0, 0.35])
     latent_obs[:, 78] = 0.8
+    latent_obs[:, 79] = torch.tensor([0.0, 0.5, 1.0, 1.0])
     observations = TensorDict({"latent": latent_obs}, batch_size=[4])
 
     phase = PPOTeacherKL._safe_stride_phase_targets_from_latent_obs(
@@ -748,9 +750,9 @@ def test_safe_stride_phase_targets_read_ratchet_center_and_phase() -> None:
     assert phase is not None
     torch.testing.assert_close(phase[:, 0], torch.tensor([0.52, 0.41, 0.35, 0.31]))
     torch.testing.assert_close(phase[:, 1], torch.ones(4))
-    torch.testing.assert_close(phase[:, 2], torch.tensor([2.0, 0.0, 0.0, 1.0]))
+    torch.testing.assert_close(phase[:, 2], torch.tensor([2.0, 0.0, 1.0, 1.0]))
     torch.testing.assert_close(phase[:, 3], torch.tensor([1.0, 0.0, 0.0, 0.0]))
-    torch.testing.assert_close(phase[:, 4], torch.tensor([0.0, 1.0, 1.0, 0.0]))
+    torch.testing.assert_close(phase[:, 4], torch.tensor([0.0, 1.0, 0.0, 0.0]))
     torch.testing.assert_close(phase[:, 5], torch.tensor([0.0, 0.0, 0.0, 1.0]))
 
 
@@ -765,6 +767,7 @@ def test_safe_stride_phase_targets_keep_first_collision_probe_open() -> None:
     latent_obs[:, 76] = torch.tensor([0.0, 1.0, 1.0])
     latent_obs[:, 77] = torch.tensor([0.0, 0.46, 0.46])
     latent_obs[:, 78] = 0.8
+    latent_obs[:, 79] = torch.tensor([0.0, 1.0, 0.5])
     observations = TensorDict({"latent": latent_obs}, batch_size=[3])
 
     phase = PPOTeacherKL._safe_stride_phase_targets_from_latent_obs(
@@ -782,22 +785,27 @@ def test_safe_stride_phase_targets_keep_first_collision_probe_open() -> None:
     torch.testing.assert_close(phase[:, 5], torch.tensor([0.0, 1.0, 0.0]))
 
 
-def test_safe_stride_phase_center_prediction_detaches_lower_bound() -> None:
-    """Phase-center gradients should train the open upper bound, not lower."""
+def test_safe_stride_phase_center_prediction_uses_control_stride() -> None:
+    """Phase-center gradients should train the independent control stride."""
+    control = torch.tensor([[0.52], [0.44]], requires_grad=True)
     interval = torch.tensor(
         [[0.30, 0.50], [0.20, 0.40]],
         requires_grad=True,
     )
     center = PPOTeacherKL._safe_stride_phase_center_prediction(
-        interval.mean(dim=-1, keepdim=True),
+        control,
         interval,
     )
 
-    center.sum().backward()
+    control_grad, interval_grad = torch.autograd.grad(
+        center.sum(),
+        (control, interval),
+        allow_unused=True,
+    )
 
-    assert interval.grad is not None
-    torch.testing.assert_close(interval.grad[:, 0], torch.zeros(2))
-    torch.testing.assert_close(interval.grad[:, 1], torch.full((2,), 0.5))
+    assert control_grad is not None
+    torch.testing.assert_close(control_grad, torch.ones_like(control))
+    assert interval_grad is None
 
 
 def test_safe_stride_phase_center_loss_tracks_ratchet_target() -> None:

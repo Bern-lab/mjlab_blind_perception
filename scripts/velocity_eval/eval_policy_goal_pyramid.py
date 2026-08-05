@@ -7,7 +7,7 @@ import math
 import os
 import sys
 import traceback
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
@@ -38,6 +38,11 @@ from tensordict import TensorDict
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg
+from mjlab.tasks.velocity.mdp.observations import (
+  FOOT_EVENT_RATCHET_START,
+  FOOT_EVENT_SUMMARY_DIM,
+  FootEventMemoryObs,
+)
 from mjlab.tasks.velocity.mdp.velocity_command import UniformVelocityCommand
 from mjlab.utils.lab_api.math import quat_from_euler_xyz, quat_mul, wrap_to_pi
 from mjlab.utils.lstm import (
@@ -80,6 +85,7 @@ class GoalPyramidEvalConfig:
   stair_levels: int = 10
   stair_height: float = 0.15
   step_width: float = 0.30
+  step_widths: list[float] = field(default_factory=list)
   platform_width: float = 3.0
   flat_apron_width: float = 3.0
   terrain_border_width: float = 12.0
@@ -104,6 +110,10 @@ class GoalPyramidEvalConfig:
   safe_pass_min_support_fraction: float = 0.80
   safe_pass_max_low_support_ratio: float = 0.20
   safe_pass_max_toe_riser_collision_count: float = 10.0
+  write_probe_trace: bool = False
+  probe_trace_post_first_steps: int = 8
+  probe_trace_min_same_foot_gap_s: float = 0.10
+  probe_trace_file: str | None = None
 
 
 @dataclass
@@ -167,6 +177,335 @@ class GoalPyramidToeRiserContactMarkers:
           color=(1.0, 0.0, 0.0, 1.0),
           label="toe_riser_contact",
         )
+
+
+def _as_float_or_none(value: float | None) -> float | None:
+  return None if value is None else float(value)
+
+
+def _as_int_or_none(value: int | None) -> int | None:
+  return None if value is None else int(value)
+
+
+def _mode_name(mode_code: float) -> str:
+  if mode_code < 0.25:
+    return "probe"
+  if mode_code < 0.75:
+    return "backoff"
+  return "hold"
+
+
+def _latent_ratchet_from_obs(obs: TensorDict) -> torch.Tensor | None:
+  if "latent" not in obs.keys():
+    return None
+  latent = obs["latent"]
+  if not isinstance(latent, torch.Tensor) or latent.shape[-1] < FOOT_EVENT_SUMMARY_DIM:
+    return None
+  summary = latent[..., -FOOT_EVENT_SUMMARY_DIM:]
+  return summary[..., FOOT_EVENT_RATCHET_START:]
+
+
+def _find_foot_event_memory_term(env: ManagerBasedRlEnv) -> FootEventMemoryObs | None:
+  manager = env.observation_manager
+  names = getattr(manager, "_group_obs_term_names", {}).get("latent", [])
+  cfgs = getattr(manager, "_group_obs_term_cfgs", {}).get("latent", [])
+  for name, term_cfg in zip(names, cfgs, strict=False):
+    func = getattr(term_cfg, "func", None)
+    if isinstance(func, FootEventMemoryObs):
+      return func
+    if name == "foot_event_memory":
+      return func if isinstance(func, FootEventMemoryObs) else None
+  return None
+
+
+class GoalPyramidProbeTraceRecorder:
+  """Collect compact first-collision probe/backoff traces for offline eval."""
+
+  def __init__(self, env: ManagerBasedRlEnv, cfg: GoalPyramidEvalConfig) -> None:
+    self._env = env
+    self._cfg = cfg
+    self._term = _find_foot_event_memory_term(env)
+    self._events: list[list[dict[str, Any]]] = [[] for _ in range(env.num_envs)]
+    self._first_collision_step = torch.full(
+      (env.num_envs,), -1, dtype=torch.long, device=env.device
+    )
+    self._first_collision_layer = torch.full_like(self._first_collision_step, -1)
+    self._higher_collision_step = torch.full_like(self._first_collision_step, -1)
+    self._higher_collision_layer = torch.full_like(self._first_collision_step, -1)
+    self._probe_same_foot_step_count = torch.zeros_like(self._first_collision_step)
+    self._post_higher_same_foot_step_count = torch.zeros_like(
+      self._first_collision_step
+    )
+    self._last_same_foot_event_step = torch.full_like(self._first_collision_step, -1)
+    self._last_same_foot_stride = torch.full(
+      (env.num_envs,), torch.nan, dtype=torch.float32, device=env.device
+    )
+
+  def _ratchet_row(
+    self, ratchet: torch.Tensor | None, env_index: int
+  ) -> dict[str, Any]:
+    if ratchet is None:
+      return {
+        "ratchet_active": False,
+        "ratchet_lower": None,
+        "ratchet_target": None,
+        "ratchet_upper": None,
+        "ratchet_same_lower": None,
+        "ratchet_confirmed": False,
+        "ratchet_same_upper": None,
+        "ratchet_confidence": None,
+        "ratchet_mode": "unknown",
+      }
+    row = ratchet[env_index].detach().cpu()
+    mode_code = float(row[9].item())
+    return {
+      "ratchet_active": bool(row[0].item() > 0.5),
+      "ratchet_lower": float(row[1].item()),
+      "ratchet_target": float(row[2].item()),
+      "ratchet_upper": float(row[3].item()),
+      "ratchet_same_lower": float(row[5].item()),
+      "ratchet_confirmed": bool(row[6].item() > 0.5),
+      "ratchet_same_upper": float(row[7].item()),
+      "ratchet_confidence": float(row[8].item()),
+      "ratchet_mode": _mode_name(mode_code),
+    }
+
+  def _event_row(
+    self,
+    *,
+    env_index: int,
+    step: int,
+    kind: str,
+    ratchet: torch.Tensor | None,
+    toe_layer: int | None = None,
+    same_foot_stride: float | None = None,
+    same_foot_height: float | None = None,
+  ) -> dict[str, Any]:
+    previous_stride = self._last_same_foot_stride[env_index]
+    if same_foot_stride is None or not torch.isfinite(previous_stride):
+      stride_growth = None
+    else:
+      stride_growth = same_foot_stride - float(previous_stride.item())
+    phase = (
+      "post_higher" if self._higher_collision_step[env_index].item() >= 0 else "probe"
+    )
+    row = {
+      "step": int(step),
+      "time_s": float(step * self._env.step_dt),
+      "kind": kind,
+      "phase": phase,
+      "toe_layer": _as_int_or_none(toe_layer),
+      "same_foot_stride": _as_float_or_none(same_foot_stride),
+      "same_foot_height": _as_float_or_none(same_foot_height),
+      "same_foot_stride_growth": _as_float_or_none(stride_growth),
+    }
+    row.update(self._ratchet_row(ratchet, env_index))
+    return row
+
+  def update(
+    self,
+    *,
+    step: int,
+    obs: TensorDict,
+    active: torch.Tensor,
+    step_metrics: dict[str, torch.Tensor],
+    step_levels: dict[str, torch.Tensor],
+  ) -> None:
+    env = self._env
+    active = active.to(device=env.device, dtype=torch.bool)
+    ratchet = _latent_ratchet_from_obs(obs)
+    toe_hit = step_metrics.get("toe_riser_collision")
+    if toe_hit is None:
+      return
+    toe_hit = toe_hit.to(device=env.device) > 0.0
+    toe_level_events = step_levels.get("toe_riser_collision_by_level")
+    if toe_level_events is None:
+      toe_layer = torch.full((env.num_envs,), -1, dtype=torch.long, device=env.device)
+    else:
+      toe_layer = self._first_active_level(toe_level_events.to(device=env.device))
+
+    first_collision = active & toe_hit & (self._first_collision_step < 0)
+    if bool(first_collision.any().item()):
+      env_ids = first_collision.nonzero(as_tuple=False).flatten()
+      self._first_collision_step[env_ids] = int(step)
+      self._first_collision_layer[env_ids] = toe_layer[env_ids]
+      for env_id_t in env_ids.detach().cpu():
+        env_id = int(env_id_t.item())
+        layer = int(toe_layer[env_id].item())
+        self._events[env_id].append(
+          self._event_row(
+            env_index=env_id,
+            step=step,
+            kind="first_collision",
+            ratchet=ratchet,
+            toe_layer=layer,
+          )
+        )
+
+    after_first_hit = (
+      active & toe_hit & (self._first_collision_step >= 0) & ~first_collision
+    )
+    higher_collision = (
+      after_first_hit
+      & (self._higher_collision_step < 0)
+      & (toe_layer > self._first_collision_layer)
+      & (self._first_collision_layer >= 0)
+    )
+    same_or_unknown_collision = after_first_hit & ~higher_collision
+    for mask, kind in (
+      (higher_collision, "higher_riser_collision"),
+      (same_or_unknown_collision, "post_first_collision"),
+    ):
+      if not bool(mask.any().item()):
+        continue
+      env_ids = mask.nonzero(as_tuple=False).flatten()
+      if kind == "higher_riser_collision":
+        self._higher_collision_step[env_ids] = int(step)
+        self._higher_collision_layer[env_ids] = toe_layer[env_ids]
+      for env_id_t in env_ids.detach().cpu():
+        env_id = int(env_id_t.item())
+        self._events[env_id].append(
+          self._event_row(
+            env_index=env_id,
+            step=step,
+            kind=kind,
+            ratchet=ratchet,
+            toe_layer=int(toe_layer[env_id].item()),
+          )
+        )
+
+    if self._term is None:
+      return
+    same_step = self._term._same_foot_step_features()
+    latest_same = same_step[:, 0]
+    new_footprint = self._term.footprint_valid[:, 0] & (
+      self._term.footprints[:, 0, 6] <= float(env.step_dt) * 1.5
+    )
+    after_higher_collision = self._higher_collision_step >= 0
+    same_foot_step_count = torch.where(
+      after_higher_collision,
+      self._post_higher_same_foot_step_count,
+      self._probe_same_foot_step_count,
+    )
+    min_gap_steps = max(
+      1, int(round(self._cfg.probe_trace_min_same_foot_gap_s / env.step_dt))
+    )
+    same_foot_gap_ok = (self._last_same_foot_event_step < 0) | (
+      int(step) - self._last_same_foot_event_step >= min_gap_steps
+    )
+    forward_up_same_step = (
+      active
+      & new_footprint
+      & same_foot_gap_ok
+      & (self._first_collision_step >= 0)
+      & (latest_same[:, 0] > 0.5)
+      & (latest_same[:, 2] >= self._term.ratchet_min_stride_m)
+      & (latest_same[:, 3] > self._term.ratchet_height_threshold_m)
+      & (same_foot_step_count < self._cfg.probe_trace_post_first_steps)
+    )
+    if not bool(forward_up_same_step.any().item()):
+      return
+    env_ids = forward_up_same_step.nonzero(as_tuple=False).flatten()
+    for env_id_t in env_ids.detach().cpu():
+      env_id = int(env_id_t.item())
+      stride = float(latest_same[env_id, 2].item())
+      height = float(latest_same[env_id, 3].item())
+      self._events[env_id].append(
+        self._event_row(
+          env_index=env_id,
+          step=step,
+          kind="post_first_same_foot_step",
+          ratchet=ratchet,
+          same_foot_stride=stride,
+          same_foot_height=height,
+        )
+      )
+      self._last_same_foot_stride[env_id] = stride
+      self._last_same_foot_event_step[env_id] = int(step)
+      if bool(after_higher_collision[env_id].item()):
+        self._post_higher_same_foot_step_count[env_id] += 1
+      else:
+        self._probe_same_foot_step_count[env_id] += 1
+
+  @staticmethod
+  def _first_active_level(level_events: torch.Tensor) -> torch.Tensor:
+    if level_events.ndim != 2 or level_events.shape[1] == 0:
+      return torch.full(
+        (level_events.shape[0],),
+        -1,
+        dtype=torch.long,
+        device=level_events.device,
+      )
+    active = level_events > 0.0
+    level_numbers = torch.arange(
+      1, level_events.shape[1] + 1, device=level_events.device, dtype=torch.long
+    )
+    candidates = torch.where(
+      active,
+      level_numbers[None, :],
+      torch.full_like(level_numbers[None, :], level_events.shape[1] + 1),
+    )
+    first_level = torch.min(candidates, dim=1).values
+    return torch.where(
+      active.any(dim=1),
+      first_level,
+      torch.full_like(first_level, -1),
+    )
+
+  def finish(
+    self,
+    *,
+    success: torch.Tensor,
+    step_counts: torch.Tensor,
+    spawn: SpawnInfo,
+  ) -> dict[str, Any]:
+    episodes: list[dict[str, Any]] = []
+    for env_id, events in enumerate(self._events):
+      first_step = int(self._first_collision_step[env_id].item())
+      higher_step = int(self._higher_collision_step[env_id].item())
+      before_higher = [
+        event
+        for event in events
+        if event["kind"] == "post_first_same_foot_step"
+        and (higher_step < 0 or int(event["step"]) < higher_step)
+      ]
+      after_higher = [
+        event
+        for event in events
+        if event["kind"] == "post_first_same_foot_step"
+        and higher_step >= 0
+        and int(event["step"]) >= higher_step
+      ]
+      episodes.append(
+        {
+          "env_index": env_id,
+          "spawn_side": spawn.side_names[env_id],
+          "success": bool(success[env_id].item()),
+          "episode_length_steps": float(step_counts[env_id].item()),
+          "first_collision_step": None if first_step < 0 else first_step,
+          "first_collision_layer": (
+            None
+            if self._first_collision_layer[env_id].item() < 0
+            else int(self._first_collision_layer[env_id].item())
+          ),
+          "higher_riser_collision_step": None if higher_step < 0 else higher_step,
+          "higher_riser_collision_layer": (
+            None
+            if self._higher_collision_layer[env_id].item() < 0
+            else int(self._higher_collision_layer[env_id].item())
+          ),
+          "post_first_probe_strides": [
+            event["same_foot_stride"] for event in before_higher
+          ],
+          "post_first_probe_targets": [
+            event["ratchet_target"] for event in before_higher
+          ],
+          "post_higher_strides": [event["same_foot_stride"] for event in after_higher],
+          "post_higher_targets": [event["ratchet_target"] for event in after_higher],
+          "events": events,
+        }
+      )
+    return {"episodes": episodes}
 
 
 def _make_goal_terrain(cfg: GoalPyramidEvalConfig) -> EvalTerrainSpec:
@@ -472,6 +811,11 @@ def _run_batch(
     all_envs_active = torch.ones(batch_size, dtype=torch.bool, device=device)
     _update_goal_command(wrapped.unwrapped, cfg, spawn, all_envs_active)
     obs = _fresh_obs_with_history(wrapped.unwrapped)
+    probe_trace = (
+      GoalPyramidProbeTraceRecorder(wrapped.unwrapped, cfg)
+      if cfg.write_probe_trace
+      else None
+    )
 
     metric_sums, level_sums = _empty_batch_tensors(batch_size, cfg.stair_levels, device)
     step_counts = torch.zeros(batch_size, device=device)
@@ -532,6 +876,14 @@ def _run_batch(
           terrain_height_m=cfg.stair_height,
           max_levels=cfg.stair_levels,
           landing_detector=landing_detector,
+        )
+      if probe_trace is not None:
+        probe_trace.update(
+          step=_step,
+          obs=obs,
+          active=active,
+          step_metrics=step_metrics,
+          step_levels=step_levels,
         )
       for name, value in step_metrics.items():
         metric_sums[name] += torch.where(active, value, torch.zeros_like(value))
@@ -597,7 +949,7 @@ def _run_batch(
     level_counts = {
       name: level_sums[name].detach().cpu().tolist() for name in LEVEL_EVENT_NAMES
     }
-    return {
+    batch_payload = {
       "event_source": detector.event_source,
       "success": success.detach().cpu().tolist(),
       "fell": fell.detach().cpu().tolist(),
@@ -615,6 +967,13 @@ def _run_batch(
       "level_counts": level_counts,
       "step_dt": wrapped.unwrapped.step_dt,
     }
+    if probe_trace is not None:
+      batch_payload["probe_trace"] = probe_trace.finish(
+        success=success,
+        step_counts=step_counts,
+        spawn=spawn,
+      )
+    return batch_payload
   finally:
     wrapped.close()
 
@@ -1248,6 +1607,210 @@ def _summarize_batches(cfg: GoalPyramidEvalConfig, batches: list[dict]) -> dict:
   return summary
 
 
+def _probe_trace_collision_target(
+  events: list[dict[str, Any]], kind: str
+) -> float | None:
+  for event in events:
+    if event.get("kind") == kind:
+      target = event.get("ratchet_target")
+      return None if target is None else float(target)
+  return None
+
+
+def _finite_probe_values(values: list[Any]) -> list[float]:
+  out: list[float] = []
+  for value in values:
+    if value is None:
+      continue
+    value_f = float(value)
+    if math.isfinite(value_f):
+      out.append(value_f)
+  return out
+
+
+def _entry_scaled_probe_strides(strides: list[Any]) -> list[float]:
+  finite = _finite_probe_values(strides)
+  if not finite:
+    return []
+  return [2.0 * finite[0], *finite[1:]]
+
+
+def _summarize_probe_trace_batches(
+  cfg: GoalPyramidEvalConfig,
+  batches: list[dict],
+) -> dict[str, Any]:
+  del cfg
+  episodes: list[dict[str, Any]] = []
+  for batch_index, batch in enumerate(batches):
+    trace = batch.get("probe_trace")
+    if not isinstance(trace, dict):
+      continue
+    for local_episode in trace.get("episodes", []):
+      episode = dict(local_episode)
+      episode["batch_index"] = batch_index
+      episode["global_episode_index"] = len(episodes)
+      episodes.append(episode)
+
+  with_first = [
+    episode for episode in episodes if episode.get("first_collision_step") is not None
+  ]
+  with_higher = [
+    episode
+    for episode in episodes
+    if episode.get("higher_riser_collision_step") is not None
+  ]
+  raw_by_episode = [
+    _finite_probe_values(episode.get("post_first_probe_strides", []))
+    for episode in episodes
+  ]
+  analyzed_by_episode = [strides[1:] for strides in raw_by_episode]
+  entry_scaled_by_episode = [
+    _entry_scaled_probe_strides(strides) for strides in raw_by_episode
+  ]
+  before_counts = [len(strides) for strides in raw_by_episode]
+  analyzed_counts = [len(strides) for strides in analyzed_by_episode]
+  raw_strides = [stride for strides in raw_by_episode for stride in strides]
+  analyzed_strides = [stride for strides in analyzed_by_episode for stride in strides]
+  entry_scaled_strides = [
+    stride for strides in entry_scaled_by_episode for stride in strides
+  ]
+  entry_strides = [strides[0] for strides in raw_by_episode if strides]
+  first_analyzed_strides = [strides[0] for strides in analyzed_by_episode if strides]
+  last_analyzed_strides = [strides[-1] for strides in analyzed_by_episode if strides]
+  first_entry_scaled_strides = [
+    strides[0] for strides in entry_scaled_by_episode if strides
+  ]
+  last_entry_scaled_strides = [
+    strides[-1] for strides in entry_scaled_by_episode if strides
+  ]
+  analyzed_growth = [
+    strides[-1] - strides[0] for strides in analyzed_by_episode if len(strides) >= 2
+  ]
+  entry_scaled_growth = [
+    strides[-1] - strides[0] for strides in entry_scaled_by_episode if len(strides) >= 2
+  ]
+  monotonic_flags = []
+  entry_scaled_monotonic_flags = []
+  for episode in episodes:
+    strides = _finite_probe_values(episode.get("post_first_probe_strides", []))[1:]
+    if len(strides) >= 2:
+      monotonic_flags.append(
+        float(
+          all(b >= a - 1.0e-4 for a, b in zip(strides[:-1], strides[1:], strict=True))
+        )
+      )
+    scaled_strides = _entry_scaled_probe_strides(
+      episode.get("post_first_probe_strides", [])
+    )
+    if len(scaled_strides) >= 2:
+      entry_scaled_monotonic_flags.append(
+        float(
+          all(
+            b >= a - 1.0e-4
+            for a, b in zip(
+              scaled_strides[:-1],
+              scaled_strides[1:],
+              strict=True,
+            )
+          )
+        )
+      )
+
+  for episode, analyzed, scaled in zip(
+    episodes,
+    analyzed_by_episode,
+    entry_scaled_by_episode,
+    strict=True,
+  ):
+    episode["post_first_probe_strides_excluding_entry"] = analyzed
+    episode["post_first_probe_strides_entry_scaled"] = scaled
+
+  collision_gaps = [
+    episode["higher_riser_collision_step"] - episode["first_collision_step"]
+    for episode in with_higher
+  ]
+  first_targets = [
+    target
+    for episode in episodes
+    if (
+      target := _probe_trace_collision_target(
+        episode.get("events", []),
+        "first_collision",
+      )
+    )
+    is not None
+  ]
+  higher_targets = [
+    target
+    for episode in episodes
+    if (
+      target := _probe_trace_collision_target(
+        episode.get("events", []),
+        "higher_riser_collision",
+      )
+    )
+    is not None
+  ]
+  after_higher_targets = [
+    target
+    for episode in episodes
+    for target in episode["post_higher_targets"]
+    if target is not None
+  ]
+
+  total = max(1, len(episodes))
+  summary = {
+    "episodes": len(episodes),
+    "episodes_with_first_collision": len(with_first),
+    "episodes_with_first_collision_rate": len(with_first) / total,
+    "episodes_with_higher_riser_collision": len(with_higher),
+    "episodes_with_higher_riser_collision_rate": len(with_higher) / total,
+    "mean_post_first_probe_same_foot_step_count": _average_values(before_counts),
+    "mean_post_first_probe_analyzed_step_count": _average_values(analyzed_counts),
+    "mean_post_first_probe_raw_stride": _average_values(raw_strides),
+    "mean_post_first_probe_entry_stride": _average_values(entry_strides),
+    "mean_post_first_probe_entry_scaled_stride": _average_values(
+      first_entry_scaled_strides
+    ),
+    "mean_post_first_probe_stride": _average_values(analyzed_strides),
+    "mean_post_first_probe_first_stride": _average_values(first_analyzed_strides),
+    "mean_post_first_probe_last_stride": _average_values(last_analyzed_strides),
+    "mean_post_first_probe_stride_growth": _average_values(analyzed_growth),
+    "mean_post_first_probe_entry_scaled_sequence_stride": _average_values(
+      entry_scaled_strides
+    ),
+    "mean_post_first_probe_entry_scaled_first_stride": _average_values(
+      first_entry_scaled_strides
+    ),
+    "mean_post_first_probe_entry_scaled_last_stride": _average_values(
+      last_entry_scaled_strides
+    ),
+    "mean_post_first_probe_entry_scaled_stride_growth": _average_values(
+      entry_scaled_growth
+    ),
+    "post_first_probe_monotonic_episode_rate": _average_values(monotonic_flags),
+    "post_first_probe_entry_scaled_monotonic_episode_rate": _average_values(
+      entry_scaled_monotonic_flags
+    ),
+    "mean_first_to_higher_collision_steps": _average_values(collision_gaps),
+    "mean_first_collision_ratchet_target": _average_values(first_targets),
+    "mean_higher_collision_ratchet_target": _average_values(higher_targets),
+    "mean_post_higher_ratchet_target": _average_values(after_higher_targets),
+  }
+  return {"summary": summary, "episodes": episodes}
+
+
+def _resolve_probe_trace_path(
+  cfg: GoalPyramidEvalConfig,
+  output_path: Path,
+) -> Path:
+  if cfg.probe_trace_file is not None:
+    path = Path(cfg.probe_trace_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+  return output_path.with_name(f"{output_path.stem}_probe_trace.json")
+
+
 def _resolve_output_path(
   *,
   cfg: GoalPyramidEvalConfig,
@@ -1255,7 +1818,7 @@ def _resolve_output_path(
   agent_cfg,
   checkpoint_path: Path,
 ) -> Path:
-  default_name = f"goal_pyramid_h{int(round(cfg.stair_height * 100)):02d}cm.json"
+  default_name = _single_eval_output_name(cfg)
   if cfg.output_file is not None:
     output_path = Path(cfg.output_file)
     if output_path.is_dir() or output_path.suffix.lower() != ".json":
@@ -1281,6 +1844,22 @@ def _resolve_output_path(
   )
   output_dir.mkdir(parents=True, exist_ok=True)
   return output_dir / default_name
+
+
+def _cm_label(value_m: float) -> str:
+  return f"{int(round(value_m * 100)):02d}cm"
+
+
+def _single_eval_output_name(cfg: GoalPyramidEvalConfig) -> str:
+  return f"goal_pyramid_h{_cm_label(cfg.stair_height)}.json"
+
+
+def _step_width_eval_output_name(cfg: GoalPyramidEvalConfig, step_width: float) -> str:
+  return f"goal_pyramid_h{_cm_label(cfg.stair_height)}_w{_cm_label(step_width)}.json"
+
+
+def _step_width_sweep_output_name(cfg: GoalPyramidEvalConfig) -> str:
+  return f"goal_pyramid_h{_cm_label(cfg.stair_height)}_step_width_sweep.json"
 
 
 def _resolve_table_image_path(
@@ -1541,6 +2120,25 @@ def run_goal_pyramid_eval(task_id: str, cfg: GoalPyramidEvalConfig) -> dict:
     "navigation": navigation,
     "summary": summary,
   }
+  if cfg.write_probe_trace:
+    trace_payload = _summarize_probe_trace_batches(cfg, batches)
+    trace_path = _resolve_probe_trace_path(cfg, output_path)
+    trace_payload.update(
+      {
+        "task_id": task_id,
+        "policy_output_name": policy_output_name,
+        "checkpoint": str(checkpoint_path),
+        "output_dir": str(output_path.parent),
+        "mode": "goal_pyramid_probe_trace",
+        "config": asdict(cfg),
+        "terrain": terrain,
+        "navigation": navigation,
+      }
+    )
+    trace_path.write_text(json.dumps(trace_payload, indent=2), encoding="utf-8")
+    payload["probe_trace_file"] = str(trace_path)
+    payload["probe_trace_summary"] = trace_payload["summary"]
+    print(f"[INFO] Wrote goal pyramid probe trace to {trace_path}")
 
   output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
   print(f"[INFO] Wrote goal pyramid evaluation to {output_path}")
@@ -1565,6 +2163,185 @@ def run_goal_pyramid_eval(task_id: str, cfg: GoalPyramidEvalConfig) -> dict:
     f"toe_over_free={summary['toe_riser_collision_over_free_count_success_only']:.3f}"
   )
   return payload
+
+
+def _resolve_step_width_sweep_paths(
+  *,
+  cfg: GoalPyramidEvalConfig,
+  task_id: str,
+  agent_cfg,
+  checkpoint_path: Path,
+) -> tuple[Path, Path]:
+  if cfg.output_file is not None:
+    output_path = Path(cfg.output_file)
+    if output_path.suffix.lower() == ".json":
+      output_path.parent.mkdir(parents=True, exist_ok=True)
+      return output_path.parent, output_path
+    output_dir = make_timestamped_policy_output_dir(
+      output_root=output_path,
+      task_id=task_id,
+      agent_cfg=agent_cfg,
+      checkpoint_path=checkpoint_path,
+    )
+  else:
+    output_dir = (
+      Path(cfg.output_dir)
+      if cfg.output_dir is not None
+      else make_timestamped_policy_output_dir(
+        output_root=cfg.output_root,
+        task_id=task_id,
+        agent_cfg=agent_cfg,
+        checkpoint_path=checkpoint_path,
+      )
+    )
+  output_dir.mkdir(parents=True, exist_ok=True)
+  return output_dir, output_dir / _step_width_sweep_output_name(cfg)
+
+
+def _summarize_step_width_sweep(runs: list[dict[str, Any]]) -> dict[str, Any]:
+  if not runs:
+    return {}
+
+  def mean_metric(name: str) -> float:
+    return float(np.mean([run["summary"][name] for run in runs]))
+
+  best = max(runs, key=lambda run: run["summary"]["score_100"])
+  worst = min(runs, key=lambda run: run["summary"]["score_100"])
+  return {
+    "num_widths": len(runs),
+    "mean_score_100": mean_metric("score_100"),
+    "mean_success_rate": mean_metric("success_rate"),
+    "mean_stair_safe_pass_rate": mean_metric("stair_safe_pass_rate"),
+    "mean_landing_index_100": mean_metric("landing_index_100"),
+    "mean_stair_landing_support_fraction": mean_metric(
+      "mean_stair_landing_support_fraction"
+    ),
+    "mean_stair_full_landing_ratio": mean_metric("stair_full_landing_ratio"),
+    "mean_stair_incomplete_landing_ratio": mean_metric(
+      "stair_incomplete_landing_ratio"
+    ),
+    "mean_toe_riser_collision_count": mean_metric("toe_riser_collision_count"),
+    "mean_toe_riser_collision_penalty": float(
+      np.mean([run["summary"]["score_collision_penalties"]["toe"] for run in runs])
+    ),
+    "best_step_width": best["step_width"],
+    "best_score_100": best["summary"]["score_100"],
+    "worst_step_width": worst["step_width"],
+    "worst_score_100": worst["summary"]["score_100"],
+  }
+
+
+def run_goal_pyramid_step_width_sweep(
+  task_id: str,
+  cfg: GoalPyramidEvalConfig,
+) -> dict[str, Any]:
+  if not cfg.step_widths:
+    return run_goal_pyramid_eval(task_id, cfg)
+  if cfg.play:
+    raise ValueError("Step-width sweep is only supported for offline eval, not --play.")
+
+  agent_cfg = load_rl_cfg(task_id)
+  checkpoint_path = resolve_checkpoint_path(
+    task_id=task_id,
+    agent_cfg=agent_cfg,
+    checkpoint_file=cfg.checkpoint_file,
+    wandb_run_path=cfg.wandb_run_path,
+    wandb_checkpoint_name=cfg.wandb_checkpoint_name,
+  )
+  agent_cfg = resolve_inference_agent_cfg(
+    checkpoint_path=checkpoint_path,
+    agent_cfg=agent_cfg,
+  )
+  output_dir, sweep_output_path = _resolve_step_width_sweep_paths(
+    cfg=cfg,
+    task_id=task_id,
+    agent_cfg=agent_cfg,
+    checkpoint_path=checkpoint_path,
+  )
+
+  print(
+    "[INFO] Running goal_pyramid step-width sweep: "
+    + ", ".join(f"{width:.2f} m" for width in cfg.step_widths)
+  )
+  runs: list[dict[str, Any]] = []
+  for step_width in cfg.step_widths:
+    step_width = float(step_width)
+    width_output_path = output_dir / _step_width_eval_output_name(cfg, step_width)
+    width_cfg = replace(
+      cfg,
+      step_width=step_width,
+      step_widths=[],
+      output_dir=None,
+      output_file=str(width_output_path),
+      table_image_file=None,
+    )
+    payload = run_goal_pyramid_eval(task_id, width_cfg)
+    table_path = _resolve_table_image_path(width_cfg, width_output_path)
+    runs.append(
+      {
+        "step_width": step_width,
+        "output_file": str(width_output_path),
+        "table_image_file": str(table_path) if table_path is not None else None,
+        "summary": payload["summary"],
+      }
+    )
+
+  sweep_payload: dict[str, Any] = {
+    "task_id": task_id,
+    "policy_output_name": get_policy_output_name(
+      task_id=task_id,
+      agent_cfg=agent_cfg,
+      checkpoint_path=checkpoint_path,
+    ),
+    "checkpoint": str(checkpoint_path),
+    "output_dir": str(output_dir),
+    "mode": "goal_pyramid_step_width_sweep",
+    "config": asdict(cfg),
+    "step_widths": [float(width) for width in cfg.step_widths],
+    "summary": _summarize_step_width_sweep(runs),
+    "runs": runs,
+  }
+  sweep_output_path.write_text(
+    json.dumps(sweep_payload, indent=2),
+    encoding="utf-8",
+  )
+  print(f"[INFO] Wrote goal pyramid step-width sweep to {sweep_output_path}")
+  for run in runs:
+    summary = run["summary"]
+    print(
+      "[INFO] width="
+      f"{run['step_width']:.2f} m: "
+      f"score={summary['score_100']:.1f}, "
+      f"safe_pass={summary['stair_safe_pass_rate']:.3f}, "
+      f"full={summary['stair_full_landing_ratio']:.3f}, "
+      f"support={summary['mean_stair_landing_support_fraction']:.3f}, "
+      f"toe={summary['toe_riser_collision_count_success_only']:.3f}"
+    )
+  return sweep_payload
+
+
+def _normalize_float_list_flag(args: list[str], flag_name: str) -> list[str]:
+  """Allow ``--flag 0.27 0.30`` in addition to tyro's list-literal syntax."""
+  normalized: list[str] = []
+  index = 0
+  while index < len(args):
+    arg = args[index]
+    normalized.append(arg)
+    index += 1
+    if arg != flag_name or index >= len(args):
+      continue
+
+    values: list[str] = []
+    while index < len(args) and not args[index].startswith("-"):
+      values.append(args[index])
+      index += 1
+    if not values:
+      continue
+    if len(values) == 1 and values[0].lstrip().startswith("["):
+      normalized.append(values[0])
+    else:
+      normalized.append(f"[{', '.join(values)}]")
+  return normalized
 
 
 def _normalize_standalone_bool_flags(
@@ -1597,14 +2374,18 @@ def main() -> None:
     return_unknown_args=True,
     config=mjlab.TYRO_FLAGS,
   )
+  remaining_args = _normalize_float_list_flag(list(remaining_args), "--step-widths")
   cfg = tyro.cli(
     GoalPyramidEvalConfig,
-    args=_normalize_standalone_bool_flags(list(remaining_args), ("--play",)),
+    args=_normalize_standalone_bool_flags(remaining_args, ("--play",)),
     prog=sys.argv[0] + f" {chosen_task}",
     config=mjlab.TYRO_FLAGS,
   )
   if cfg.play:
     run_goal_pyramid_play(chosen_task, cfg)
+    return
+  if cfg.step_widths:
+    run_goal_pyramid_step_width_sweep(chosen_task, cfg)
     return
   run_goal_pyramid_eval(chosen_task, cfg)
 

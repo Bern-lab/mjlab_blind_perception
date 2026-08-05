@@ -187,11 +187,16 @@ class G1SlowLatentRewardParams:
   toe_stair_touchdown_height_tolerance: float = 0.08
   toe_stair_touchdown_lateral_margin: float = 0.03
   toe_stair_min_safe_stride: float = 0.10
-  toe_stair_max_safe_stride: float = 0.55
-  toe_stair_max_tracking_stride: float = 0.80
+  toe_stair_max_safe_stride: float = 0.85
+  toe_stair_max_tracking_stride: float = 0.85
   toe_stair_touchdown_lip_clearance: float = 0.02
   toe_stair_touchdown_lip_height_band: float = 0.06
   toe_safe_stride_containment_margin: float = 0.003
+  probe_stride_growth_weight: float = 0.40
+  probe_stride_min_growth: float = 0.04
+  probe_stride_target_tolerance: float = 0.04
+  probe_stride_actual_margin: float = 0.04
+  probe_stride_first_layer_scale: float = 2.0
   stair_entry_evidence_time: float = 0.80
   safe_stride_evidence_window_steps: int = 15
   safe_stride_rear_partial_weight: float = 2.0
@@ -392,6 +397,10 @@ def configure_g1_step_danger_rewards(
       "ground_contact_sensor_name": "feet_ground_contact",
       "asset_cfg": foot_asset_cfg(),
     },
+  )
+  cfg.rewards["stair_probe_stride_growth_reward"] = RewardTermCfg(
+    func=mdp.stair_probe_stride_growth_reward,
+    weight=params.probe_stride_growth_weight,
   )
   cfg.rewards["shank_front_edge_clearance_penalty"] = RewardTermCfg(
     func=mdp.shank_front_edge_clearance_penalty,
@@ -725,16 +734,26 @@ def _configure_latent_observations(
         "ratchet_probe_increment_m": 0.05,
         "ratchet_first_collision_probe_push_m": 0.16,
         "ratchet_post_first_collision_probe_increment_m": 0.14,
+        "ratchet_post_first_collision_actual_stride_margin_m": (
+          params.rewards.probe_stride_actual_margin
+        ),
+        "ratchet_first_layer_stride_scale": (
+          params.rewards.probe_stride_first_layer_scale
+        ),
+        "ratchet_probe_reward_min_growth_m": params.rewards.probe_stride_min_growth,
+        "ratchet_probe_reward_target_tolerance_m": (
+          params.rewards.probe_stride_target_tolerance
+        ),
         "ratchet_no_hit_lower_margin_m": 0.0,
         "ratchet_interval_target_margin_m": 0.01,
         "ratchet_collision_margin_m": 0.02,
         "ratchet_toe_anchor_offset_m": 0.085,
-        "ratchet_backoff_step_m": 0.025,
+        "ratchet_backoff_step_m": 0.07,
         "ratchet_first_collision_backoff_step_m": 0.025,
-        "ratchet_backoff_margin_m": 0.015,
+        "ratchet_backoff_margin_m": 0.03,
         "ratchet_lock_margin_m": 0.005,
-        "ratchet_lock_stable_steps": 1,
-        "ratchet_lock_target_stable_enabled": True,
+        "ratchet_lock_stable_steps": 2,
+        "ratchet_lock_target_stable_enabled": False,
         "ratchet_lock_phase_correction_enabled": True,
         "ratchet_lock_phase_correction_gain": 0.60,
         "ratchet_lock_phase_deadband_m": 0.005,
@@ -749,6 +768,8 @@ def _configure_latent_observations(
         "ratchet_two_collision_interval_margin_m": 0.025,
         "ratchet_two_collision_stride_layers": 2.0,
         "ratchet_two_collision_min_layer_delta": 1,
+        "ratchet_two_collision_min_height_delta_m": 0.055,
+        "ratchet_second_collision_requires_up_step": True,
         "ratchet_two_collision_tread_min_m": 0.18,
         "ratchet_two_collision_tread_max_m": 0.42,
         "ratchet_anchor_collision_enabled": True,

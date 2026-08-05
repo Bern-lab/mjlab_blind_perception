@@ -141,6 +141,8 @@ The stair size switches are:
 - `--stair-levels`: number of low-to-high riser levels, default `10`
 - `--stair-height`: riser height in meters, default `0.15`
 - `--step-width`: stair tread/run width in meters, default `0.30`
+- `--step-widths`: run a tread-width sweep in one command, for example
+  `--step-widths 0.27 0.30 0.33`
 - `--platform-width`: square top platform width in meters, default `3.0`
 - `--flat-apron-width`: flat ground connected to the pyramid bottom, default `3.0`
 - `--terrain-border-width`: extra terrain-generator border around the tile, default `12.0`

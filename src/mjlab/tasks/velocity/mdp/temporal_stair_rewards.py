@@ -76,6 +76,8 @@ from .stair_geometry import (
   STAIR_ORACLE_ROOT_S_BY_FOOT_KEY,
   STAIR_ORACLE_TOE_S_BY_FOOT_KEY,
   STAIR_PHASE_KEY,
+  STAIR_PROBE_STRIDE_REWARD_EVENT_ID_KEY,
+  STAIR_PROBE_STRIDE_REWARD_KEY,
   STAIR_RISER_HEIGHT_LABEL_KEY,
   STAIR_SAME_FOOT_STRIDE_LABEL_KEY,
   STAIR_SEQUENCE_ID_KEY,
@@ -1317,8 +1319,8 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     stair_touchdown_height_tolerance: float = 0.08,
     stair_touchdown_lateral_margin: float = 0.03,
     stair_min_safe_stride: float = 0.10,
-    stair_max_safe_stride: float = 0.55,
-    stair_max_tracking_stride: float = 0.80,
+    stair_max_safe_stride: float = 0.85,
+    stair_max_tracking_stride: float = 0.85,
     stair_touchdown_lip_clearance: float = 0.02,
     stair_touchdown_lip_height_band: float = 0.06,
     safe_stride_containment_margin: float = 0.003,
@@ -3081,6 +3083,31 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
 
 class toe_step_riser_approach_penalty(toe_step_riser_slab_penalty):
   """Backward-compatible alias for the penalty-only stair entry term."""
+
+
+class stair_probe_stride_growth_reward:
+  """Consume the one-shot post-first-collision stride-growth reward signal."""
+
+  def __init__(self, cfg: RewardTermCfg, env) -> None:
+    del cfg
+    self._last_event_id = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
+
+  def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+    if env_ids is None:
+      env_ids = slice(None)
+    self._last_event_id[env_ids] = 0
+
+  def __call__(self, env) -> torch.Tensor:
+    reward = env.extras.get(STAIR_PROBE_STRIDE_REWARD_KEY)
+    event_id = env.extras.get(STAIR_PROBE_STRIDE_REWARD_EVENT_ID_KEY)
+    if not isinstance(reward, torch.Tensor) or not isinstance(event_id, torch.Tensor):
+      return torch.zeros(env.num_envs, device=env.device)
+
+    reward = reward.to(device=env.device, dtype=torch.float32)
+    event_id = event_id.to(device=env.device, dtype=torch.long)
+    new_event = event_id != self._last_event_id
+    self._last_event_id.copy_(event_id)
+    return torch.where(new_event, reward, torch.zeros_like(reward))
 
 
 def stair_skip_layer_penalty(env) -> torch.Tensor:
