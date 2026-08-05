@@ -62,6 +62,17 @@ FOOT_EVENT_LABEL_NAMES: tuple[str, ...] = (
   "right_toe_riser_hit",
 )
 
+FOOT_EVENT_LABEL_DIAGNOSTIC_NAMES: tuple[str, ...] = (
+  "left_raw_ground_contact",
+  "right_raw_ground_contact",
+  "left_toe_riser_contact",
+  "right_toe_riser_contact",
+  "left_vertical_force_support",
+  "right_vertical_force_support",
+  "left_toe_riser_vertical_support_conflict",
+  "right_toe_riser_vertical_support_conflict",
+)
+
 FootEventDetectorObsSchema = Literal["v1", "footprint_v2", "footprint_deploy_v3"]
 
 FOOTPRINT_V2_EXTRA_FEATURE_GROUPS: tuple[tuple[str, int], ...] = (
@@ -256,6 +267,37 @@ def _support_contact_from_env(
   return support_contact
 
 
+def _raw_ground_contact_from_env(env: ManagerBasedRlEnv) -> torch.Tensor:
+  return _tensor_extra(
+    env,
+    STAIR_CURRENT_GROUND_CONTACT_KEY,
+    (2,),
+    torch.bool,
+    False,
+  ).bool()
+
+
+def foot_event_label_diagnostics_from_env(env: ManagerBasedRlEnv) -> torch.Tensor:
+  """Return simulation-only label diagnostics for audit, not detector input."""
+  raw_contact = _raw_ground_contact_from_env(env)
+  toe_riser_contact = _toe_riser_contact_by_foot(env)
+  vertical_force_support = _support_force_mask_from_ground_sensor(env, raw_contact)
+  if vertical_force_support is None:
+    vertical_force_support = torch.zeros_like(raw_contact)
+  toe_riser_vertical_support_conflict = (
+    raw_contact & toe_riser_contact & vertical_force_support
+  )
+  return torch.cat(
+    (
+      raw_contact.float(),
+      toe_riser_contact.float(),
+      vertical_force_support.float(),
+      toe_riser_vertical_support_conflict.float(),
+    ),
+    dim=-1,
+  )
+
+
 def foot_event_labels_from_env(
   env: ManagerBasedRlEnv,
   *,
@@ -263,13 +305,7 @@ def foot_event_labels_from_env(
   previous_contact_valid: torch.Tensor,
 ) -> torch.Tensor:
   """Build detector labels from simulation-only support/toe contact evidence."""
-  raw_contact = _tensor_extra(
-    env,
-    STAIR_CURRENT_GROUND_CONTACT_KEY,
-    (2,),
-    torch.bool,
-    False,
-  ).bool()
+  raw_contact = _raw_ground_contact_from_env(env)
   contact = _support_contact_from_env(env, raw_contact=raw_contact)
   touchdown = contact & ~previous_contact & previous_contact_valid[:, None]
   toe_hit = _toe_riser_hit_by_foot(env)
@@ -905,6 +941,13 @@ def build_label_audit(arrays: dict[str, np.ndarray]) -> list[tuple[str, str]]:
     rate = count / max(float(labels.shape[0]), 1.0)
     rows.append((f"{name}_positive_count", f"{count:.0f}"))
     rows.append((f"{name}_positive_rate", f"{rate:.6g}"))
+  label_diagnostics = arrays.get("label_diagnostics")
+  if label_diagnostics is not None and label_diagnostics.size:
+    for index, name in enumerate(FOOT_EVENT_LABEL_DIAGNOSTIC_NAMES):
+      count = float(label_diagnostics[:, index].sum())
+      rate = count / max(float(label_diagnostics.shape[0]), 1.0)
+      rows.append((f"{name}_count", f"{count:.0f}"))
+      rows.append((f"{name}_rate", f"{rate:.6g}"))
   stair_support = arrays.get("stair_support")
   if stair_support is not None and labels.size:
     touchdown = labels[:, 2:4] > 0.5
@@ -972,6 +1015,7 @@ def write_dataset_outputs(
       input_schema=cfg.input_schema,
     ),
     "label_names": list(FOOT_EVENT_LABEL_NAMES),
+    "label_diagnostic_names": list(FOOT_EVENT_LABEL_DIAGNOSTIC_NAMES),
     "label_source": {
       "contact": (
         f"horizontal support contact from {STAIR_CURRENT_GROUND_CONTACT_KEY}, "
@@ -1139,6 +1183,7 @@ def run_export(task_id: str, cfg: ExportFootEventDetectorDatasetConfig) -> Path:
             torch.long,
             0,
           ).long(),
+          "label_diagnostics": foot_event_label_diagnostics_from_env(raw_env),
         },
       )
 

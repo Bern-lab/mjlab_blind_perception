@@ -385,13 +385,18 @@ height terms come from dot products with IMU gravity.
 
 The deploy runner must build the same feature order from its local state
 estimator, FK, command, action history, and joint encoder data. Keep the feature
-group metadata from the exported ONNX/JSON as the source of truth when wiring the
-C++ observation builder.
+group metadata from the exported `deployment_contract.json` as the source of
+truth when wiring the C++ observation builder.
 
 Training labels are still simulation-only: contact/touchdown are built from
 horizontal support contact, excluding toe-riser contact and using the ground
 contact sensor's vertical force when available. Those contact signals are never
-fed to the detector input.
+fed to the detector input. For footprint-only runs, replay buffer stair hard
+negatives are selected from touchdown-negative stair frames, so toe-riser hits
+without touchdown remain useful negative examples instead of being filtered out
+by the dummy toe labels. `label_audit.csv` also reports raw contact,
+toe-riser-contact, vertical-force-support, and toe-riser/vertical-support
+conflict counts for checking label contamination before a long training run.
 
 ## Collect Latents
 

@@ -6,6 +6,7 @@ import copy
 import csv
 import json
 import random
+import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -17,12 +18,14 @@ import torch.nn.functional as F
 import tyro
 from scripts.velocity_eval.export_foot_event_detector_dataset import (
   DEFAULT_STAGE2D_CHECKPOINT,
+  FOOT_EVENT_LABEL_DIAGNOSTIC_NAMES,
   FOOT_EVENT_LABEL_NAMES,
   FootEventDetectorObsSchema,
   foot_event_detector_obs,
   foot_event_input_feature_groups,
   foot_event_input_feature_scale_groups,
   foot_event_input_feature_scales,
+  foot_event_label_diagnostics_from_env,
   foot_event_labels_from_env,
   resolve_foot_event_detector_obs_dim,
 )
@@ -182,11 +185,23 @@ class OnlineFootEventReplayBuffer:
     soft_event_radius1_value: float,
     soft_event_radius2_value: float,
     device: torch.device,
+    stair_hard_negative_label_indices: tuple[int, ...] = (2, 3, 4, 5),
+    label_diagnostic_names: tuple[str, ...] = (),
   ) -> None:
     if capacity <= 0:
       raise ValueError("capacity must be positive.")
+    if not stair_hard_negative_label_indices:
+      raise ValueError("stair_hard_negative_label_indices must not be empty.")
+    if any(
+      index < 0 or index >= label_dim for index in stair_hard_negative_label_indices
+    ):
+      raise ValueError("stair_hard_negative_label_indices are outside label_dim.")
     self.capacity = int(capacity)
     self.device = device
+    self.stair_hard_negative_label_indices = tuple(
+      int(index) for index in stair_hard_negative_label_indices
+    )
+    self.label_diagnostic_names = tuple(label_diagnostic_names)
     self.obs_history = torch.empty(
       capacity,
       history_len,
@@ -215,6 +230,12 @@ class OnlineFootEventReplayBuffer:
     self.support_fraction = torch.empty(
       capacity,
       2,
+      dtype=torch.float32,
+      device=device,
+    )
+    self.label_diagnostics = torch.empty(
+      capacity,
+      len(self.label_diagnostic_names),
       dtype=torch.float32,
       device=device,
     )
@@ -274,12 +295,20 @@ class OnlineFootEventReplayBuffer:
     stair_support: torch.Tensor,
     support_fraction: torch.Tensor,
     footprint_anchor_w: torch.Tensor | None = None,
+    label_diagnostics: torch.Tensor | None = None,
   ) -> torch.Tensor:
     n = int(obs_history.shape[0])
     if n == 0:
       return torch.empty(0, dtype=torch.int64, device=self.device)
     if footprint_anchor_w is None:
       footprint_anchor_w = torch.zeros(n, 2, 3, dtype=torch.float32, device=self.device)
+    if label_diagnostics is None:
+      label_diagnostics = torch.zeros(
+        n,
+        len(self.label_diagnostic_names),
+        dtype=torch.float32,
+        device=self.device,
+      )
     if n >= self.capacity:
       start = n - self.capacity
       obs_history = obs_history[start:]
@@ -291,6 +320,7 @@ class OnlineFootEventReplayBuffer:
       stair_support = stair_support[start:]
       support_fraction = support_fraction[start:]
       footprint_anchor_w = footprint_anchor_w[start:]
+      label_diagnostics = label_diagnostics[start:]
       n = self.capacity
 
     first = min(n, self.capacity - self._write_pos)
@@ -309,6 +339,7 @@ class OnlineFootEventReplayBuffer:
       stair_support[:first],
       support_fraction[:first],
       footprint_anchor_w[:first],
+      label_diagnostics[:first],
     )
     if second > 0:
       write_indices.append(torch.arange(0, second, device=self.device))
@@ -323,6 +354,7 @@ class OnlineFootEventReplayBuffer:
         stair_support[first:],
         support_fraction[first:],
         footprint_anchor_w[first:],
+        label_diagnostics[first:],
       )
     indices = torch.cat(write_indices, dim=0).to(dtype=torch.int64)
     self._retroactively_soften_previous_events(
@@ -352,6 +384,7 @@ class OnlineFootEventReplayBuffer:
     stair_support: torch.Tensor,
     support_fraction: torch.Tensor,
     footprint_anchor_w: torch.Tensor,
+    label_diagnostics: torch.Tensor,
   ) -> None:
     self.obs_history[slc].copy_(obs_history.detach())
     self.labels[slc].copy_(labels.detach())
@@ -362,7 +395,10 @@ class OnlineFootEventReplayBuffer:
     self.footprint_anchor_w[slc].copy_(footprint_anchor_w.detach())
     self.stair_support[slc].copy_(stair_support.detach())
     self.support_fraction[slc].copy_(support_fraction.detach())
-    event_negative = labels[:, 2:6].amax(dim=1) <= 0.5
+    self.label_diagnostics[slc].copy_(label_diagnostics.detach())
+    event_negative = (
+      labels[:, list(self.stair_hard_negative_label_indices)].amax(dim=1) <= 0.5
+    )
     self.stair_hard_negative[slc].copy_(stair_support.any(dim=1) & event_negative)
     self.false_positive_hard_negative[slc] = False
     self.false_negative_hard_positive[slc] = False
@@ -596,6 +632,7 @@ class OnlineFootEventReplayBuffer:
       "footprint_anchor_w": self.footprint_anchor_w[:size].detach().cpu().numpy(),
       "stair_support": self.stair_support[:size].detach().cpu().numpy(),
       "support_fraction": self.support_fraction[:size].detach().cpu().numpy(),
+      "label_diagnostics": self.label_diagnostics[:size].detach().cpu().numpy(),
       "stair_hard_negative": self.stair_hard_negative[:size].detach().cpu().numpy(),
       "false_positive_hard_negative": (
         self.false_positive_hard_negative[:size].detach().cpu().numpy()
@@ -647,12 +684,28 @@ class OnlineFootEventReplayBuffer:
   def label_audit_rows(self, prefix: str) -> list[tuple[str, str]]:
     labels = self.labels[: self._size]
     rows = [(f"{prefix}_samples", str(self._size))]
+    rows.append(
+      (
+        f"{prefix}_stair_hard_negative_label_indices",
+        ",".join(str(index) for index in self.stair_hard_negative_label_indices),
+      )
+    )
     for index, name in enumerate(FOOT_EVENT_LABEL_NAMES):
       count = float(labels[:, index].sum().item()) if self._size else 0.0
       rows.append((f"{prefix}_{name}_positive_count", f"{count:.0f}"))
       rows.append(
         (
           f"{prefix}_{name}_positive_rate",
+          f"{count / max(float(self._size), 1.0):.6g}",
+        )
+      )
+    label_diagnostics = self.label_diagnostics[: self._size]
+    for index, name in enumerate(self.label_diagnostic_names):
+      count = float(label_diagnostics[:, index].sum().item()) if self._size else 0.0
+      rows.append((f"{prefix}_{name}_count", f"{count:.0f}"))
+      rows.append(
+        (
+          f"{prefix}_{name}_rate",
           f"{count / max(float(self._size), 1.0):.6g}",
         )
       )
@@ -2017,6 +2070,87 @@ def _write_label_audit(
     writer.writerows(val_buffer.label_audit_rows("val"))
 
 
+def _current_git_commit() -> str | None:
+  repo_root = Path(__file__).resolve().parents[2]
+  try:
+    return subprocess.check_output(
+      ["git", "rev-parse", "HEAD"],
+      cwd=repo_root,
+      text=True,
+      stderr=subprocess.DEVNULL,
+    ).strip()
+  except (OSError, subprocess.CalledProcessError):
+    return None
+
+
+def _deployment_contract_payload(
+  *,
+  task_id: str,
+  cfg: OnlineFootEventDetectorConfig,
+  obs_dim: int,
+  trained_label_indices: tuple[int, ...] | None,
+  stair_hard_negative_label_indices: tuple[int, ...],
+  best_deployment_thresholds: dict[str, float],
+  onnx_path: Path | None,
+) -> dict[str, Any]:
+  """Build a compact deploy-side contract for the exported detector."""
+  dummy_low_logit_indices = [4, 5] if cfg.footprint_only_model else []
+  if cfg.toe_riser_only_model:
+    dummy_low_logit_indices = [0, 1, 2, 3]
+  return {
+    "schema_version": 1,
+    "task_id": task_id,
+    "source_git_commit": _current_git_commit(),
+    "input_schema": cfg.input_schema,
+    "input_source": (
+      "body-frame FK, IMU projected gravity, command, gait phase, action, "
+      "joint position, and joint velocity"
+    ),
+    "obs_history_shape": [1, cfg.history_len, obs_dim],
+    "obs_dim": obs_dim,
+    "history_len": cfg.history_len,
+    "output_names": list(FOOT_EVENT_LABEL_NAMES),
+    "trained_label_indices": list(trained_label_indices)
+    if trained_label_indices is not None
+    else None,
+    "dummy_low_logit_indices": dummy_low_logit_indices,
+    "input_feature_groups": foot_event_input_feature_groups(
+      include_gait_phase=cfg.include_gait_phase,
+      input_schema=cfg.input_schema,
+    ),
+    "input_feature_scale_groups": foot_event_input_feature_scale_groups(
+      include_gait_phase=cfg.include_gait_phase,
+      input_schema=cfg.input_schema,
+    ),
+    "input_feature_scales": foot_event_input_feature_scales(
+      include_gait_phase=cfg.include_gait_phase,
+      input_schema=cfg.input_schema,
+    ),
+    "best_deployment_thresholds": best_deployment_thresholds,
+    "event_logic": {
+      "touchdown_contact_threshold": cfg.touchdown_contact_threshold,
+      "touchdown_contact_release_threshold": cfg.touchdown_contact_release_threshold,
+      "touchdown_cooldown_frames": cfg.touchdown_cooldown_frames,
+      "toe_hit_cooldown_frames": cfg.toe_hit_cooldown_frames,
+    },
+    "training_label_contract": {
+      "label_names": list(FOOT_EVENT_LABEL_NAMES),
+      "label_diagnostic_names": list(FOOT_EVENT_LABEL_DIAGNOSTIC_NAMES),
+      "stair_hard_negative_label_indices": list(stair_hard_negative_label_indices),
+    },
+    "reset_required_state": [
+      "obs_history_ring_buffer",
+      "previous_body_frame_fk_positions",
+      "previous_body_frame_fk_velocities",
+      "previous_base_angular_velocity",
+      "previous_action",
+      "touchdown_cooldown_state",
+      "contact_hysteresis_state",
+    ],
+    "onnx_path": str(onnx_path) if onnx_path is not None else None,
+  }
+
+
 def run_online_train(
   task_id: str,
   cfg: OnlineFootEventDetectorConfig,
@@ -2158,6 +2292,9 @@ def run_online_train(
     obs_dim=obs_dim,
     device=device,
   )
+  stair_hard_negative_label_indices = (
+    (2, 3) if cfg.footprint_only_model else (2, 3, 4, 5)
+  )
   train_buffer = OnlineFootEventReplayBuffer(
     capacity=cfg.train_buffer_capacity,
     history_len=cfg.history_len,
@@ -2169,6 +2306,8 @@ def run_online_train(
     soft_event_radius1_value=cfg.soft_event_radius1_value,
     soft_event_radius2_value=cfg.soft_event_radius2_value,
     device=device,
+    stair_hard_negative_label_indices=stair_hard_negative_label_indices,
+    label_diagnostic_names=FOOT_EVENT_LABEL_DIAGNOSTIC_NAMES,
   )
   val_buffer = OnlineFootEventReplayBuffer(
     capacity=cfg.val_buffer_capacity,
@@ -2181,6 +2320,8 @@ def run_online_train(
     soft_event_radius1_value=cfg.soft_event_radius1_value,
     soft_event_radius2_value=cfg.soft_event_radius2_value,
     device=device,
+    stair_hard_negative_label_indices=stair_hard_negative_label_indices,
+    label_diagnostic_names=FOOT_EVENT_LABEL_DIAGNOSTIC_NAMES,
   )
   model = FootEventDetectorGRU(
     obs_dim=obs_dim,
@@ -2350,6 +2491,7 @@ def run_online_train(
         previous_contact=previous_contact,
         previous_contact_valid=previous_contact_valid,
       )
+      label_diagnostics = foot_event_label_diagnostics_from_env(raw_env)
       train_labels = _soften_labels_from_recent_events(
         labels,
         recent_event_age,
@@ -2386,6 +2528,7 @@ def run_online_train(
           stair_support=stair_support[ids],
           support_fraction=support_fraction[ids],
           footprint_anchor_w=footprint_anchor_w[ids],
+          label_diagnostics=label_diagnostics[ids],
         )
 
       current_contact = labels[:, 0:2].bool()
@@ -2663,11 +2806,27 @@ def run_online_train(
     for key, value in best_val_metrics.items()
     if key.endswith(("_deploy_best_threshold", "_deploy_high_recall_threshold"))
   }
+  onnx_path = output_dir / "best.onnx" if cfg.export_onnx else None
+  deployment_contract = _deployment_contract_payload(
+    task_id=task_id,
+    cfg=cfg,
+    obs_dim=obs_dim,
+    trained_label_indices=train_label_indices,
+    stair_hard_negative_label_indices=stair_hard_negative_label_indices,
+    best_deployment_thresholds=best_deployment_thresholds,
+    onnx_path=onnx_path,
+  )
+  with (output_dir / "deployment_contract.json").open("w", encoding="utf-8") as stream:
+    json.dump(deployment_contract, stream, indent=2, sort_keys=True)
+    stream.write("\n")
+
   payload: dict[str, Any] = {
     "config": asdict(cfg),
     "task_id": task_id,
     "checkpoint_path": str(checkpoint_path),
     "label_names": list(FOOT_EVENT_LABEL_NAMES),
+    "label_diagnostic_names": list(FOOT_EVENT_LABEL_DIAGNOSTIC_NAMES),
+    "stair_hard_negative_label_indices": list(stair_hard_negative_label_indices),
     "input_feature_groups": foot_event_input_feature_groups(
       include_gait_phase=cfg.include_gait_phase,
       input_schema=cfg.input_schema,
@@ -2730,7 +2889,8 @@ def run_online_train(
         sum(parameter.numel() for parameter in model.parameters())
       ),
     },
-    "onnx_path": str(output_dir / "best.onnx") if cfg.export_onnx else None,
+    "onnx_path": str(onnx_path) if onnx_path is not None else None,
+    "deployment_contract_path": str(output_dir / "deployment_contract.json"),
   }
   with (output_dir / "metrics.json").open("w", encoding="utf-8") as stream:
     json.dump(payload, stream, indent=2, sort_keys=True)

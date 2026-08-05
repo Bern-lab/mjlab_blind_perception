@@ -15,6 +15,8 @@ Added
   a 134-dimensional body-frame proprioceptive/FK observation schema, fixed
   deploy-side input scaling metadata, horizontal-support touchdown labels, and
   six-logit compatible dummy toe outputs.
+- Added footprint-detector deployment contracts, label-conflict audits, and
+  touchdown-only stair hard-negative sampling for footprint-only training.
 - Added Stage 2D touchdown timing/footprint-anchor validation metrics and
   touchdown false-positive hard-negative mining for footprint detector training.
 - Added ``STAIRS_TERRAINS_CFG`` terrain preset for progressive stair

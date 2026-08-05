@@ -7,13 +7,16 @@ from typing import Any, cast
 import numpy as np
 import torch
 from scripts.velocity_eval.export_foot_event_detector_dataset import (
+  FOOT_EVENT_LABEL_DIAGNOSTIC_NAMES,
   FOOT_EVENT_LABEL_NAMES,
   FootEventDetectorDatasetBuilder,
+  build_label_audit,
   foot_event_detector_obs,
   foot_event_detector_obs_dim,
   foot_event_input_feature_groups,
   foot_event_input_feature_scale_groups,
   foot_event_input_feature_scales,
+  foot_event_label_diagnostics_from_env,
   foot_event_labels_from_env,
   resolve_foot_event_detector_obs_dim,
 )
@@ -39,6 +42,7 @@ from scripts.velocity_eval.train_foot_event_detector_online import (
   _configure_footprint_only_model,
   _configure_toe_only_finetune,
   _configure_toe_riser_only_model,
+  _deployment_contract_payload,
   _deployment_event_metrics,
   _metric_improved,
   _mine_false_positive_touchdown_hard_negatives,
@@ -182,6 +186,39 @@ def test_foot_event_labels_use_vertical_support_force_when_available() -> None:
   )
 
   assert labels[0, 0:4].tolist() == [1.0, 0.0, 1.0, 0.0]
+
+
+def test_foot_event_label_diagnostics_report_riser_support_conflicts() -> None:
+  env: Any = SimpleNamespace(
+    num_envs=1,
+    device=torch.device("cpu"),
+    extras={
+      STAIR_CURRENT_GROUND_CONTACT_KEY: torch.tensor([[True, True]]),
+      TOE_RISER_CONTACT_BY_FOOT_KEY: torch.tensor([[True, False]]),
+    },
+    scene={
+      "feet_ground_contact": SimpleNamespace(
+        data=SimpleNamespace(force=torch.tensor([[[0.0, 0.0, 20.0], [0.0, 0.0, 5.0]]]))
+      )
+    },
+  )
+
+  diagnostics = foot_event_label_diagnostics_from_env(cast(Any, env))
+
+  assert diagnostics.shape == (1, len(FOOT_EVENT_LABEL_DIAGNOSTIC_NAMES))
+  assert diagnostics[0].tolist() == [1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0]
+
+  audit = dict(
+    build_label_audit(
+      {
+        "event_label": torch.zeros(1, len(FOOT_EVENT_LABEL_NAMES)).numpy(),
+        "episode_id": torch.zeros(1, dtype=torch.int64).numpy(),
+        "obs_history": torch.zeros(1, 1, 1).numpy(),
+        "label_diagnostics": diagnostics.numpy(),
+      }
+    )
+  )
+  assert audit["left_toe_riser_vertical_support_conflict_count"] == "1"
 
 
 def test_touchdown_label_is_suppressed_until_previous_contact_is_valid() -> None:
@@ -391,6 +428,28 @@ def test_footprint_detector_v3_training_preset_pins_compatible_layout() -> None:
   assert not cfg.mine_false_negative_toe_hard_positives
   assert cfg.baseline_toe_metric == ""
   assert _should_mine_touchdown_false_positive_hard_negatives(cfg)
+
+
+def test_footprint_deployment_contract_marks_dummy_toe_outputs() -> None:
+  cfg = _with_footprint_v3_defaults(OnlineFootEventDetectorConfig())
+
+  contract = _deployment_contract_payload(
+    task_id="unit-task",
+    cfg=cfg,
+    obs_dim=134,
+    trained_label_indices=(0, 1, 2, 3),
+    stair_hard_negative_label_indices=(2, 3),
+    best_deployment_thresholds={"left_touchdown_deploy_high_recall_threshold": 0.4},
+    onnx_path=None,
+  )
+
+  assert contract["obs_history_shape"] == [1, 16, 134]
+  assert contract["trained_label_indices"] == [0, 1, 2, 3]
+  assert contract["dummy_low_logit_indices"] == [4, 5]
+  assert contract["training_label_contract"]["stair_hard_negative_label_indices"] == [
+    2,
+    3,
+  ]
 
 
 def test_footprint_training_loss_keeps_event_terms_on_touchdown_only() -> None:
@@ -1049,6 +1108,55 @@ def test_online_replay_buffer_samples_rare_events() -> None:
   )
 
   assert sampled_labels[:, 2:6].sum().item() > 0.0
+
+
+def test_footprint_replay_buffer_stair_hard_negatives_ignore_toe_labels() -> None:
+  labels = torch.zeros(3, len(FOOT_EVENT_LABEL_NAMES))
+  labels[0, 4] = 1.0
+  labels[1, 2] = 1.0
+  stair_support = torch.ones(3, 2, dtype=torch.bool)
+
+  generic = OnlineFootEventReplayBuffer(
+    capacity=3,
+    history_len=1,
+    obs_dim=1,
+    label_dim=len(FOOT_EVENT_LABEL_NAMES),
+    num_envs=1,
+    soft_touchdown_radius=0,
+    soft_toe_hit_radius=0,
+    soft_event_radius1_value=0.7,
+    soft_event_radius2_value=0.4,
+    device=torch.device("cpu"),
+  )
+  footprint = OnlineFootEventReplayBuffer(
+    capacity=3,
+    history_len=1,
+    obs_dim=1,
+    label_dim=len(FOOT_EVENT_LABEL_NAMES),
+    num_envs=1,
+    soft_touchdown_radius=0,
+    soft_toe_hit_radius=0,
+    soft_event_radius1_value=0.7,
+    soft_event_radius2_value=0.4,
+    device=torch.device("cpu"),
+    stair_hard_negative_label_indices=(2, 3),
+  )
+  common = {
+    "obs_history": torch.zeros(3, 1, 1),
+    "labels": labels,
+    "train_labels": labels.clone(),
+    "episode_id": torch.zeros(3, dtype=torch.int64),
+    "frame_idx": torch.arange(3, dtype=torch.int64),
+    "env_id": torch.zeros(3, dtype=torch.int64),
+    "stair_support": stair_support,
+    "support_fraction": torch.zeros(3, 2),
+  }
+
+  generic.add(**common)
+  footprint.add(**common)
+
+  assert generic.snapshot()["stair_hard_negative"].tolist() == [False, False, True]
+  assert footprint.snapshot()["stair_hard_negative"].tolist() == [True, False, True]
 
 
 def test_online_replay_buffer_retroactively_softens_event_neighbors() -> None:
