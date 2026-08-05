@@ -426,6 +426,7 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert foot_event_params["ratchet_backoff_step_m"] == 0.07
   assert foot_event_params["ratchet_first_collision_backoff_step_m"] == 0.025
   assert foot_event_params["ratchet_backoff_margin_m"] == 0.03
+  assert foot_event_params["ratchet_confirmed_collision_recovery_margin_m"] == 0.05
   assert foot_event_params["ratchet_lock_margin_m"] == 0.005
   assert foot_event_params["ratchet_lock_stable_steps"] == 2
   assert foot_event_params["ratchet_lock_target_stable_enabled"] is False
@@ -437,9 +438,14 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert foot_event_params["ratchet_two_collision_stride_layers"] == 2.0
   assert foot_event_params["ratchet_two_collision_min_layer_delta"] == 1
   assert foot_event_params["ratchet_two_collision_min_height_delta_m"] == 0.055
+  assert foot_event_params["ratchet_two_collision_nominal_riser_height_m"] == 0.15
+  assert foot_event_params["ratchet_two_collision_height_layer_tolerance_m"] == 0.06
+  assert foot_event_params["ratchet_two_collision_use_height_layers"] is True
+  assert foot_event_params["ratchet_two_collision_lower_cross_margin_m"] == 0.10
+  assert foot_event_params["ratchet_two_collision_upper_cross_margin_m"] == 0.08
   assert foot_event_params["ratchet_second_collision_requires_up_step"] is True
-  assert foot_event_params["ratchet_two_collision_tread_min_m"] == 0.18
-  assert foot_event_params["ratchet_two_collision_tread_max_m"] == 0.42
+  assert foot_event_params["ratchet_two_collision_tread_min_m"] == 0.23
+  assert foot_event_params["ratchet_two_collision_tread_max_m"] == 0.37
   assert foot_event_params["ratchet_lower_target_lag_margin_m"] == 0.0
   assert foot_event_params["ratchet_same_foot_stride_guard_layers"] == 2.0
   assert foot_event_params["ratchet_same_foot_stride_guard_margin_m"] == 0.04
