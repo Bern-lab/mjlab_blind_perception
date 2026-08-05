@@ -38,6 +38,7 @@ from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg
 from mjlab.tasks.velocity.mdp.observations import (
+  _G1_LEG_JOINT_NAMES,
   _body_frame_foot_positions,
   _get_leg_joint_info,
   phase,
@@ -60,7 +61,7 @@ FOOT_EVENT_LABEL_NAMES: tuple[str, ...] = (
   "right_toe_riser_hit",
 )
 
-FootEventDetectorObsSchema = Literal["v1", "footprint_v2"]
+FootEventDetectorObsSchema = Literal["v1", "footprint_v2", "footprint_deploy_v3"]
 
 FOOTPRINT_V2_EXTRA_FEATURE_GROUPS: tuple[tuple[str, int], ...] = (
   ("left_heel_vel_body", 3),
@@ -78,6 +79,28 @@ FOOTPRINT_V2_EXTRA_FEATURE_GROUPS: tuple[tuple[str, int], ...] = (
   ("action_delta_leg", 12),
 )
 """Additional deployable kinematic inputs for the footprint/touchdown detector."""
+
+FOOTPRINT_DEPLOY_V3_FEATURE_GROUPS: tuple[tuple[str, int], ...] = (
+  ("projected_gravity", 3),
+  ("base_ang_vel", 3),
+  ("base_ang_vel_delta", 3),
+  ("command_xyz", 3),
+  ("left_endpoint_pos_body", 9),
+  ("left_gravity_height", 5),
+  ("left_endpoint_vel_body", 9),
+  ("left_gravity_vertical_velocity", 4),
+  ("left_landing_shape", 6),
+  ("left_action_context", 12),
+  ("left_motor_response", 12),
+  ("right_endpoint_pos_body", 9),
+  ("right_gravity_height", 5),
+  ("right_endpoint_vel_body", 9),
+  ("right_gravity_vertical_velocity", 4),
+  ("right_landing_shape", 6),
+  ("right_action_context", 12),
+  ("right_motor_response", 12),
+)
+"""Footprint-only proprioceptive schema that does not embed the legacy 91-D obs."""
 
 
 @dataclass(frozen=True)
@@ -162,9 +185,10 @@ def foot_event_labels_from_env(
 
 
 def _validate_input_schema(input_schema: str) -> FootEventDetectorObsSchema:
-  if input_schema not in ("v1", "footprint_v2"):
+  valid_schemas = ("v1", "footprint_v2", "footprint_deploy_v3")
+  if input_schema not in valid_schemas:
     raise ValueError(
-      f"input_schema must be 'v1' or 'footprint_v2', got {input_schema!r}."
+      f"input_schema must be one of {valid_schemas}, got {input_schema!r}."
     )
   return cast(FootEventDetectorObsSchema, input_schema)
 
@@ -176,6 +200,9 @@ def foot_event_detector_obs_dim(
 ) -> int:
   """Return deployable event-detector observation width."""
   schema = _validate_input_schema(input_schema)
+  if schema == "footprint_deploy_v3":
+    dim = sum(width for _name, width in FOOTPRINT_DEPLOY_V3_FEATURE_GROUPS)
+    return dim + (2 if include_gait_phase else 0)
   dim = input_obs_dim() + (2 if include_gait_phase else 0)
   if schema == "footprint_v2":
     dim += sum(width for _name, width in FOOTPRINT_V2_EXTRA_FEATURE_GROUPS)
@@ -251,6 +278,29 @@ def _velocity_and_delta_from_cache(
   env.extras[position_key] = position.detach().clone()
   env.extras[velocity_key] = velocity.detach().clone()
   return velocity, velocity_delta
+
+
+def _delta_from_cache(
+  env: ManagerBasedRlEnv,
+  *,
+  value: torch.Tensor,
+  key: str,
+  reset_mask: torch.Tensor | None,
+) -> torch.Tensor:
+  zeros = torch.zeros_like(value)
+  reset = (
+    torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    if reset_mask is None
+    else reset_mask.to(device=env.device, dtype=torch.bool)
+  ).reshape(env.num_envs)
+  previous = env.extras.get(key)
+  if not isinstance(previous, torch.Tensor):
+    env.extras[key] = value.detach().clone()
+    return zeros
+  delta = value - previous.to(device=env.device, dtype=value.dtype)
+  delta = torch.where(reset[:, None], zeros, delta)
+  env.extras[key] = value.detach().clone()
+  return delta
 
 
 def _footprint_v2_extra_obs(
@@ -341,6 +391,176 @@ def _footprint_v2_extra_obs(
   ).to(dtype=latent.dtype)
 
 
+def _footprint_deploy_v3_obs(
+  env: ManagerBasedRlEnv,
+  *,
+  include_gait_phase: bool,
+  gait_period: float,
+  command_name: str,
+  reset_mask: torch.Tensor | None,
+) -> torch.Tensor:
+  robot = env.scene["robot"]
+  dtype = torch.float32
+  device = env.device
+  left_toe, right_toe, left_heel, right_heel = _body_frame_foot_positions(env)
+  left_center = 0.5 * (left_toe + left_heel)
+  right_center = 0.5 * (right_toe + right_heel)
+
+  projected_gravity = robot.data.projected_gravity_b.to(device=device, dtype=dtype)
+  base_ang_vel = robot.data.root_link_ang_vel_b.to(device=device, dtype=dtype)
+  base_ang_vel_delta = _delta_from_cache(
+    env,
+    value=base_ang_vel,
+    key="footprint_deploy_v3_prev_base_ang_vel",
+    reset_mask=reset_mask,
+  )
+  up_axis_body = -projected_gravity / projected_gravity.norm(
+    dim=-1,
+    keepdim=True,
+  ).clamp_min(1.0e-6)
+
+  command = torch.cat(
+    (
+      _command_column(env, command_name=command_name, column=0, dtype=dtype),
+      _command_column(env, command_name=command_name, column=1, dtype=dtype),
+      _command_column(env, command_name=command_name, column=2, dtype=dtype),
+    ),
+    dim=-1,
+  )
+
+  def point_velocity(name: str, point: torch.Tensor) -> torch.Tensor:
+    velocity, _delta = _velocity_and_delta_from_cache(
+      env,
+      position=point,
+      position_key=f"footprint_deploy_v3_prev_{name}_pos_body",
+      velocity_key=f"footprint_deploy_v3_prev_{name}_vel_body",
+      reset_mask=reset_mask,
+    )
+    return velocity.to(dtype=dtype)
+
+  left_toe_vel = point_velocity("left_toe", left_toe)
+  left_heel_vel = point_velocity("left_heel", left_heel)
+  left_center_vel = point_velocity("left_center", left_center)
+  right_toe_vel = point_velocity("right_toe", right_toe)
+  right_heel_vel = point_velocity("right_heel", right_heel)
+  right_center_vel = point_velocity("right_center", right_center)
+
+  leg_joint_indices, leg_action_indices, default_joint_pos = _get_leg_joint_info(env)
+  current_action = env.action_manager.action[:, leg_action_indices].to(dtype=dtype)
+  action_delta = _delta_from_cache(
+    env,
+    value=current_action,
+    key="footprint_deploy_v3_prev_action_leg",
+    reset_mask=reset_mask,
+  )
+  from mjlab.asset_zoo.robots import G1_ACTION_SCALE
+
+  action_scale = torch.tensor(
+    [G1_ACTION_SCALE.get(name, 0.25) for name in _G1_LEG_JOINT_NAMES],
+    dtype=dtype,
+    device=device,
+  )
+  joint_pos = robot.data.joint_pos[:, leg_joint_indices].to(dtype=dtype)
+  joint_vel = robot.data.joint_vel[:, leg_joint_indices].to(dtype=dtype)
+  tracking_error = default_joint_pos.to(dtype=dtype) + action_scale * current_action
+  tracking_error = tracking_error - joint_pos
+
+  def vertical(point: torch.Tensor) -> torch.Tensor:
+    return (point.to(dtype=dtype) * up_axis_body).sum(dim=-1, keepdim=True)
+
+  def vertical_velocity(velocity: torch.Tensor) -> torch.Tensor:
+    return (velocity.to(dtype=dtype) * up_axis_body).sum(dim=-1, keepdim=True)
+
+  def per_foot_features(
+    *,
+    toe: torch.Tensor,
+    heel: torch.Tensor,
+    center: torch.Tensor,
+    toe_vel: torch.Tensor,
+    heel_vel: torch.Tensor,
+    center_vel: torch.Tensor,
+    action_slice: slice,
+  ) -> torch.Tensor:
+    toe_z = vertical(toe)
+    heel_z = vertical(heel)
+    center_z = vertical(center)
+    min_z = torch.minimum(toe_z, heel_z)
+    toe_heel_z_gap = toe_z - heel_z
+    toe_vz = vertical_velocity(toe_vel)
+    heel_vz = vertical_velocity(heel_vel)
+    center_vz = vertical_velocity(center_vel)
+    min_vz = torch.minimum(toe_vz, heel_vz)
+    center_speed = center_vel.norm(dim=-1, keepdim=True)
+    downward_speed = (-center_vz).clamp_min(0.0)
+    sole_vec = toe.to(dtype=dtype) - heel.to(dtype=dtype)
+    landing_shape = torch.cat(
+      (
+        sole_vec,
+        toe_heel_z_gap.abs(),
+        center_speed,
+        downward_speed,
+      ),
+      dim=-1,
+    )
+    return torch.cat(
+      (
+        toe.to(dtype=dtype),
+        heel.to(dtype=dtype),
+        center.to(dtype=dtype),
+        toe_z,
+        heel_z,
+        center_z,
+        min_z,
+        toe_heel_z_gap,
+        toe_vel,
+        heel_vel,
+        center_vel,
+        toe_vz,
+        heel_vz,
+        center_vz,
+        min_vz,
+        landing_shape,
+        current_action[:, action_slice],
+        action_delta[:, action_slice],
+        tracking_error[:, action_slice],
+        joint_vel[:, action_slice],
+      ),
+      dim=-1,
+    )
+
+  parts = [
+    projected_gravity,
+    base_ang_vel,
+    base_ang_vel_delta,
+    command,
+  ]
+  if include_gait_phase:
+    parts.append(phase(env, gait_period, command_name).to(dtype=dtype))
+  parts.extend(
+    [
+      per_foot_features(
+        toe=left_toe,
+        heel=left_heel,
+        center=left_center,
+        toe_vel=left_toe_vel,
+        heel_vel=left_heel_vel,
+        center_vel=left_center_vel,
+        action_slice=slice(0, 6),
+      ),
+      per_foot_features(
+        toe=right_toe,
+        heel=right_heel,
+        center=right_center,
+        toe_vel=right_toe_vel,
+        heel_vel=right_heel_vel,
+        center_vel=right_center_vel,
+        action_slice=slice(6, 12),
+      ),
+    ]
+  )
+  return torch.cat(parts, dim=-1)
+
+
 def foot_event_detector_obs(
   obs: Any,
   env: ManagerBasedRlEnv,
@@ -353,6 +573,14 @@ def foot_event_detector_obs(
 ) -> torch.Tensor:
   """Return deployable detector input features for the current frame."""
   schema = _validate_input_schema(input_schema)
+  if schema == "footprint_deploy_v3":
+    return _footprint_deploy_v3_obs(
+      env,
+      include_gait_phase=include_gait_phase,
+      gait_period=gait_period,
+      command_name=command_name,
+      reset_mask=reset_mask,
+    )
   latent = stage2a_base_latent_obs(obs)
   parts = [latent]
   if include_gait_phase:
@@ -376,6 +604,15 @@ def foot_event_input_feature_groups(
 ) -> list[dict[str, int | str]]:
   """Return detector input schema metadata."""
   schema = _validate_input_schema(input_schema)
+  if schema == "footprint_deploy_v3":
+    groups = [
+      {"name": name, "width": width}
+      for name, width in FOOTPRINT_DEPLOY_V3_FEATURE_GROUPS
+    ]
+    if include_gait_phase:
+      groups.insert(4, {"name": "gait_phase_sin", "width": 1})
+      groups.insert(5, {"name": "gait_phase_cos", "width": 1})
+    return groups
   groups = [{"name": name, "width": width} for name, width in INPUT_FEATURE_GROUPS]
   if include_gait_phase:
     groups.append({"name": "gait_phase_sin", "width": 1})
@@ -549,12 +786,16 @@ def write_dataset_outputs(
     "policy_frozen": True,
     "config": asdict(cfg),
     "input_source": (
-      "observations['latent'] / stair_latent_obs"
-      + (" + gait_phase" if cfg.include_gait_phase else "")
-      + (
-        " + footprint_v2 deployable kinematics"
-        if cfg.input_schema == "footprint_v2"
-        else ""
+      "footprint_deploy_v3 proprioceptive FK/IMU/action features"
+      if cfg.input_schema == "footprint_deploy_v3"
+      else (
+        "observations['latent'] / stair_latent_obs"
+        + (" + gait_phase" if cfg.include_gait_phase else "")
+        + (
+          " + footprint_v2 deployable kinematics"
+          if cfg.input_schema == "footprint_v2"
+          else ""
+        )
       )
     ),
     "input_feature_groups": foot_event_input_feature_groups(

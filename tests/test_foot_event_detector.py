@@ -31,6 +31,7 @@ from scripts.velocity_eval.train_foot_event_detector import (
   sweep_deployment_event_thresholds,
 )
 from scripts.velocity_eval.train_foot_event_detector_online import (
+  OnlineFootEventDetectorConfig,
   OnlineFootEventReplayBuffer,
   _baseline_guard_passed,
   _configure_footprint_only_model,
@@ -39,6 +40,12 @@ from scripts.velocity_eval.train_foot_event_detector_online import (
   _deployment_event_metrics,
   _metric_improved,
   _mine_false_positive_touchdown_hard_negatives,
+)
+from scripts.velocity_eval.train_footprint_detector_v3 import (
+  DEFAULT_OUTPUT_DIR as FOOTPRINT_V3_DEFAULT_OUTPUT_DIR,
+)
+from scripts.velocity_eval.train_footprint_detector_v3 import (
+  _with_footprint_v3_defaults,
 )
 
 from mjlab.tasks.velocity.mdp.observations import _G1_LEG_JOINT_NAMES
@@ -249,6 +256,67 @@ def test_footprint_v2_schema_adds_deployable_timing_features() -> None:
   ]
 
 
+def test_footprint_deploy_v3_schema_is_independent_of_legacy_latent() -> None:
+  groups = foot_event_input_feature_groups(
+    include_gait_phase=True,
+    input_schema="footprint_deploy_v3",
+  )
+  names = [str(group["name"]) for group in groups]
+  widths = [int(group["width"]) for group in groups]
+
+  assert (
+    foot_event_detector_obs_dim(
+      include_gait_phase=False,
+      input_schema="footprint_deploy_v3",
+    )
+    == 126
+  )
+  assert (
+    foot_event_detector_obs_dim(
+      include_gait_phase=True,
+      input_schema="footprint_deploy_v3",
+    )
+    == 128
+  )
+  assert (
+    resolve_foot_event_detector_obs_dim(
+      None,
+      include_gait_phase=True,
+      input_schema="footprint_deploy_v3",
+    )
+    == 128
+  )
+  assert sum(widths) == 128
+  assert names[:6] == [
+    "projected_gravity",
+    "base_ang_vel",
+    "base_ang_vel_delta",
+    "command_xyz",
+    "gait_phase_sin",
+    "gait_phase_cos",
+  ]
+  assert "previous_action_leg" not in names
+  assert "left_action_context" in names
+  assert "right_motor_response" in names
+
+
+def test_footprint_detector_v3_training_preset_pins_compatible_layout() -> None:
+  cfg = _with_footprint_v3_defaults(OnlineFootEventDetectorConfig(progress=False))
+
+  assert cfg.output_dir == FOOTPRINT_V3_DEFAULT_OUTPUT_DIR
+  assert cfg.input_schema == "footprint_deploy_v3"
+  assert cfg.include_gait_phase
+  assert cfg.expected_obs_dim == 128
+  assert cfg.footprint_only_model
+  assert not cfg.toe_only_finetune
+  assert not cfg.toe_riser_only_model
+  assert cfg.history_len == 24
+  assert cfg.frame_hidden_dim == 256
+  assert cfg.recurrent_hidden_dim == 128
+  assert cfg.head_hidden_dim == 64
+  assert cfg.selection_metric == "high_recall_footprint_score"
+
+
 def test_footprint_v2_obs_computes_reset_safe_heel_and_action_features() -> None:
   num_envs = 2
   device = torch.device("cpu")
@@ -348,6 +416,143 @@ def test_footprint_v2_obs_computes_reset_safe_heel_and_action_features() -> None
   torch.testing.assert_close(slow_latent_obs[:, :91], latent)
   assert slow_latent_obs[:, 91:93].abs().max().item() <= 1.0
   assert slow_latent_obs[:, 93:].abs().max().item() < 7.0
+
+
+def test_footprint_deploy_v3_obs_uses_deployable_fk_imu_and_action_features() -> None:
+  num_envs = 2
+  device = torch.device("cpu")
+  site_pos_w = torch.tensor(
+    [
+      [
+        [0.20, 0.10, 0.00],
+        [0.22, -0.10, 0.01],
+        [0.00, 0.10, -0.02],
+        [0.02, -0.10, -0.03],
+      ],
+      [
+        [0.30, 0.10, 0.01],
+        [0.32, -0.10, 0.02],
+        [0.10, 0.10, -0.01],
+        [0.12, -0.10, -0.02],
+      ],
+    ],
+    dtype=torch.float32,
+  )
+  joint_count = len(_G1_LEG_JOINT_NAMES)
+  action = torch.zeros(num_envs, joint_count)
+  action[:, 0] = 0.25
+  command = torch.tensor([[0.5, 0.2, -0.1], [0.3, -0.4, 0.6]])
+  robot = SimpleNamespace(
+    site_names=["left_toe", "right_toe", "left_heel", "right_heel"],
+    joint_names=list(_G1_LEG_JOINT_NAMES),
+    data=SimpleNamespace(
+      root_link_pos_w=torch.zeros(num_envs, 3),
+      root_link_quat_w=torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(num_envs, 1),
+      site_pos_w=site_pos_w,
+      projected_gravity_b=torch.tensor([[0.0, 0.0, -1.0]]).repeat(num_envs, 1),
+      root_link_ang_vel_b=torch.tensor([[0.10, -0.20, 0.30]]).repeat(
+        num_envs,
+        1,
+      ),
+      default_joint_pos=torch.zeros(num_envs, joint_count),
+      joint_pos=torch.zeros(num_envs, joint_count),
+      joint_vel=torch.arange(
+        num_envs * joint_count,
+        dtype=torch.float32,
+      ).reshape(num_envs, joint_count)
+      * 0.01,
+    ),
+  )
+  env: Any = SimpleNamespace(
+    num_envs=num_envs,
+    device=device,
+    step_dt=0.02,
+    episode_length_buf=torch.arange(num_envs),
+    extras={},
+    scene={"robot": robot},
+    action_manager=SimpleNamespace(
+      action=action,
+      total_action_dim=joint_count,
+    ),
+    command_manager=SimpleNamespace(get_command=lambda _name: command),
+  )
+
+  first = foot_event_detector_obs(
+    {},
+    cast(Any, env),
+    input_schema="footprint_deploy_v3",
+    include_gait_phase=True,
+    gait_period=0.6,
+    command_name="twist",
+    reset_mask=torch.ones(num_envs, dtype=torch.bool),
+  )
+
+  groups = foot_event_input_feature_groups(
+    include_gait_phase=True,
+    input_schema="footprint_deploy_v3",
+  )
+  offset = 0
+  slices: dict[str, slice] = {}
+  for group in groups:
+    width = int(group["width"])
+    slices[str(group["name"])] = slice(offset, offset + width)
+    offset += width
+
+  assert first.shape == (num_envs, 128)
+  torch.testing.assert_close(
+    first[:, slices["projected_gravity"]], robot.data.projected_gravity_b
+  )
+  torch.testing.assert_close(
+    first[:, slices["base_ang_vel"]], robot.data.root_link_ang_vel_b
+  )
+  torch.testing.assert_close(
+    first[:, slices["base_ang_vel_delta"]],
+    torch.zeros(num_envs, 3),
+  )
+  torch.testing.assert_close(first[:, slices["command_xyz"]], command)
+
+  left_endpoint = first[:, slices["left_endpoint_pos_body"]]
+  torch.testing.assert_close(left_endpoint[:, 0:3], site_pos_w[:, 0])
+  torch.testing.assert_close(left_endpoint[:, 3:6], site_pos_w[:, 2])
+  torch.testing.assert_close(
+    left_endpoint[:, 6:9], 0.5 * (site_pos_w[:, 0] + site_pos_w[:, 2])
+  )
+  left_heights = first[:, slices["left_gravity_height"]]
+  torch.testing.assert_close(
+    left_heights[0], torch.tensor([0.0, -0.02, -0.01, -0.02, 0.02])
+  )
+  left_action_context = first[:, slices["left_action_context"]]
+  torch.testing.assert_close(left_action_context[:, 0], action[:, 0])
+  torch.testing.assert_close(left_action_context[:, 6:12], torch.zeros(num_envs, 6))
+  left_motor_response = first[:, slices["left_motor_response"]]
+  torch.testing.assert_close(left_motor_response[:, 6:12], robot.data.joint_vel[:, :6])
+
+  robot.data.site_pos_w = site_pos_w + torch.tensor([0.02, 0.0, 0.0])
+  robot.data.root_link_ang_vel_b = robot.data.root_link_ang_vel_b + torch.tensor(
+    [0.05, 0.0, -0.10]
+  )
+  env.action_manager.action[:, 0] += 0.40
+  second = foot_event_detector_obs(
+    {"latent": torch.full((num_envs, 173), 70.0)},
+    cast(Any, env),
+    input_schema="footprint_deploy_v3",
+    include_gait_phase=True,
+    gait_period=0.6,
+    command_name="twist",
+    reset_mask=torch.zeros(num_envs, dtype=torch.bool),
+  )
+
+  torch.testing.assert_close(
+    second[:, slices["base_ang_vel_delta"]],
+    torch.tensor([[0.05, 0.0, -0.10]]).repeat(num_envs, 1),
+  )
+  left_endpoint_vel = second[:, slices["left_endpoint_vel_body"]]
+  torch.testing.assert_close(left_endpoint_vel[:, [0, 3, 6]], torch.ones(num_envs, 3))
+  torch.testing.assert_close(
+    second[:, slices["left_action_context"]][:, 6],
+    torch.full((num_envs,), 0.40),
+  )
+  assert second.abs().max().item() < 70.0
 
 
 def test_torch_dataset_uses_last_history_frames() -> None:

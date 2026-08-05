@@ -336,6 +336,53 @@ success, fall, timeout, or heading failure. Pass `--viewer native` or
 `--viewer viser` to force a backend; `auto` uses native when a display is
 available and Viser otherwise.
 
+## Footprint Detector Training
+
+`train_footprint_detector_v3.py` is the preset entrypoint for retraining the
+footprint-only Stage 2D detector with deployment-friendly proprioceptive inputs.
+It uses the existing online detector trainer, but pins the task to
+`footprint_deploy_v3`, enables gait phase, expects a `128`-D detector input,
+and turns on `--footprint-only-model`.
+
+The exported network still has the standard six-logit layout:
+
+```text
+[0] left_contact
+[1] right_contact
+[2] left_touchdown
+[3] right_touchdown
+[4] left_toe_riser_hit   = dummy low logit
+[5] right_toe_riser_hit  = dummy low logit
+```
+
+Only logits `0:4` are trained. Logits `4:6` are kept as dummy low toe logits so
+the ONNX metadata and downstream six-slot event layout remain compatible.
+Deployment should read footprint/contact results from `0:4` and fill `4:6` from
+the separate toe-riser detector before any event-summary logic.
+
+Example:
+
+```bash
+uv run python scripts/velocity_eval/train_footprint_detector_v3.py \
+  --checkpoint-file logs/rsl_rl/g1_blind_rough_target_navigation_slow_latent_teacherkl/Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1/base111/model_51000.pt \
+  --num-envs 512 \
+  --steps 9000
+```
+
+The v3 observation intentionally does not embed the legacy 91/93-D
+`stair_latent` vector. It is built from signals available on the robot side:
+IMU projected gravity, base angular velocity and delta, command `vx/vy/wz`, gait
+phase, FK toe/heel/sole-center positions, finite-difference endpoint velocities,
+per-foot vertical height/velocity relative to gravity, sole shape proxies, last
+leg action/action delta, joint tracking error, and leg joint velocity. It does
+not use contact bits, terrain height, support fraction, camera/raycast data, or
+any other external perception.
+
+The deploy runner must build the same feature order from its local state
+estimator, FK, command, action history, and joint encoder data. Keep the feature
+group metadata from the exported ONNX/JSON as the source of truth when wiring the
+C++ observation builder.
+
 ## Collect Latents
 
 ```bash
