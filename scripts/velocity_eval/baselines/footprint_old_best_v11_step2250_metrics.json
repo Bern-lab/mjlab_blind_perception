@@ -1,0 +1,19 @@
+{
+  "baseline_name": "model51000_seed42_foot_event_detector_online_v11_toe_calib_step2250",
+  "baseline_source": "eval_outputs/stair_stage2/model51000_seed42_foot_event_detector_online_v11_toe_calib/metrics.json",
+  "best_metrics": {
+    "footprint_deploy_score": 0.8616082445020852,
+    "high_recall_footprint_score": 0.8587658867344857,
+    "left_contact_f1": 0.9819651173408821,
+    "right_contact_f1": 0.9790401307507122,
+    "touchdown_deploy_macro_f1": 0.917019406925363,
+    "touchdown_flat_high_recall_macro_f1": 0.9180971975981497,
+    "touchdown_high_recall_macro_precision": 0.9602345860003229,
+    "touchdown_high_recall_macro_recall": 0.8630822946643102,
+    "touchdown_stair_deploy_macro_f1": 0.8915989159891599,
+    "touchdown_stair_deploy_true_event_count": 273.0,
+    "touchdown_stair_high_recall_macro_precision": 0.9657894736842105,
+    "touchdown_stair_high_recall_macro_recall": 0.8280141843971631
+  },
+  "notes": "Strict footprint-v3 guard target copied from the strongest local legacy footprint metrics at step 2250. The old run used the 93-D legacy observation and trained toe outputs; footprint-only v3 compares with toe-neutral footprint scores."
+}

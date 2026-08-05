@@ -160,6 +160,9 @@ class OnlineFootEventDetectorConfig:
   baseline_flat_touchdown_f1_tolerance: float = 0.01
   baseline_toe_metric: str = "toe_riser_high_recall_macro_f1"
   baseline_toe_metric_min_improvement: float = 0.0
+  baseline_required_metric_names: tuple[str, ...] = ()
+  baseline_required_metric_min_improvement: float = 0.0
+  require_baseline_guard: bool = False
   max_updates: int | None = 5000
   early_stop_patience_evals: int = 8
   early_stop_min_delta: float = 1.0e-4
@@ -1299,6 +1302,7 @@ def _deployment_event_metrics(
   stair_support: np.ndarray,
   thresholds: np.ndarray,
   footprint_anchor_w: np.ndarray | None = None,
+  ignore_toe_for_scores: bool = False,
   touchdown_contact_threshold: float,
   touchdown_contact_release_threshold: float,
   touchdown_cooldown_frames: int,
@@ -1507,15 +1511,6 @@ def _deployment_event_metrics(
     stair_touchdown_true_count / max(float(selection_min_stair_touchdown_events), 1.0),
     1.0,
   )
-  metrics["footprint_deploy_score"] = float(
-    stair_count_factor
-    * (
-      0.45 * metrics["touchdown_high_recall_macro_recall"]
-      + 0.15 * metrics["touchdown_high_recall_macro_precision"]
-      + 0.30 * metrics["touchdown_stair_deploy_macro_f1"]
-      + 0.10 * metrics["toe_riser_deploy_macro_f1"]
-    )
-  )
   touchdown_guard = min(
     metrics["touchdown_high_recall_macro_precision"]
     / max(float(touchdown_recall_precision_floor), 1.0e-6),
@@ -1546,24 +1541,48 @@ def _deployment_event_metrics(
       + 0.20 * touchdown_only_precision_guard
     )
   )
-  metrics["high_recall_footprint_score"] = float(
-    stair_count_factor
-    * (
-      0.35 * metrics["touchdown_high_recall_macro_recall"]
-      + 0.30 * metrics["touchdown_stair_high_recall_macro_recall"]
-      + 0.20 * metrics["toe_riser_high_recall_macro_recall"]
-      + 0.15 * metrics["high_recall_precision_guard"]
+  if ignore_toe_for_scores:
+    metrics["deploy_event_macro_f1"] = metrics["touchdown_deploy_macro_f1"]
+    metrics["high_recall_precision_guard"] = float(touchdown_only_precision_guard)
+    metrics["footprint_deploy_score"] = float(
+      stair_count_factor
+      * (
+        0.35 * metrics["touchdown_high_recall_macro_recall"]
+        + 0.20 * metrics["touchdown_high_recall_macro_precision"]
+        + 0.25 * metrics["touchdown_stair_deploy_macro_f1"]
+        + 0.20 * metrics["touchdown_deploy_macro_f1"]
+      )
     )
-  )
-  metrics["toe_guarded_footprint_score"] = float(
-    stair_count_factor
-    * (
-      0.25 * metrics["touchdown_high_recall_macro_recall"]
-      + 0.25 * metrics["touchdown_stair_high_recall_macro_recall"]
-      + 0.30 * metrics["toe_riser_high_recall_score"]
-      + 0.20 * metrics["high_recall_precision_guard"]
+    metrics["high_recall_footprint_score"] = metrics["touchdown_high_recall_score"]
+    metrics["toe_guarded_footprint_score"] = metrics["touchdown_high_recall_score"]
+  else:
+    metrics["footprint_deploy_score"] = float(
+      stair_count_factor
+      * (
+        0.45 * metrics["touchdown_high_recall_macro_recall"]
+        + 0.15 * metrics["touchdown_high_recall_macro_precision"]
+        + 0.30 * metrics["touchdown_stair_deploy_macro_f1"]
+        + 0.10 * metrics["toe_riser_deploy_macro_f1"]
+      )
     )
-  )
+    metrics["high_recall_footprint_score"] = float(
+      stair_count_factor
+      * (
+        0.35 * metrics["touchdown_high_recall_macro_recall"]
+        + 0.30 * metrics["touchdown_stair_high_recall_macro_recall"]
+        + 0.20 * metrics["toe_riser_high_recall_macro_recall"]
+        + 0.15 * metrics["high_recall_precision_guard"]
+      )
+    )
+    metrics["toe_guarded_footprint_score"] = float(
+      stair_count_factor
+      * (
+        0.25 * metrics["touchdown_high_recall_macro_recall"]
+        + 0.25 * metrics["touchdown_stair_high_recall_macro_recall"]
+        + 0.30 * metrics["toe_riser_high_recall_score"]
+        + 0.20 * metrics["high_recall_precision_guard"]
+      )
+    )
   touchdown_thresholds = (
     float(metrics["left_touchdown_deploy_high_recall_threshold"]),
     float(metrics["right_touchdown_deploy_high_recall_threshold"]),
@@ -1628,6 +1647,19 @@ def _deployment_event_metrics(
     metrics["high_recall_footprint_score"]
     * (0.70 * timing_guard + 0.30 * footprint_xy_guard)
   )
+  if ignore_toe_for_scores:
+    timing_quality = 0.70 * timing_guard + 0.30 * footprint_xy_guard
+    metrics["touchdown_v3_surpass_score"] = float(
+      stair_count_factor
+      * (
+        0.28 * metrics["touchdown_high_recall_macro_recall"]
+        + 0.28 * metrics["touchdown_stair_high_recall_macro_recall"]
+        + 0.16 * metrics["touchdown_high_recall_macro_precision"]
+        + 0.16 * metrics["touchdown_stair_high_recall_macro_precision"]
+        + 0.12 * metrics["touchdown_deploy_macro_f1"]
+      )
+      * timing_quality
+    )
   return metrics
 
 
@@ -1714,6 +1746,7 @@ def _evaluate_online(
       stair_support=snapshot["stair_support"].astype(np.bool_),
       thresholds=deployment_thresholds,
       footprint_anchor_w=snapshot["footprint_anchor_w"].astype(np.float32),
+      ignore_toe_for_scores=train_label_indices == (0, 1, 2, 3),
       touchdown_contact_threshold=touchdown_contact_threshold,
       touchdown_contact_release_threshold=touchdown_contact_release_threshold,
       touchdown_cooldown_frames=touchdown_cooldown_frames,
@@ -1995,6 +2028,8 @@ def _baseline_guard_passed(
   flat_touchdown_f1_tolerance: float,
   toe_metric: str,
   toe_metric_min_improvement: float,
+  required_metric_names: tuple[str, ...] = (),
+  required_metric_min_improvement: float = 0.0,
 ) -> tuple[bool, tuple[str, ...]]:
   """Return whether a candidate keeps baseline footprint behavior intact."""
   if baseline_metrics is None:
@@ -2024,16 +2059,23 @@ def _baseline_guard_passed(
     if actual < required:
       failures.append(f"{key} {actual:.4f} < {required:.4f}")
 
-  if not toe_metric:
-    return len(failures) == 0, tuple(failures)
+  if toe_metric:
+    if toe_metric not in baseline_metrics or toe_metric not in metrics:
+      failures.append(f"{toe_metric}=missing")
+    else:
+      required = float(baseline_metrics[toe_metric]) + float(toe_metric_min_improvement)
+      actual = float(metrics[toe_metric])
+      if actual < required:
+        failures.append(f"{toe_metric} {actual:.4f} < {required:.4f}")
 
-  if toe_metric not in baseline_metrics or toe_metric not in metrics:
-    failures.append(f"{toe_metric}=missing")
-  else:
-    required = float(baseline_metrics[toe_metric]) + float(toe_metric_min_improvement)
-    actual = float(metrics[toe_metric])
+  for key in required_metric_names:
+    if key not in baseline_metrics or key not in metrics:
+      failures.append(f"{key}=missing")
+      continue
+    required = float(baseline_metrics[key]) + float(required_metric_min_improvement)
+    actual = float(metrics[key])
     if actual < required:
-      failures.append(f"{toe_metric} {actual:.4f} < {required:.4f}")
+      failures.append(f"{key} {actual:.4f} < {required:.4f}")
 
   return len(failures) == 0, tuple(failures)
 
@@ -2697,6 +2739,10 @@ def run_online_train(
           flat_touchdown_f1_tolerance=cfg.baseline_flat_touchdown_f1_tolerance,
           toe_metric=cfg.baseline_toe_metric,
           toe_metric_min_improvement=cfg.baseline_toe_metric_min_improvement,
+          required_metric_names=cfg.baseline_required_metric_names,
+          required_metric_min_improvement=(
+            cfg.baseline_required_metric_min_improvement
+          ),
         )
         metric_value = float(val_metrics[selection_metric])
         is_better = guard_passed and _metric_improved(
@@ -2778,6 +2824,15 @@ def run_online_train(
   if cfg.save_last_checkpoint:
     torch.save(model.state_dict(), last_checkpoint_path)
   if best_state is None:
+    if baseline_metrics is not None and cfg.require_baseline_guard:
+      last_failures: list[str] = []
+      if metrics_history:
+        last_failures = list(metrics_history[-1].get("baseline_guard_failures", []))
+      failure_text = "; ".join(last_failures[:8]) if last_failures else "no eval passed"
+      raise RuntimeError(
+        "No checkpoint satisfied the required baseline guard. "
+        f"Last failures: {failure_text}"
+      )
     best_state = copy.deepcopy(model.state_dict())
     best_step = completed_steps
     best_value = 0.0
@@ -2874,6 +2929,9 @@ def run_online_train(
       "flat_touchdown_f1_tolerance": cfg.baseline_flat_touchdown_f1_tolerance,
       "toe_metric": cfg.baseline_toe_metric,
       "toe_metric_min_improvement": cfg.baseline_toe_metric_min_improvement,
+      "required_metric_names": list(cfg.baseline_required_metric_names),
+      "required_metric_min_improvement": (cfg.baseline_required_metric_min_improvement),
+      "require_baseline_guard": cfg.require_baseline_guard,
     },
     "model": {
       "type": "FootEventDetectorGRU",

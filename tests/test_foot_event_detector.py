@@ -50,9 +50,13 @@ from scripts.velocity_eval.train_foot_event_detector_online import (
   _training_loss,
 )
 from scripts.velocity_eval.train_footprint_detector_v3 import (
+  DEFAULT_BASELINE_METRICS_FILE as FOOTPRINT_V3_DEFAULT_BASELINE_METRICS_FILE,
+)
+from scripts.velocity_eval.train_footprint_detector_v3 import (
   DEFAULT_OUTPUT_DIR as FOOTPRINT_V3_DEFAULT_OUTPUT_DIR,
 )
 from scripts.velocity_eval.train_footprint_detector_v3 import (
+  FOOTPRINT_V3_REQUIRED_BASELINE_METRICS,
   _with_footprint_v3_defaults,
 )
 
@@ -415,11 +419,11 @@ def test_footprint_detector_v3_training_preset_pins_compatible_layout() -> None:
   assert cfg.footprint_only_model
   assert not cfg.toe_only_finetune
   assert not cfg.toe_riser_only_model
-  assert cfg.history_len == 16
+  assert cfg.history_len == 24
   assert cfg.frame_hidden_dim == 256
   assert cfg.recurrent_hidden_dim == 128
   assert cfg.head_hidden_dim == 64
-  assert cfg.selection_metric == "touchdown_timing_guarded_score"
+  assert cfg.selection_metric == "touchdown_v3_surpass_score"
   assert cfg.toe_positive_fraction == 0.0
   assert cfg.toe_soft_positive_fraction == 0.0
   assert cfg.false_negative_toe_hard_positive_fraction == 0.0
@@ -427,6 +431,17 @@ def test_footprint_detector_v3_training_preset_pins_compatible_layout() -> None:
   assert not cfg.mine_false_positive_hard_negatives
   assert not cfg.mine_false_negative_toe_hard_positives
   assert cfg.baseline_toe_metric == ""
+  assert cfg.soft_touchdown_radius == 2
+  assert cfg.tversky_alpha == 0.20
+  assert cfg.tversky_beta == 0.85
+  assert cfg.hard_positive_mining_threshold == 0.75
+  assert cfg.sweep_threshold_min == 0.02
+  assert cfg.sweep_threshold_max == 0.9999
+  assert cfg.sweep_threshold_steps == 81
+  assert cfg.baseline_metrics_file == FOOTPRINT_V3_DEFAULT_BASELINE_METRICS_FILE
+  assert cfg.baseline_required_metric_names == FOOTPRINT_V3_REQUIRED_BASELINE_METRICS
+  assert cfg.baseline_required_metric_min_improvement == 1.0e-4
+  assert cfg.require_baseline_guard
   assert _should_mine_touchdown_false_positive_hard_negatives(cfg)
 
 
@@ -443,7 +458,7 @@ def test_footprint_deployment_contract_marks_dummy_toe_outputs() -> None:
     onnx_path=None,
   )
 
-  assert contract["obs_history_shape"] == [1, 16, 134]
+  assert contract["obs_history_shape"] == [1, 24, 134]
   assert contract["trained_label_indices"] == [0, 1, 2, 3]
   assert contract["dummy_low_logit_indices"] == [4, 5]
   assert contract["training_label_contract"]["stair_hard_negative_label_indices"] == [
@@ -1667,6 +1682,8 @@ def test_baseline_guard_requires_toe_gain_without_touchdown_regression() -> None
     flat_touchdown_f1_tolerance=0.01,
     toe_metric="toe_riser_high_recall_macro_f1",
     toe_metric_min_improvement=0.01,
+    required_metric_names=(),
+    required_metric_min_improvement=0.0,
   )
 
   assert passed
@@ -1681,6 +1698,8 @@ def test_baseline_guard_requires_toe_gain_without_touchdown_regression() -> None
     flat_touchdown_f1_tolerance=0.01,
     toe_metric="toe_riser_high_recall_macro_f1",
     toe_metric_min_improvement=0.01,
+    required_metric_names=(),
+    required_metric_min_improvement=0.0,
   )
 
   assert not passed
@@ -1703,10 +1722,56 @@ def test_baseline_guard_can_skip_toe_metric_for_footprint_only_models() -> None:
     flat_touchdown_f1_tolerance=0.01,
     toe_metric="",
     toe_metric_min_improvement=0.01,
+    required_metric_names=(),
+    required_metric_min_improvement=0.0,
   )
 
   assert passed
   assert failures == ()
+
+
+def test_baseline_guard_can_require_exact_metric_improvements() -> None:
+  baseline = {
+    "touchdown_high_recall_macro_recall": 0.84,
+    "touchdown_stair_high_recall_macro_recall": 0.82,
+    "touchdown_flat_high_recall_macro_f1": 0.89,
+    "touchdown_stair_high_recall_macro_precision": 0.96,
+  }
+  candidate = {
+    **baseline,
+    "touchdown_stair_high_recall_macro_precision": 0.9602,
+  }
+
+  passed, failures = _baseline_guard_passed(
+    candidate,
+    baseline,
+    touchdown_recall_tolerance=0.0,
+    stair_touchdown_recall_tolerance=0.0,
+    flat_touchdown_f1_tolerance=0.0,
+    toe_metric="",
+    toe_metric_min_improvement=0.0,
+    required_metric_names=("touchdown_stair_high_recall_macro_precision",),
+    required_metric_min_improvement=1.0e-4,
+  )
+
+  assert passed
+  assert failures == ()
+
+  candidate["touchdown_stair_high_recall_macro_precision"] = 0.9599
+  passed, failures = _baseline_guard_passed(
+    candidate,
+    baseline,
+    touchdown_recall_tolerance=0.0,
+    stair_touchdown_recall_tolerance=0.0,
+    flat_touchdown_f1_tolerance=0.0,
+    toe_metric="",
+    toe_metric_min_improvement=0.0,
+    required_metric_names=("touchdown_stair_high_recall_macro_precision",),
+    required_metric_min_improvement=1.0e-4,
+  )
+
+  assert not passed
+  assert failures == ("touchdown_stair_high_recall_macro_precision 0.9599 < 0.9601",)
 
 
 def test_score_metric_is_higher_better() -> None:
@@ -1714,6 +1779,7 @@ def test_score_metric_is_higher_better() -> None:
   assert metric_is_higher_better("high_recall_footprint_score")
   assert metric_is_higher_better("toe_guarded_footprint_score")
   assert metric_is_higher_better("touchdown_timing_guarded_score")
+  assert metric_is_higher_better("touchdown_v3_surpass_score")
   assert metric_is_higher_better("toe_riser_high_recall_score")
   assert metric_is_higher_better("touchdown_high_recall_macro_recall")
   assert not metric_is_higher_better("val_loss")
@@ -1771,6 +1837,73 @@ def test_online_deployment_metrics_include_high_recall_score() -> None:
   assert metrics["touchdown_footprint_xy_error_m_p90"] == 0.0
   assert metrics["touchdown_timing_guarded_score"] > 0.0
   assert metrics["timing_guarded_footprint_score"] > 0.0
+
+
+def test_footprint_only_deployment_scores_ignore_dummy_toe_logits() -> None:
+  labels = np.zeros((12, len(FOOT_EVENT_LABEL_NAMES)), dtype=np.float32)
+  probabilities = np.zeros_like(labels)
+  stair_support = np.zeros((12, 2), dtype=np.bool_)
+  footprint_anchor_w = np.zeros((12, 2, 3), dtype=np.float32)
+
+  labels[[2, 8], 0] = 1.0
+  labels[[3, 9], 1] = 1.0
+  labels[[2, 8], 2] = 1.0
+  labels[[3, 9], 3] = 1.0
+  labels[5, 4] = 1.0
+  labels[6, 5] = 1.0
+  stair_support[8, 0] = True
+  stair_support[9, 1] = True
+
+  probabilities[:, :] = 0.01
+  probabilities[[2, 8], 0] = 0.95
+  probabilities[[3, 9], 1] = 0.95
+  probabilities[[2, 8], 2] = 0.90
+  probabilities[[3, 9], 3] = 0.90
+
+  generic_metrics = _deployment_event_metrics(
+    labels=labels,
+    probabilities=probabilities,
+    episode_id=np.zeros(labels.shape[0], dtype=np.int64),
+    frame_idx=np.arange(labels.shape[0], dtype=np.int64),
+    stair_support=stair_support,
+    thresholds=np.array([0.3, 0.7], dtype=np.float32),
+    footprint_anchor_w=footprint_anchor_w,
+    touchdown_contact_threshold=0.7,
+    touchdown_contact_release_threshold=0.35,
+    touchdown_cooldown_frames=0,
+    toe_hit_cooldown_frames=0,
+    touchdown_recall_precision_floor=0.85,
+    toe_hit_recall_precision_floor=0.35,
+    selection_min_stair_touchdown_events=1,
+    event_tolerance_frames=0,
+  )
+  footprint_only_metrics = _deployment_event_metrics(
+    labels=labels,
+    probabilities=probabilities,
+    episode_id=np.zeros(labels.shape[0], dtype=np.int64),
+    frame_idx=np.arange(labels.shape[0], dtype=np.int64),
+    stair_support=stair_support,
+    thresholds=np.array([0.3, 0.7], dtype=np.float32),
+    footprint_anchor_w=footprint_anchor_w,
+    ignore_toe_for_scores=True,
+    touchdown_contact_threshold=0.7,
+    touchdown_contact_release_threshold=0.35,
+    touchdown_cooldown_frames=0,
+    toe_hit_cooldown_frames=0,
+    touchdown_recall_precision_floor=0.85,
+    toe_hit_recall_precision_floor=0.35,
+    selection_min_stair_touchdown_events=1,
+    event_tolerance_frames=0,
+  )
+
+  assert generic_metrics["toe_riser_high_recall_macro_recall"] == 0.0
+  assert footprint_only_metrics["toe_riser_high_recall_macro_recall"] == 0.0
+  assert (
+    footprint_only_metrics["high_recall_footprint_score"]
+    > generic_metrics["high_recall_footprint_score"]
+  )
+  assert footprint_only_metrics["high_recall_footprint_score"] == 1.0
+  assert footprint_only_metrics["touchdown_v3_surpass_score"] > 0.85
 
 
 def test_run_train_writes_metrics_and_best_checkpoint(tmp_path) -> None:

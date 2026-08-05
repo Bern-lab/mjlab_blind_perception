@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import replace
+from pathlib import Path
 
 import tyro
 from scripts.velocity_eval.train_foot_event_detector_online import (
@@ -18,7 +19,26 @@ DEFAULT_TASK_ID = (
   "SlowLatent-TeacherKL-Unitree-G1"
 )
 DEFAULT_OUTPUT_DIR = (
-  "eval_outputs/stair_stage2/model51000_seed42_footprint_deploy_v3_fixed_pool_v1"
+  "eval_outputs/stair_stage2/model51000_seed42_footprint_deploy_v3_fixed_pool_v2"
+)
+DEFAULT_BASELINE_METRICS_FILE = str(
+  Path(__file__).resolve().parent
+  / "baselines"
+  / "footprint_old_best_v11_step2250_metrics.json"
+)
+FOOTPRINT_V3_REQUIRED_BASELINE_METRICS = (
+  "footprint_deploy_score",
+  "high_recall_footprint_score",
+  "touchdown_deploy_macro_f1",
+  "touchdown_stair_deploy_macro_f1",
+  "touchdown_high_recall_macro_precision",
+  "touchdown_high_recall_macro_recall",
+  "touchdown_stair_high_recall_macro_precision",
+  "touchdown_stair_high_recall_macro_recall",
+  "touchdown_flat_high_recall_macro_f1",
+  "left_contact_f1",
+  "right_contact_f1",
+  "touchdown_stair_deploy_true_event_count",
 )
 
 
@@ -38,7 +58,7 @@ def _with_footprint_v3_defaults(
     footprint_only_model=True,
     toe_only_finetune=False,
     toe_riser_only_model=False,
-    history_len=16
+    history_len=24
     if cfg.history_len == OnlineFootEventDetectorConfig.history_len
     else cfg.history_len,
     frame_hidden_dim=256
@@ -51,18 +71,18 @@ def _with_footprint_v3_defaults(
     if cfg.head_hidden_dim == OnlineFootEventDetectorConfig.head_hidden_dim
     else cfg.head_hidden_dim,
     selection_metric=(
-      "touchdown_timing_guarded_score"
+      "touchdown_v3_surpass_score"
       if cfg.selection_metric == OnlineFootEventDetectorConfig.selection_metric
       else cfg.selection_metric
     ),
-    max_updates=9000
+    max_updates=12_000
     if cfg.max_updates == OnlineFootEventDetectorConfig.max_updates
     else cfg.max_updates,
-    steps=9000 if cfg.steps == OnlineFootEventDetectorConfig.steps else cfg.steps,
-    train_buffer_capacity=160_000
+    steps=12_000 if cfg.steps == OnlineFootEventDetectorConfig.steps else cfg.steps,
+    train_buffer_capacity=240_000
     if cfg.train_buffer_capacity == OnlineFootEventDetectorConfig.train_buffer_capacity
     else cfg.train_buffer_capacity,
-    val_buffer_capacity=80_000
+    val_buffer_capacity=120_000
     if cfg.val_buffer_capacity == OnlineFootEventDetectorConfig.val_buffer_capacity
     else cfg.val_buffer_capacity,
     toe_hit_pos_weight=None,
@@ -73,22 +93,92 @@ def _with_footprint_v3_defaults(
     mine_false_positive_hard_negatives=False,
     mine_false_negative_toe_hard_positives=False,
     baseline_toe_metric="",
-    false_negative_hard_positive_fraction=0.20
+    false_negative_hard_positive_fraction=0.30
     if cfg.false_negative_hard_positive_fraction
     == OnlineFootEventDetectorConfig.false_negative_hard_positive_fraction
     else cfg.false_negative_hard_positive_fraction,
-    false_positive_hard_negative_fraction=0.15
+    false_positive_hard_negative_fraction=0.10
     if cfg.false_positive_hard_negative_fraction
     == OnlineFootEventDetectorConfig.false_positive_hard_negative_fraction
     else cfg.false_positive_hard_negative_fraction,
-    touchdown_positive_fraction=0.25
+    touchdown_positive_fraction=0.30
     if cfg.touchdown_positive_fraction
     == OnlineFootEventDetectorConfig.touchdown_positive_fraction
     else cfg.touchdown_positive_fraction,
-    touchdown_soft_positive_fraction=0.15
+    touchdown_soft_positive_fraction=0.20
     if cfg.touchdown_soft_positive_fraction
     == OnlineFootEventDetectorConfig.touchdown_soft_positive_fraction
     else cfg.touchdown_soft_positive_fraction,
+    soft_touchdown_radius=2
+    if cfg.soft_touchdown_radius == OnlineFootEventDetectorConfig.soft_touchdown_radius
+    else cfg.soft_touchdown_radius,
+    soft_event_radius1_value=0.8
+    if cfg.soft_event_radius1_value
+    == OnlineFootEventDetectorConfig.soft_event_radius1_value
+    else cfg.soft_event_radius1_value,
+    soft_event_radius2_value=0.5
+    if cfg.soft_event_radius2_value
+    == OnlineFootEventDetectorConfig.soft_event_radius2_value
+    else cfg.soft_event_radius2_value,
+    tversky_alpha=0.20
+    if cfg.tversky_alpha == OnlineFootEventDetectorConfig.tversky_alpha
+    else cfg.tversky_alpha,
+    tversky_beta=0.85
+    if cfg.tversky_beta == OnlineFootEventDetectorConfig.tversky_beta
+    else cfg.tversky_beta,
+    hard_positive_mining_threshold=0.75
+    if cfg.hard_positive_mining_threshold
+    == OnlineFootEventDetectorConfig.hard_positive_mining_threshold
+    else cfg.hard_positive_mining_threshold,
+    hard_positive_mining_window_frames=4
+    if cfg.hard_positive_mining_window_frames
+    == OnlineFootEventDetectorConfig.hard_positive_mining_window_frames
+    else cfg.hard_positive_mining_window_frames,
+    sweep_threshold_min=0.02
+    if cfg.sweep_threshold_min == OnlineFootEventDetectorConfig.sweep_threshold_min
+    else cfg.sweep_threshold_min,
+    sweep_threshold_max=0.9999
+    if cfg.sweep_threshold_max == OnlineFootEventDetectorConfig.sweep_threshold_max
+    else cfg.sweep_threshold_max,
+    sweep_threshold_steps=81
+    if cfg.sweep_threshold_steps == OnlineFootEventDetectorConfig.sweep_threshold_steps
+    else cfg.sweep_threshold_steps,
+    early_stop_patience_evals=24
+    if cfg.early_stop_patience_evals
+    == OnlineFootEventDetectorConfig.early_stop_patience_evals
+    else cfg.early_stop_patience_evals,
+    baseline_metrics_file=(
+      DEFAULT_BASELINE_METRICS_FILE
+      if cfg.baseline_metrics_file
+      == OnlineFootEventDetectorConfig.baseline_metrics_file
+      else cfg.baseline_metrics_file
+    ),
+    baseline_touchdown_recall_tolerance=0.0
+    if cfg.baseline_touchdown_recall_tolerance
+    == OnlineFootEventDetectorConfig.baseline_touchdown_recall_tolerance
+    else cfg.baseline_touchdown_recall_tolerance,
+    baseline_stair_touchdown_recall_tolerance=0.0
+    if cfg.baseline_stair_touchdown_recall_tolerance
+    == OnlineFootEventDetectorConfig.baseline_stair_touchdown_recall_tolerance
+    else cfg.baseline_stair_touchdown_recall_tolerance,
+    baseline_flat_touchdown_f1_tolerance=0.0
+    if cfg.baseline_flat_touchdown_f1_tolerance
+    == OnlineFootEventDetectorConfig.baseline_flat_touchdown_f1_tolerance
+    else cfg.baseline_flat_touchdown_f1_tolerance,
+    baseline_required_metric_names=(
+      FOOTPRINT_V3_REQUIRED_BASELINE_METRICS
+      if cfg.baseline_required_metric_names
+      == OnlineFootEventDetectorConfig.baseline_required_metric_names
+      else cfg.baseline_required_metric_names
+    ),
+    baseline_required_metric_min_improvement=1.0e-4
+    if cfg.baseline_required_metric_min_improvement
+    == OnlineFootEventDetectorConfig.baseline_required_metric_min_improvement
+    else cfg.baseline_required_metric_min_improvement,
+    require_baseline_guard=True
+    if cfg.require_baseline_guard
+    == OnlineFootEventDetectorConfig.require_baseline_guard
+    else cfg.require_baseline_guard,
   )
 
 

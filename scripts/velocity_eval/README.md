@@ -342,7 +342,9 @@ available and Viser otherwise.
 footprint-only Stage 2D detector with deployment-friendly proprioceptive inputs.
 It uses the existing online detector trainer, but pins the task to
 `footprint_deploy_v3`, enables gait phase, expects a `134`-D detector input,
-uses a `16`-frame history, and turns on `--footprint-only-model`.
+uses a `24`-frame history, and turns on `--footprint-only-model`. The longer
+history matches the strongest legacy footprint run and is still deploy-friendly:
+it only increases the local ring-buffer length, not the signal set.
 
 The preset now defaults to the detector-only task
 `Mjlab-Velocity-Blind-Rough-TargetNavigation-FootprintDetector-SlowLatent-TeacherKL-Unitree-G1`.
@@ -373,13 +375,24 @@ the ONNX metadata and downstream six-slot event layout remain compatible.
 Deployment should read footprint/contact results from `0:4` and fill `4:6` from
 the separate toe-riser detector before any event-summary logic.
 
+For footprint-only runs, the trainer now scores `footprint_deploy_score` and
+`high_recall_footprint_score` without penalizing the intentionally dummy toe
+logits. It also writes and enforces a strict baseline guard against the strongest
+local legacy footprint metrics from
+`model51000_seed42_foot_event_detector_online_v11_toe_calib` at step `2250`.
+`best.pt` is only accepted if the candidate beats the old footprint score,
+high-recall footprint score, touchdown precision/recall, stair touchdown
+precision/recall, stair/flat F1 checks, contact F1 checks, and stair event count.
+If no evaluated checkpoint beats those baselines, the run fails instead of
+quietly exporting a weaker `best.onnx`.
+
 Example:
 
 ```bash
 uv run python scripts/velocity_eval/train_footprint_detector_v3.py \
   --checkpoint-file logs/rsl_rl/g1_blind_rough_target_navigation_slow_latent_teacherkl/Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1/base111/model_51000.pt \
   --num-envs 512 \
-  --steps 9000
+  --steps 12000
 ```
 
 The bundled `base111/model_51000.pt` is an older slow-latent policy with
@@ -390,7 +403,7 @@ the loader fall back to the current `latent_dim=24` config and fail on actor
 shape mismatches.
 
 The default output directory for this preset is
-`eval_outputs/stair_stage2/model51000_seed42_footprint_deploy_v3_fixed_pool_v1`.
+`eval_outputs/stair_stage2/model51000_seed42_footprint_deploy_v3_fixed_pool_v2`.
 Curriculum logs include `fixed_pool_*` metrics for checking the actual 70/30
 pool split and low/mid/high reset distribution before trusting a long run.
 
