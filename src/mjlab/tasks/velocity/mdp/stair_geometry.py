@@ -103,6 +103,12 @@ STAIR_PROBE_STRIDE_REWARD_KEY = "slow_latent_stair_probe_stride_reward"
 STAIR_PROBE_STRIDE_REWARD_EVENT_ID_KEY = (
   "slow_latent_stair_probe_stride_reward_event_id"
 )
+STAIR_BACKOFF_STRIDE_REWARD_KEY = "slow_latent_stair_backoff_stride_reward"
+STAIR_BACKOFF_STRIDE_REWARD_EVENT_ID_KEY = (
+  "slow_latent_stair_backoff_stride_reward_event_id"
+)
+STAIR_LOCK_STRIDE_REWARD_KEY = "slow_latent_stair_lock_stride_reward"
+STAIR_LOCK_STRIDE_REWARD_EVENT_ID_KEY = "slow_latent_stair_lock_stride_reward_event_id"
 _STAIR_SHAPE_CACHE_KEY = "_privileged_stair_shape_cache"
 
 

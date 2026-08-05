@@ -23,6 +23,8 @@ from .stair_geometry import (
   STAIR_ADJACENT_PAIR_EVENT_KEY,
   STAIR_ADJACENT_PAIR_HEIGHT_KEY,
   STAIR_ADJACENT_PAIR_VALID_KEY,
+  STAIR_BACKOFF_STRIDE_REWARD_EVENT_ID_KEY,
+  STAIR_BACKOFF_STRIDE_REWARD_KEY,
   STAIR_CURRENT_CONTACT_DURATION_KEY,
   STAIR_CURRENT_GROUND_CONTACT_KEY,
   STAIR_DEPTH_CONFIRMATION_AGE_KEY,
@@ -30,6 +32,8 @@ from .stair_geometry import (
   STAIR_ENTRY_EVENT_KEY,
   STAIR_ENTRY_RECENT_EVIDENCE_KEY,
   STAIR_EXPECTED_LAYER_KEY,
+  STAIR_LOCK_STRIDE_REWARD_EVENT_ID_KEY,
+  STAIR_LOCK_STRIDE_REWARD_KEY,
   STAIR_PHASE_KEY,
   STAIR_PROBE_STRIDE_REWARD_EVENT_ID_KEY,
   STAIR_PROBE_STRIDE_REWARD_KEY,
@@ -1020,6 +1024,14 @@ class FootEventMemoryObs:
       float(params.get("ratchet_probe_reward_target_tolerance_m", 0.04)),
       1.0e-6,
     )
+    self.ratchet_backoff_reward_tolerance_m = max(
+      float(params.get("ratchet_backoff_reward_tolerance_m", 0.04)),
+      1.0e-6,
+    )
+    self.ratchet_lock_reward_tolerance_m = max(
+      float(params.get("ratchet_lock_reward_tolerance_m", 0.04)),
+      1.0e-6,
+    )
     self.ratchet_no_hit_lower_margin_m = max(
       float(params.get("ratchet_no_hit_lower_margin_m", 0.0)),
       0.0,
@@ -1328,6 +1340,26 @@ class FootEventMemoryObs:
     self.ratchet_probe_stride_reward_actual_s = torch.zeros_like(self.ratchet_lower_s)
     self.ratchet_probe_stride_reward_previous_s = torch.zeros_like(self.ratchet_lower_s)
     self.ratchet_probe_stride_reward_target_s = torch.zeros_like(self.ratchet_lower_s)
+    self.ratchet_backoff_stride_reward = torch.zeros_like(self.ratchet_lower_s)
+    self.ratchet_backoff_stride_reward_event_id = torch.zeros(
+      self.num_envs,
+      dtype=torch.long,
+      device=self.device,
+    )
+    self.ratchet_backoff_stride_reward_eligible = torch.zeros_like(self.ratchet_active)
+    self.ratchet_backoff_stride_reward_ok = torch.zeros_like(self.ratchet_active)
+    self.ratchet_backoff_stride_reward_actual_s = torch.zeros_like(self.ratchet_lower_s)
+    self.ratchet_backoff_stride_reward_target_s = torch.zeros_like(self.ratchet_lower_s)
+    self.ratchet_lock_stride_reward = torch.zeros_like(self.ratchet_lower_s)
+    self.ratchet_lock_stride_reward_event_id = torch.zeros(
+      self.num_envs,
+      dtype=torch.long,
+      device=self.device,
+    )
+    self.ratchet_lock_stride_reward_eligible = torch.zeros_like(self.ratchet_active)
+    self.ratchet_lock_stride_reward_ok = torch.zeros_like(self.ratchet_active)
+    self.ratchet_lock_stride_reward_actual_s = torch.zeros_like(self.ratchet_lower_s)
+    self.ratchet_lock_stride_reward_target_s = torch.zeros_like(self.ratchet_lower_s)
     self.ratchet_backoff_monotonic = torch.zeros_like(self.ratchet_active)
     self.ratchet_lock_entered = torch.zeros_like(self.ratchet_active)
     self.ratchet_lock_collision_reopen = torch.zeros_like(self.ratchet_active)
@@ -1379,6 +1411,14 @@ class FootEventMemoryObs:
     env.extras[STAIR_PROBE_STRIDE_REWARD_KEY] = self.ratchet_probe_stride_reward
     env.extras[STAIR_PROBE_STRIDE_REWARD_EVENT_ID_KEY] = (
       self.ratchet_probe_stride_reward_event_id
+    )
+    env.extras[STAIR_BACKOFF_STRIDE_REWARD_KEY] = self.ratchet_backoff_stride_reward
+    env.extras[STAIR_BACKOFF_STRIDE_REWARD_EVENT_ID_KEY] = (
+      self.ratchet_backoff_stride_reward_event_id
+    )
+    env.extras[STAIR_LOCK_STRIDE_REWARD_KEY] = self.ratchet_lock_stride_reward
+    env.extras[STAIR_LOCK_STRIDE_REWARD_EVENT_ID_KEY] = (
+      self.ratchet_lock_stride_reward_event_id
     )
 
   def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
@@ -1444,6 +1484,18 @@ class FootEventMemoryObs:
     self.ratchet_probe_stride_reward_actual_s[ids] = 0.0
     self.ratchet_probe_stride_reward_previous_s[ids] = 0.0
     self.ratchet_probe_stride_reward_target_s[ids] = 0.0
+    self.ratchet_backoff_stride_reward[ids] = 0.0
+    self.ratchet_backoff_stride_reward_event_id[ids] = 0
+    self.ratchet_backoff_stride_reward_eligible[ids] = False
+    self.ratchet_backoff_stride_reward_ok[ids] = False
+    self.ratchet_backoff_stride_reward_actual_s[ids] = 0.0
+    self.ratchet_backoff_stride_reward_target_s[ids] = 0.0
+    self.ratchet_lock_stride_reward[ids] = 0.0
+    self.ratchet_lock_stride_reward_event_id[ids] = 0
+    self.ratchet_lock_stride_reward_eligible[ids] = False
+    self.ratchet_lock_stride_reward_ok[ids] = False
+    self.ratchet_lock_stride_reward_actual_s[ids] = 0.0
+    self.ratchet_lock_stride_reward_target_s[ids] = 0.0
     self.ratchet_backoff_monotonic[ids] = False
     self.ratchet_lock_entered[ids] = False
     self.ratchet_lock_collision_reopen[ids] = False
@@ -3009,6 +3061,74 @@ class FootEventMemoryObs:
       old_probe,
       torch.zeros_like(old_probe),
     )
+    backoff_reward_eligible = (
+      actual_same_stride_valid
+      & new_interval_confirmed
+      & (new_mode == _RATCHET_MODE_BACKOFF)
+      & ~hold_center_active
+      & ~collision_update
+    )
+    backoff_upper = new_probe + self.ratchet_backoff_reward_tolerance_m
+    backoff_overshoot = torch.relu(step_stride - backoff_upper)
+    backoff_reward = (
+      1.0 - backoff_overshoot / self.ratchet_backoff_reward_tolerance_m
+    ).clamp(-1.0, 1.0)
+    backoff_ok = step_stride <= backoff_upper + 1.0e-5
+    self.ratchet_backoff_stride_reward.copy_(
+      torch.where(
+        backoff_reward_eligible,
+        backoff_reward,
+        torch.zeros_like(backoff_reward),
+      )
+    )
+    self.ratchet_backoff_stride_reward_event_id.copy_(
+      self.ratchet_backoff_stride_reward_event_id + backoff_reward_eligible.long()
+    )
+    self.ratchet_backoff_stride_reward_eligible = backoff_reward_eligible
+    self.ratchet_backoff_stride_reward_ok = backoff_reward_eligible & backoff_ok
+    self.ratchet_backoff_stride_reward_actual_s = torch.where(
+      backoff_reward_eligible,
+      step_stride,
+      torch.zeros_like(step_stride),
+    )
+    self.ratchet_backoff_stride_reward_target_s = torch.where(
+      backoff_reward_eligible,
+      new_probe,
+      torch.zeros_like(new_probe),
+    )
+    lock_reward_eligible = (
+      actual_same_stride_valid
+      & new_interval_confirmed
+      & ((new_mode == _RATCHET_MODE_LOCK) | hold_center_active)
+      & ~collision_update
+    )
+    lock_error = torch.abs(step_stride - new_probe)
+    lock_reward = (1.0 - lock_error / self.ratchet_lock_reward_tolerance_m).clamp(
+      -1.0, 1.0
+    )
+    lock_ok = lock_error <= self.ratchet_lock_reward_tolerance_m + 1.0e-5
+    self.ratchet_lock_stride_reward.copy_(
+      torch.where(
+        lock_reward_eligible,
+        lock_reward,
+        torch.zeros_like(lock_reward),
+      )
+    )
+    self.ratchet_lock_stride_reward_event_id.copy_(
+      self.ratchet_lock_stride_reward_event_id + lock_reward_eligible.long()
+    )
+    self.ratchet_lock_stride_reward_eligible = lock_reward_eligible
+    self.ratchet_lock_stride_reward_ok = lock_reward_eligible & lock_ok
+    self.ratchet_lock_stride_reward_actual_s = torch.where(
+      lock_reward_eligible,
+      step_stride,
+      torch.zeros_like(step_stride),
+    )
+    self.ratchet_lock_stride_reward_target_s = torch.where(
+      lock_reward_eligible,
+      new_probe,
+      torch.zeros_like(new_probe),
+    )
     self.ratchet_backoff_monotonic = (
       self.ratchet_active
       & (new_mode == _RATCHET_MODE_BACKOFF)
@@ -3725,6 +3845,40 @@ class FootEventMemoryObs:
     log["Metrics/foot_event_ratchet_probe_stride_reward_target_mean"] = (
       self.ratchet_probe_stride_reward_target_s * probe_reward_event_f
     ).sum() / probe_reward_denom
+    backoff_reward_event_f = self.ratchet_backoff_stride_reward_eligible.float()
+    backoff_reward_denom = backoff_reward_event_f.sum().clamp_min(1.0)
+    log["Metrics/foot_event_ratchet_backoff_stride_reward_event_ratio"] = (
+      backoff_reward_event_f.mean()
+    )
+    log["Metrics/foot_event_ratchet_backoff_stride_reward_mean"] = (
+      self.ratchet_backoff_stride_reward * backoff_reward_event_f
+    ).sum() / backoff_reward_denom
+    log["Metrics/foot_event_ratchet_backoff_stride_reward_ok_ratio"] = (
+      self.ratchet_backoff_stride_reward_ok.float().sum() / backoff_reward_denom
+    )
+    log["Metrics/foot_event_ratchet_backoff_stride_reward_actual_mean"] = (
+      self.ratchet_backoff_stride_reward_actual_s * backoff_reward_event_f
+    ).sum() / backoff_reward_denom
+    log["Metrics/foot_event_ratchet_backoff_stride_reward_target_mean"] = (
+      self.ratchet_backoff_stride_reward_target_s * backoff_reward_event_f
+    ).sum() / backoff_reward_denom
+    lock_reward_event_f = self.ratchet_lock_stride_reward_eligible.float()
+    lock_reward_denom = lock_reward_event_f.sum().clamp_min(1.0)
+    log["Metrics/foot_event_ratchet_lock_stride_reward_event_ratio"] = (
+      lock_reward_event_f.mean()
+    )
+    log["Metrics/foot_event_ratchet_lock_stride_reward_mean"] = (
+      self.ratchet_lock_stride_reward * lock_reward_event_f
+    ).sum() / lock_reward_denom
+    log["Metrics/foot_event_ratchet_lock_stride_reward_ok_ratio"] = (
+      self.ratchet_lock_stride_reward_ok.float().sum() / lock_reward_denom
+    )
+    log["Metrics/foot_event_ratchet_lock_stride_reward_actual_mean"] = (
+      self.ratchet_lock_stride_reward_actual_s * lock_reward_event_f
+    ).sum() / lock_reward_denom
+    log["Metrics/foot_event_ratchet_lock_stride_reward_target_mean"] = (
+      self.ratchet_lock_stride_reward_target_s * lock_reward_event_f
+    ).sum() / lock_reward_denom
     log["Metrics/foot_event_ratchet_post_collision_probe_growth_violation_ratio"] = (
       self.ratchet_post_collision_probe_growth_violation.float().mean()
     )

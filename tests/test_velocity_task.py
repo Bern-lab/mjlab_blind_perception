@@ -42,6 +42,8 @@ from mjlab.tasks.velocity.config.g1.rl_cfg import (
 from mjlab.tasks.velocity.mdp import (
   UniformVelocityCommandCfg,
   stair_aware_feet_gait,
+  stair_confirmed_backoff_stride_reward,
+  stair_lock_stride_hold_reward,
   stair_probe_stride_growth_reward,
   stair_sequence_event_logger,
   target_tread_midline_shaping,
@@ -459,6 +461,8 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert foot_event_params["ratchet_first_layer_stride_scale"] == 2.0
   assert foot_event_params["ratchet_probe_reward_min_growth_m"] == 0.04
   assert foot_event_params["ratchet_probe_reward_target_tolerance_m"] == 0.04
+  assert foot_event_params["ratchet_backoff_reward_tolerance_m"] == 0.04
+  assert foot_event_params["ratchet_lock_reward_tolerance_m"] == 0.04
   assert foot_event_params["ratchet_min_interval_width_m"] == 0.04
   assert foot_event_params["ratchet_min_stride_m"] == 0.10
   assert foot_event_params["ratchet_max_stride_m"] == 0.85
@@ -533,6 +537,12 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   probe_reward = env_cfg.rewards["stair_probe_stride_growth_reward"]
   assert probe_reward.func is stair_probe_stride_growth_reward
   assert probe_reward.weight == 0.40
+  backoff_reward = env_cfg.rewards["stair_confirmed_backoff_stride_reward"]
+  assert backoff_reward.func is stair_confirmed_backoff_stride_reward
+  assert backoff_reward.weight == 0.35
+  lock_reward = env_cfg.rewards["stair_lock_stride_hold_reward"]
+  assert lock_reward.func is stair_lock_stride_hold_reward
+  assert lock_reward.weight == 0.30
   midline_reward = env_cfg.rewards["target_tread_midline_shaping"]
   assert midline_reward.func is target_tread_midline_shaping
   assert midline_reward.weight == 1.2

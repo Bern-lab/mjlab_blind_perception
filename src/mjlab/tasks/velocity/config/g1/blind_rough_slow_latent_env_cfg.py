@@ -197,6 +197,10 @@ class G1SlowLatentRewardParams:
   probe_stride_target_tolerance: float = 0.04
   probe_stride_actual_margin: float = 0.04
   probe_stride_first_layer_scale: float = 2.0
+  confirmed_backoff_stride_weight: float = 0.35
+  confirmed_backoff_stride_tolerance: float = 0.04
+  lock_stride_hold_weight: float = 0.30
+  lock_stride_hold_tolerance: float = 0.04
   stair_entry_evidence_time: float = 0.80
   safe_stride_evidence_window_steps: int = 15
   safe_stride_rear_partial_weight: float = 2.0
@@ -401,6 +405,14 @@ def configure_g1_step_danger_rewards(
   cfg.rewards["stair_probe_stride_growth_reward"] = RewardTermCfg(
     func=mdp.stair_probe_stride_growth_reward,
     weight=params.probe_stride_growth_weight,
+  )
+  cfg.rewards["stair_confirmed_backoff_stride_reward"] = RewardTermCfg(
+    func=mdp.stair_confirmed_backoff_stride_reward,
+    weight=params.confirmed_backoff_stride_weight,
+  )
+  cfg.rewards["stair_lock_stride_hold_reward"] = RewardTermCfg(
+    func=mdp.stair_lock_stride_hold_reward,
+    weight=params.lock_stride_hold_weight,
   )
   cfg.rewards["shank_front_edge_clearance_penalty"] = RewardTermCfg(
     func=mdp.shank_front_edge_clearance_penalty,
@@ -744,6 +756,10 @@ def _configure_latent_observations(
         "ratchet_probe_reward_target_tolerance_m": (
           params.rewards.probe_stride_target_tolerance
         ),
+        "ratchet_backoff_reward_tolerance_m": (
+          params.rewards.confirmed_backoff_stride_tolerance
+        ),
+        "ratchet_lock_reward_tolerance_m": (params.rewards.lock_stride_hold_tolerance),
         "ratchet_no_hit_lower_margin_m": 0.0,
         "ratchet_interval_target_margin_m": 0.01,
         "ratchet_collision_margin_m": 0.02,

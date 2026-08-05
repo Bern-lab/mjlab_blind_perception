@@ -37,6 +37,8 @@ from .stair_geometry import (
   STAIR_ADJACENT_PAIR_HEIGHT_KEY,
   STAIR_ADJACENT_PAIR_VALID_KEY,
   STAIR_ASCENT_DIR_KEY,
+  STAIR_BACKOFF_STRIDE_REWARD_EVENT_ID_KEY,
+  STAIR_BACKOFF_STRIDE_REWARD_KEY,
   STAIR_CLEARANCE_ASCENT_DIR_KEY,
   STAIR_CLEARANCE_FOOT_LAYERS_KEY,
   STAIR_CLEARANCE_FOOT_LAYERS_VALID_KEY,
@@ -61,6 +63,8 @@ from .stair_geometry import (
   STAIR_LANDING_EXPECTED_LAYER_KEY,
   STAIR_LANDING_SEQUENCE_ID_KEY,
   STAIR_LANDING_TARGET_FOOT_KEY,
+  STAIR_LOCK_STRIDE_REWARD_EVENT_ID_KEY,
+  STAIR_LOCK_STRIDE_REWARD_KEY,
   STAIR_ORACLE_CONTACT_FORCE_BY_FOOT_KEY,
   STAIR_ORACLE_CONTACT_LAYER_BY_FOOT_KEY,
   STAIR_ORACLE_CONTACT_NORMAL_BY_FOOT_KEY,
@@ -3085,8 +3089,11 @@ class toe_step_riser_approach_penalty(toe_step_riser_slab_penalty):
   """Backward-compatible alias for the penalty-only stair entry term."""
 
 
-class stair_probe_stride_growth_reward:
-  """Consume the one-shot post-first-collision stride-growth reward signal."""
+class _OneShotExtraReward:
+  """Consume a one-shot reward from env extras using a monotonically rising id."""
+
+  reward_key: str
+  event_id_key: str
 
   def __init__(self, cfg: RewardTermCfg, env) -> None:
     del cfg
@@ -3098,8 +3105,8 @@ class stair_probe_stride_growth_reward:
     self._last_event_id[env_ids] = 0
 
   def __call__(self, env) -> torch.Tensor:
-    reward = env.extras.get(STAIR_PROBE_STRIDE_REWARD_KEY)
-    event_id = env.extras.get(STAIR_PROBE_STRIDE_REWARD_EVENT_ID_KEY)
+    reward = env.extras.get(self.reward_key)
+    event_id = env.extras.get(self.event_id_key)
     if not isinstance(reward, torch.Tensor) or not isinstance(event_id, torch.Tensor):
       return torch.zeros(env.num_envs, device=env.device)
 
@@ -3108,6 +3115,27 @@ class stair_probe_stride_growth_reward:
     new_event = event_id != self._last_event_id
     self._last_event_id.copy_(event_id)
     return torch.where(new_event, reward, torch.zeros_like(reward))
+
+
+class stair_probe_stride_growth_reward(_OneShotExtraReward):
+  """Consume the one-shot post-first-collision stride-growth reward signal."""
+
+  reward_key = STAIR_PROBE_STRIDE_REWARD_KEY
+  event_id_key = STAIR_PROBE_STRIDE_REWARD_EVENT_ID_KEY
+
+
+class stair_confirmed_backoff_stride_reward(_OneShotExtraReward):
+  """Reward same-foot touchdown strides that have backed off after confirmation."""
+
+  reward_key = STAIR_BACKOFF_STRIDE_REWARD_KEY
+  event_id_key = STAIR_BACKOFF_STRIDE_REWARD_EVENT_ID_KEY
+
+
+class stair_lock_stride_hold_reward(_OneShotExtraReward):
+  """Reward same-foot touchdown strides that hold the confirmed stride center."""
+
+  reward_key = STAIR_LOCK_STRIDE_REWARD_KEY
+  event_id_key = STAIR_LOCK_STRIDE_REWARD_EVENT_ID_KEY
 
 
 def stair_skip_layer_penalty(env) -> torch.Tensor:

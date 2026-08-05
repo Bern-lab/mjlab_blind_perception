@@ -20,8 +20,12 @@ from mjlab.tasks.velocity.mdp.observations import (
   foot_event_memory_obs_dim,
 )
 from mjlab.tasks.velocity.mdp.stair_geometry import (
+  STAIR_BACKOFF_STRIDE_REWARD_EVENT_ID_KEY,
+  STAIR_BACKOFF_STRIDE_REWARD_KEY,
   STAIR_CURRENT_CONTACT_DURATION_KEY,
   STAIR_CURRENT_GROUND_CONTACT_KEY,
+  STAIR_LOCK_STRIDE_REWARD_EVENT_ID_KEY,
+  STAIR_LOCK_STRIDE_REWARD_KEY,
   STAIR_PROBE_STRIDE_REWARD_EVENT_ID_KEY,
   STAIR_PROBE_STRIDE_REWARD_KEY,
   TOE_RISER_NEW_HIT_BY_FOOT_KEY,
@@ -1730,6 +1734,144 @@ def test_foot_event_memory_ratchet_locks_after_stable_actual_stride() -> None:
   assert term.ratchet_lock_stable_count[0].item() == 2
   torch.testing.assert_close(term.ratchet_lock_lower_s[0], torch.tensor(0.255))
   torch.testing.assert_close(term.ratchet_lock_upper_s[0], torch.tensor(0.335))
+
+
+def test_foot_event_memory_ratchet_emits_backoff_stride_reward() -> None:
+  env = _make_env()
+  term = FootEventMemoryObs(
+    SimpleNamespace(
+      params={
+        "memory_len": 6,
+        "noise_enabled": False,
+        "age_norm_s": 1.0,
+        "stance_age_norm_s": 1.0,
+        "ratchet_backoff_reward_tolerance_m": 0.04,
+      }
+    ),
+    env,
+  )
+
+  term.ratchet_active[0] = True
+  term.ratchet_stride_mode[0] = 1
+  term.ratchet_upper_seen[0] = True
+  term.ratchet_interval_confirmed[0] = True
+  term.ratchet_lower_s[0] = 0.575
+  term.ratchet_probe_target_s[0] = 0.55
+  term.ratchet_upper_s[0] = 0.625
+  term.ratchet_same_foot_stride_lower_s[0] = 0.575
+  term.ratchet_same_foot_stride_upper_s[0] = 0.625
+  term.ratchet_confidence[0] = 0.75
+
+  term.footprint_valid[0, :3] = True
+  newest_right = term.footprints[0, 0]
+  previous_left = term.footprints[0, 1]
+  older_right = term.footprints[0, 2]
+  newest_right[0] = 1.0
+  newest_right[2] = 1.0
+  newest_right[3] = 1.0
+  newest_right[5] = 1.0
+  newest_right[9] = 0.20
+  newest_right[10] = 0.56
+  previous_left[0] = 1.0
+  previous_left[1] = 1.0
+  previous_left[3] = 1.0
+  previous_left[5] = 1.0
+  previous_left[9] = 0.10
+  previous_left[10] = 0.27
+  older_right[0] = 1.0
+  older_right[2] = 1.0
+  older_right[3] = 1.0
+  older_right[5] = 1.0
+  older_right[9] = 0.0
+  older_right[10] = 0.02
+
+  term._compute_event_summary(
+    update_ratchet=True,
+    new_footprint_any=torch.tensor([True]),
+    new_toe_mark_any=torch.tensor([False]),
+    step_dt=0.02,
+  )
+
+  torch.testing.assert_close(
+    env.extras[STAIR_BACKOFF_STRIDE_REWARD_KEY][0],
+    torch.tensor(1.0),
+  )
+  assert env.extras[STAIR_BACKOFF_STRIDE_REWARD_EVENT_ID_KEY][0].item() == 1
+  assert term.ratchet_backoff_stride_reward_ok[0].item() is True
+  torch.testing.assert_close(
+    term.ratchet_backoff_stride_reward_target_s[0],
+    torch.tensor(0.55),
+  )
+
+
+def test_foot_event_memory_ratchet_emits_lock_stride_reward() -> None:
+  env = _make_env()
+  term = FootEventMemoryObs(
+    SimpleNamespace(
+      params={
+        "memory_len": 6,
+        "noise_enabled": False,
+        "age_norm_s": 1.0,
+        "stance_age_norm_s": 1.0,
+        "ratchet_lock_reward_tolerance_m": 0.04,
+        "ratchet_lock_phase_correction_enabled": False,
+      }
+    ),
+    env,
+  )
+
+  term.ratchet_active[0] = True
+  term.ratchet_stride_mode[0] = 2
+  term.ratchet_interval_confirmed[0] = True
+  term.ratchet_lower_s[0] = 0.55
+  term.ratchet_probe_target_s[0] = 0.60
+  term.ratchet_upper_s[0] = 0.65
+  term.ratchet_same_foot_stride_lower_s[0] = 0.55
+  term.ratchet_same_foot_stride_upper_s[0] = 0.65
+  term.ratchet_lock_lower_s[0] = 0.57
+  term.ratchet_lock_upper_s[0] = 0.63
+  term.ratchet_confidence[0] = 0.75
+
+  term.footprint_valid[0, :3] = True
+  newest_right = term.footprints[0, 0]
+  previous_left = term.footprints[0, 1]
+  older_right = term.footprints[0, 2]
+  newest_right[0] = 1.0
+  newest_right[2] = 1.0
+  newest_right[3] = 1.0
+  newest_right[5] = 1.0
+  newest_right[9] = 0.20
+  newest_right[10] = 0.64
+  previous_left[0] = 1.0
+  previous_left[1] = 1.0
+  previous_left[3] = 1.0
+  previous_left[5] = 1.0
+  previous_left[9] = 0.10
+  previous_left[10] = 0.30
+  older_right[0] = 1.0
+  older_right[2] = 1.0
+  older_right[3] = 1.0
+  older_right[5] = 1.0
+  older_right[9] = 0.0
+  older_right[10] = 0.02
+
+  term._compute_event_summary(
+    update_ratchet=True,
+    new_footprint_any=torch.tensor([True]),
+    new_toe_mark_any=torch.tensor([False]),
+    step_dt=0.02,
+  )
+
+  torch.testing.assert_close(
+    env.extras[STAIR_LOCK_STRIDE_REWARD_KEY][0],
+    torch.tensor(0.5),
+  )
+  assert env.extras[STAIR_LOCK_STRIDE_REWARD_EVENT_ID_KEY][0].item() == 1
+  assert term.ratchet_lock_stride_reward_ok[0].item() is True
+  torch.testing.assert_close(
+    term.ratchet_lock_stride_reward_target_s[0],
+    torch.tensor(0.60),
+  )
 
 
 def test_foot_event_memory_ratchet_does_not_lock_from_target_only() -> None:

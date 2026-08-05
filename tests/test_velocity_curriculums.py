@@ -30,12 +30,16 @@ from mjlab.tasks.velocity.mdp.stair_geometry import (
   STAIR_ADJACENT_PAIR_EVENT_KEY,
   STAIR_ADJACENT_PAIR_HEIGHT_KEY,
   STAIR_ADJACENT_PAIR_VALID_KEY,
+  STAIR_BACKOFF_STRIDE_REWARD_EVENT_ID_KEY,
+  STAIR_BACKOFF_STRIDE_REWARD_KEY,
   STAIR_DEPTH_CONFIRMATION_AGE_KEY,
   STAIR_DEPTH_CONFIRMATION_EVENT_KEY,
   STAIR_DEPTH_LABEL_VALID_KEY,
   STAIR_ENTRY_EVENT_KEY,
   STAIR_ENTRY_EVIDENCE_ASCENT_DIR_KEY,
   STAIR_ENTRY_RECENT_EVIDENCE_KEY,
+  STAIR_LOCK_STRIDE_REWARD_EVENT_ID_KEY,
+  STAIR_LOCK_STRIDE_REWARD_KEY,
   STAIR_PHASE_KEY,
   STAIR_PROBE_STRIDE_REWARD_EVENT_ID_KEY,
   STAIR_PROBE_STRIDE_REWARD_KEY,
@@ -639,6 +643,50 @@ def test_stair_probe_stride_growth_reward_consumes_events_once() -> None:
   env.extras[STAIR_PROBE_STRIDE_REWARD_KEY] = torch.tensor([0.25, 0.75])
   env.extras[STAIR_PROBE_STRIDE_REWARD_EVENT_ID_KEY] = torch.tensor([1, 3])
   torch.testing.assert_close(term(env), torch.tensor([0.0, 0.75]))
+
+
+@pytest.mark.parametrize(
+  ("reward_cls", "reward_key", "event_id_key"),
+  [
+    (
+      temporal_stair_rewards.stair_confirmed_backoff_stride_reward,
+      STAIR_BACKOFF_STRIDE_REWARD_KEY,
+      STAIR_BACKOFF_STRIDE_REWARD_EVENT_ID_KEY,
+    ),
+    (
+      temporal_stair_rewards.stair_lock_stride_hold_reward,
+      STAIR_LOCK_STRIDE_REWARD_KEY,
+      STAIR_LOCK_STRIDE_REWARD_EVENT_ID_KEY,
+    ),
+  ],
+)
+def test_stair_confirmed_stride_rewards_consume_events_once(
+  reward_cls,
+  reward_key: str,
+  event_id_key: str,
+) -> None:
+  env = SimpleNamespace(
+    num_envs=2,
+    device=torch.device("cpu"),
+    extras={
+      reward_key: torch.tensor([0.5, -1.0]),
+      event_id_key: torch.tensor([1, 2]),
+    },
+  )
+  term = reward_cls(
+    RewardTermCfg(
+      func=reward_cls,
+      weight=1.0,
+    ),
+    env,
+  )
+
+  torch.testing.assert_close(term(env), torch.tensor([0.5, -1.0]))
+  torch.testing.assert_close(term(env), torch.tensor([0.0, 0.0]))
+
+  env.extras[reward_key] = torch.tensor([0.25, 0.75])
+  env.extras[event_id_key] = torch.tensor([2, 2])
+  torch.testing.assert_close(term(env), torch.tensor([0.25, 0.0]))
 
 
 def test_stair_entry_tread_support_fraction_detects_sixty_percent() -> None:

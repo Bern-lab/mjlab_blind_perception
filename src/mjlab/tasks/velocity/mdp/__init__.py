@@ -21,6 +21,10 @@ stair_aware_feet_gait = _temporal_stair_rewards.stair_aware_feet_gait
 stair_probe_stride_growth_reward = (
   _temporal_stair_rewards.stair_probe_stride_growth_reward
 )
+stair_confirmed_backoff_stride_reward = (
+  _temporal_stair_rewards.stair_confirmed_backoff_stride_reward
+)
+stair_lock_stride_hold_reward = _temporal_stair_rewards.stair_lock_stride_hold_reward
 stair_skip_layer_penalty = _temporal_stair_rewards.stair_skip_layer_penalty
 target_tread_midline_shaping = _temporal_stair_rewards.target_tread_midline_shaping
 stair_tread_landing_reward = _temporal_stair_rewards.stair_tread_landing_reward
