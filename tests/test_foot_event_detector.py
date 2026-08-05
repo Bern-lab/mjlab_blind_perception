@@ -441,7 +441,8 @@ def test_footprint_detector_v3_training_preset_pins_compatible_layout() -> None:
   assert cfg.baseline_metrics_file == FOOTPRINT_V3_DEFAULT_BASELINE_METRICS_FILE
   assert cfg.baseline_required_metric_names == FOOTPRINT_V3_REQUIRED_BASELINE_METRICS
   assert cfg.baseline_required_metric_min_improvement == 1.0e-4
-  assert cfg.require_baseline_guard
+  assert not cfg.baseline_guard_gates_best
+  assert not cfg.require_baseline_guard
   assert _should_mine_touchdown_false_positive_hard_negatives(cfg)
 
 

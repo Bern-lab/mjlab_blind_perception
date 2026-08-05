@@ -22,10 +22,10 @@ Added
   long-stair tread-depth variants for deployable footprint detector retraining.
 - Added Stage 2D touchdown timing/footprint-anchor validation metrics and
   touchdown false-positive hard-negative mining for footprint detector training.
-- Added strict legacy-baseline gating and toe-neutral footprint-only scoring to
-  the deploy-friendly footprint detector preset, so ``best.pt`` is only accepted
-  when the new 134-D observation run beats the strongest saved legacy footprint
-  metrics.
+- Added legacy-baseline auditing and toe-neutral footprint-only scoring to the
+  deploy-friendly footprint detector preset, so exported metrics show whether
+  the new 134-D observation run beats the strongest saved legacy footprint
+  metrics without blocking normal ONNX export.
 - Added ``STAIRS_TERRAINS_CFG`` terrain preset for progressive stair
   curriculum training and ``@terrain_preset`` decorator for composing
   terrain configurations from reusable presets.

@@ -175,7 +175,11 @@ def _with_footprint_v3_defaults(
     if cfg.baseline_required_metric_min_improvement
     == OnlineFootEventDetectorConfig.baseline_required_metric_min_improvement
     else cfg.baseline_required_metric_min_improvement,
-    require_baseline_guard=True
+    baseline_guard_gates_best=False
+    if cfg.baseline_guard_gates_best
+    == OnlineFootEventDetectorConfig.baseline_guard_gates_best
+    else cfg.baseline_guard_gates_best,
+    require_baseline_guard=False
     if cfg.require_baseline_guard
     == OnlineFootEventDetectorConfig.require_baseline_guard
     else cfg.require_baseline_guard,

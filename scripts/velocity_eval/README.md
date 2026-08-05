@@ -377,14 +377,17 @@ the separate toe-riser detector before any event-summary logic.
 
 For footprint-only runs, the trainer now scores `footprint_deploy_score` and
 `high_recall_footprint_score` without penalizing the intentionally dummy toe
-logits. It also writes and enforces a strict baseline guard against the strongest
-local legacy footprint metrics from
+logits. It also writes a baseline audit against the strongest local legacy
+footprint metrics from
 `model51000_seed42_foot_event_detector_online_v11_toe_calib` at step `2250`.
-`best.pt` is only accepted if the candidate beats the old footprint score,
+By default this preset treats the old baseline as an audit: `metrics.json`
+records whether the exported best checkpoint beats the old footprint score,
 high-recall footprint score, touchdown precision/recall, stair touchdown
-precision/recall, stair/flat F1 checks, contact F1 checks, and stair event count.
-If no evaluated checkpoint beats those baselines, the run fails instead of
-quietly exporting a weaker `best.onnx`.
+precision/recall, stair/flat F1 checks, contact F1 checks, and stair event count,
+but `best.pt`, `best.onnx`, `deployment_contract.json`, and the full metrics
+history are still written normally. Pass `--baseline-guard-gates-best` and
+`--require-baseline-guard` only for a strict sweep where weaker candidates should
+not be exported.
 
 Example:
 

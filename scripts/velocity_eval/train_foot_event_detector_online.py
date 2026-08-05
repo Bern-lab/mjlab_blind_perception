@@ -162,6 +162,7 @@ class OnlineFootEventDetectorConfig:
   baseline_toe_metric_min_improvement: float = 0.0
   baseline_required_metric_names: tuple[str, ...] = ()
   baseline_required_metric_min_improvement: float = 0.0
+  baseline_guard_gates_best: bool = True
   require_baseline_guard: bool = False
   max_updates: int | None = 5000
   early_stop_patience_evals: int = 8
@@ -2745,7 +2746,9 @@ def run_online_train(
           ),
         )
         metric_value = float(val_metrics[selection_metric])
-        is_better = guard_passed and _metric_improved(
+        is_better = (
+          guard_passed or not cfg.baseline_guard_gates_best
+        ) and _metric_improved(
           metric_value=metric_value,
           best_value=best_value,
           higher_better=higher_better,
@@ -2856,6 +2859,17 @@ def run_online_train(
           key: float(value) for key, value in dict(record["val"]).items()
         }
         break
+  best_guard_passed, best_guard_failures = _baseline_guard_passed(
+    best_val_metrics,
+    baseline_metrics,
+    touchdown_recall_tolerance=cfg.baseline_touchdown_recall_tolerance,
+    stair_touchdown_recall_tolerance=cfg.baseline_stair_touchdown_recall_tolerance,
+    flat_touchdown_f1_tolerance=cfg.baseline_flat_touchdown_f1_tolerance,
+    toe_metric=cfg.baseline_toe_metric,
+    toe_metric_min_improvement=cfg.baseline_toe_metric_min_improvement,
+    required_metric_names=cfg.baseline_required_metric_names,
+    required_metric_min_improvement=cfg.baseline_required_metric_min_improvement,
+  )
   best_deployment_thresholds = {
     key: value
     for key, value in best_val_metrics.items()
@@ -2931,7 +2945,10 @@ def run_online_train(
       "toe_metric_min_improvement": cfg.baseline_toe_metric_min_improvement,
       "required_metric_names": list(cfg.baseline_required_metric_names),
       "required_metric_min_improvement": (cfg.baseline_required_metric_min_improvement),
+      "guard_gates_best": cfg.baseline_guard_gates_best,
       "require_baseline_guard": cfg.require_baseline_guard,
+      "best_checkpoint_passed": best_guard_passed,
+      "best_checkpoint_failures": list(best_guard_failures),
     },
     "model": {
       "type": "FootEventDetectorGRU",
