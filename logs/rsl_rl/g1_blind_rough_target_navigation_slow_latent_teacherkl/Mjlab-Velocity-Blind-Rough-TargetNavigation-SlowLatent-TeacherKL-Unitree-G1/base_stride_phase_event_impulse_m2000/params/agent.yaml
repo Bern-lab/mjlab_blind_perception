@@ -1,0 +1,206 @@
+seed: 42
+num_steps_per_env: 64
+max_iterations: 10001
+obs_groups:
+  actor: !!python/tuple
+  - actor
+  latent: !!python/tuple
+  - latent
+  critic: !!python/tuple
+  - critic
+  teacher: !!python/tuple
+  - teacher
+  - camera
+save_interval: 500
+experiment_name: g1_blind_rough_target_navigation_slow_latent_teacherkl
+run_name: stride_phase_event_impulse_no_teacher_m10000_2048
+logger: tensorboard
+wandb_project: mjlab
+wandb_tags: !!python/tuple []
+resume: false
+load_run: .*
+load_checkpoint: model_.*.pt
+bootstrap_checkpoint_path: logs/rsl_rl/g1_blind_rough_target_navigation_slow_latent_teacherkl/Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1/2026-08-05_22-11-08_adaptive_midline_dense_no_teacher_m6500_2048/model_10000.pt
+load_optimizer_on_resume: false
+load_iteration_on_resume: false
+clip_actions: null
+upload_model: true
+class_name: OnPolicyRunner
+actor:
+  hidden_dims: !!python/tuple
+  - 512
+  - 256
+  - 128
+  activation: elu
+  obs_normalization: true
+  cnn_cfg: null
+  distribution_cfg:
+    class_name: GaussianDistribution
+    init_std: 1.0
+    std_type: scalar
+  rnn_type: lstm
+  rnn_hidden_dim: 128
+  rnn_num_layers: 1
+  class_name: mjlab.rl.slow_latent_model:LSTMSlowLatentMLPModel
+  use_slow_latent: true
+  latent_dim: 24
+  latent_hidden_dim: 128
+  latent_alpha: 0.1
+  encoder_type: lstm
+  use_gated_latent: true
+  use_stair_latent_obs: true
+  latent_obs_set: latent
+  alpha_fast: 0.3
+  alpha_write: 0.8
+  state_latent_dim: 8
+  alpha_hold_state: 0.0
+  alpha_hold_shape: 0.05
+  memory_event_shape_boost_steps: 15
+  write_steps: 6
+  stair_confirm_steps: 3
+  min_stair_steps: 30
+  exit_steps: 40
+  stair_memory_exit_on_stair_off: false
+  cooldown_steps: 15
+  event_on_threshold: 0.6
+  event_off_threshold: 0.2
+  stair_on_threshold: 0.35
+  stair_off_threshold: 0.2
+  aux_future_collision_risk_coef: 0.0
+  aux_future_safe_landing_quality_coef: 0.0
+  aux_event_coef: 0.03
+  aux_event_pos_weight: 50.0
+  event_label_window_steps: 4
+  aux_stair_coef: 0.05
+  aux_stair_pos_weight: 3.0
+  aux_stair_shape_coef: 0.05
+  aux_safe_stride_coef: 0.04
+  stair_shape_huber_delta: 0.05
+  stair_shape_same_foot_loss_coef: 0.0
+  stair_shape_riser_loss_coef: 1.0
+  safe_stride_huber_delta: 0.05
+  safe_stride_width_loss_coef: 1.5
+  safe_stride_lower_shortfall_coef: 1.2
+  safe_stride_interval_coverage_loss_coef: 0.0
+  safe_stride_interval_coverage_margin: 0.01
+  safe_stride_confidence_loss_coef: 0.1
+  safe_stride_phase_center_loss_coef: 1.0
+  safe_stride_trend_loss_coef: 0.5
+  safe_stride_dense_trend_loss_coef: 1.0
+  safe_stride_std_floor_loss_coef: 0.0
+  safe_stride_centered_loss_coef: 0.0
+  safe_stride_std_floor_ratio: 0.55
+  safe_stride_deployable_hint_loss_coef: 0.0
+  safe_stride_deployable_hint_margin: 0.01
+  same_foot_stride_deployable_hint_loss_coef: 0.0
+  same_foot_stride_deployable_hint_margin: 0.02
+  safe_stride_min: 0.1
+  safe_stride_max: 0.85
+  same_foot_stride_min: 0.1
+  same_foot_stride_max: 0.9
+  structured_safe_stride_enabled: true
+  dynamic_stair_shape_enabled: true
+  dynamic_safe_stride_enabled: true
+  safe_stride_phase_dim: 2
+  safe_stride_phase_start: 91
+  shadow_semantic_enabled: false
+  actor_semantic_enabled: true
+  geometry_probe_input: none
+  future_risk_weight_scale: 2.0
+  future_quality_weight_scale: 2.0
+  future_risk_huber_delta: 0.1
+  future_quality_huber_delta: 0.1
+  future_horizon: 20
+  slow_latent_metrics: minimal
+  mlp_encoder_dims: !!python/tuple
+  - 128
+  - 128
+critic:
+  hidden_dims: !!python/tuple
+  - 512
+  - 256
+  - 128
+  activation: elu
+  obs_normalization: true
+  cnn_cfg: null
+  distribution_cfg: null
+  rnn_type: null
+  rnn_hidden_dim: 256
+  rnn_num_layers: 1
+  class_name: MLPModel
+algorithm:
+  num_learning_epochs: 5
+  num_mini_batches: 4
+  learning_rate: 0.001
+  schedule: adaptive
+  gamma: 0.99
+  lam: 0.95
+  entropy_coef: 0.01
+  desired_kl: 0.01
+  max_grad_norm: 1.0
+  value_loss_coef: 1.0
+  use_clipped_value_loss: true
+  clip_param: 0.2
+  normalize_advantage_per_mini_batch: false
+  optimizer: adam
+  share_cnn_encoders: false
+  rnd_cfg: null
+  symmetry_cfg: null
+  class_name: rsl_rl.algorithms.ppo_teacher_kl:PPOTeacherKL
+  teacher_kl_cfg:
+    enabled: false
+    imitation_only: false
+    imitation_loss_coef: 1.0
+    checkpoint_path: teacher_policies/g1_target_heading_depth_teacher/model_118200.pt
+    loss_type: mean_huber
+    lambda_start: 0.05
+    lambda_end: 0.0
+    warmup_iters: 0
+    constant_iters: 0
+    anneal_iters: 10000
+    schedule: cosine
+    huber_delta: 0.5
+    teacher_forward_chunk_size: 4096
+    max_teacher_loss: null
+    max_kl_loss: null
+    max_kl_loss_tail_slope: 0.0
+    check_shapes: true
+    fail_on_nonfinite_kl: true
+    debug_shapes: false
+    log_kl_when_lambda_zero: false
+  safe_stride_probe_only: false
+  safe_stride_probe_learning_rate: 0.001
+  geometry_probe_only: false
+  geometry_probe_learning_rate: 0.001
+  geometry_probe_permute_depth_labels: false
+teacher:
+  hidden_dims: !!python/tuple
+  - 512
+  - 256
+  - 128
+  activation: elu
+  obs_normalization: true
+  cnn_cfg:
+    output_channels:
+    - 16
+    - 32
+    kernel_size:
+    - 5
+    - 3
+    stride:
+    - 2
+    - 2
+    padding: zeros
+    activation: elu
+    max_pool: false
+    global_pool: none
+    spatial_softmax: true
+    spatial_softmax_temperature: 1.0
+  distribution_cfg:
+    class_name: GaussianDistribution
+    init_std: 1.0
+    std_type: scalar
+  rnn_type: null
+  rnn_hidden_dim: 256
+  rnn_num_layers: 1
+  class_name: mjlab.rl.spatial_softmax:SpatialSoftmaxCNNModel
