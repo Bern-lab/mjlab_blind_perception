@@ -32,6 +32,7 @@ from scripts.velocity_eval.export_foot_event_detector_dataset import (
   foot_event_input_feature_scales,
   foot_event_label_diagnostics_from_env,
   foot_event_labels_from_env,
+  foot_event_temporal_feature_contract,
   resolve_foot_event_detector_obs_dim,
 )
 from scripts.velocity_eval.export_stair_probe_dataset import (
@@ -2185,6 +2186,9 @@ def _deployment_contract_payload(
       include_gait_phase=cfg.include_gait_phase,
       input_schema=cfg.input_schema,
     ),
+    "temporal_feature_contract": foot_event_temporal_feature_contract(
+      input_schema=cfg.input_schema,
+    ),
     "best_deployment_thresholds": best_deployment_thresholds,
     "event_logic": {
       "touchdown_contact_threshold": cfg.touchdown_contact_threshold,
@@ -2201,9 +2205,12 @@ def _deployment_contract_payload(
       "obs_history_ring_buffer",
       "previous_body_frame_fk_positions",
       "previous_body_frame_fk_velocities",
+      "previous_toe_forward_velocities",
+      "previous_toe_vertical_velocities",
       "previous_base_angular_velocity",
       "previous_action",
       "touchdown_cooldown_state",
+      "toe_hit_cooldown_state",
       "contact_hysteresis_state",
     ],
     "onnx_path": str(onnx_path) if onnx_path is not None else None,

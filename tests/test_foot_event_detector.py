@@ -18,6 +18,7 @@ from scripts.velocity_eval.export_foot_event_detector_dataset import (
   foot_event_input_feature_scales,
   foot_event_label_diagnostics_from_env,
   foot_event_labels_from_env,
+  foot_event_temporal_feature_contract,
   resolve_foot_event_detector_obs_dim,
 )
 from scripts.velocity_eval.export_stair_probe_dataset import input_feature_slices
@@ -488,6 +489,16 @@ def test_toe_riser_deploy_v3_schema_focuses_on_toe_kinematics() -> None:
   assert "left_toe_pos_body" in names
   assert "left_toe_forward_velocity" in names
   assert "left_toe_opposite_center_delta_body" in names
+  temporal_contract = foot_event_temporal_feature_contract(
+    input_schema="toe_riser_deploy_v3",
+  )
+  assert temporal_contract["toe_vertical_velocity_delta"].startswith(
+    "toe_vertical_velocity[t] - toe_vertical_velocity[t-1]"
+  )
+  assert temporal_contract["toe_forward_velocity_delta"].startswith(
+    "toe_forward_velocity[t] - toe_forward_velocity[t-1]"
+  )
+  assert foot_event_temporal_feature_contract(input_schema="footprint_deploy_v3") == {}
   assert "right_sole_pitch_proxy" in names
   assert "right_joint_vel" in names
 
@@ -652,6 +663,12 @@ def test_toe_riser_deployment_contract_marks_dummy_footprint_outputs() -> None:
     4,
     5,
   ]
+  assert contract["temporal_feature_contract"][
+    "toe_vertical_velocity_delta"
+  ].startswith("toe_vertical_velocity[t] - toe_vertical_velocity[t-1]")
+  assert "previous_toe_forward_velocities" in contract["reset_required_state"]
+  assert "previous_toe_vertical_velocities" in contract["reset_required_state"]
+  assert "toe_hit_cooldown_state" in contract["reset_required_state"]
 
 
 def test_footprint_training_loss_keeps_event_terms_on_touchdown_only() -> None:
@@ -1115,8 +1132,56 @@ def test_toe_riser_deploy_v3_obs_uses_focused_toe_motion_features() -> None:
     0.5 * torch.ones(num_envs, 1),
   )
   torch.testing.assert_close(
+    second[:, slices["left_toe_forward_velocity_delta"]],
+    0.5 * torch.ones(num_envs, 1),
+  )
+  torch.testing.assert_close(
+    second[:, slices["left_toe_vertical_velocity_delta"]],
+    torch.zeros(num_envs, 1),
+  )
+  torch.testing.assert_close(
     second[:, slices["left_action_delta"]][:, 0],
     torch.full((num_envs,), 0.80),
+  )
+
+  robot.data.site_pos_w = site_pos_w + torch.tensor([0.04, 0.0, 0.0])
+  robot.data.projected_gravity_b = torch.tensor([[-0.6, 0.0, -0.8]]).repeat(
+    num_envs,
+    1,
+  )
+  third = foot_event_detector_obs(
+    {},
+    cast(Any, env),
+    input_schema="toe_riser_deploy_v3",
+    include_gait_phase=True,
+    gait_period=0.6,
+    command_name="twist",
+    reset_mask=torch.zeros(num_envs, dtype=torch.bool),
+  )
+
+  torch.testing.assert_close(
+    third[:, slices["left_toe_vel_delta_body"]],
+    torch.zeros(num_envs, 3),
+    atol=1.0e-6,
+    rtol=1.0e-6,
+  )
+  torch.testing.assert_close(
+    third[:, slices["left_toe_forward_velocity_delta"]],
+    torch.zeros(num_envs, 1),
+    atol=1.0e-6,
+    rtol=1.0e-6,
+  )
+  torch.testing.assert_close(
+    third[:, slices["left_toe_vertical_velocity"]],
+    torch.full((num_envs, 1), 0.30),
+    atol=1.0e-6,
+    rtol=1.0e-6,
+  )
+  torch.testing.assert_close(
+    third[:, slices["left_toe_vertical_velocity_delta"]],
+    torch.full((num_envs, 1), 0.30),
+    atol=1.0e-6,
+    rtol=1.0e-6,
   )
 
 

@@ -230,6 +230,46 @@ TOE_RISER_DEPLOY_V3_FEATURE_SCALE_GROUPS: tuple[tuple[str, int, float], ...] = (
 )
 """Fixed multipliers for the toe-riser v3 raw feature layout."""
 
+
+def foot_event_temporal_feature_contract(
+  *,
+  input_schema: FootEventDetectorObsSchema,
+) -> dict[str, str]:
+  """Return deploy-side temporal feature definitions for a detector schema."""
+  schema = _validate_input_schema(input_schema)
+  if schema != "toe_riser_deploy_v3":
+    return {}
+  return {
+    "frame": (
+      "All body-frame FK, gyro, gravity, and velocity vectors are expressed in "
+      "the policy root/pelvis body frame."
+    ),
+    "sample_dt_seconds": (
+      "Use the rollout/control dt used during training; velocities divide "
+      "position differences by dt."
+    ),
+    "toe_vel_body": "(toe_pos_body[t] - toe_pos_body[t-1]) / dt.",
+    "toe_vel_delta_body": "toe_vel_body[t] - toe_vel_body[t-1]; no dt divisor.",
+    "toe_vertical_velocity": "dot(toe_vel_body[t], up_axis_body[t]).",
+    "toe_vertical_velocity_delta": (
+      "toe_vertical_velocity[t] - toe_vertical_velocity[t-1]; no dt divisor."
+    ),
+    "toe_forward_velocity": "toe_vel_body[t].x.",
+    "toe_forward_velocity_delta": (
+      "toe_forward_velocity[t] - toe_forward_velocity[t-1]; no dt divisor."
+    ),
+    "base_ang_vel_delta": "base_ang_vel[t] - base_ang_vel[t-1]; no dt divisor.",
+    "action_delta": "applied_raw_action[t-1] - applied_raw_action[t-2].",
+    "joint_tracking_error": (
+      "default_q + action_scale * applied_raw_action[t-1] - measured_q[t]."
+    ),
+    "reset": (
+      "Clear observation history and all previous-value caches on robot reset, "
+      "model reload, controller entry, or communication recovery."
+    ),
+  }
+
+
 FOOT_EVENT_SUPPORT_CONTACT_SENSOR_NAME = "feet_ground_contact"
 FOOT_EVENT_SUPPORT_FORCE_VERTICAL_RATIO_MIN = 0.45
 
@@ -935,6 +975,7 @@ def _toe_riser_deploy_v3_obs(
 
   def per_foot_features(
     *,
+    name: str,
     toe: torch.Tensor,
     heel: torch.Tensor,
     opposite_center: torch.Tensor,
@@ -950,16 +991,30 @@ def _toe_riser_deploy_v3_obs(
       dim=-1,
       keepdim=True,
     ).clamp_min(1.0e-6)
+    toe_vertical_velocity = vertical_velocity(toe_vel)
+    toe_vertical_velocity_delta = _delta_from_cache(
+      env,
+      value=toe_vertical_velocity,
+      key=f"toe_riser_deploy_v3_prev_{name}_vertical_velocity",
+      reset_mask=reset_mask,
+    )
+    toe_forward_velocity = toe_vel[:, 0:1]
+    toe_forward_velocity_delta = _delta_from_cache(
+      env,
+      value=toe_forward_velocity,
+      key=f"toe_riser_deploy_v3_prev_{name}_forward_velocity",
+      reset_mask=reset_mask,
+    )
     return torch.cat(
       (
         toe.to(dtype=dtype),
         toe_height,
         toe_vel,
         toe_vel_delta,
-        vertical_velocity(toe_vel),
-        vertical_velocity(toe_vel_delta),
-        toe_vel[:, 0:1],
-        toe_vel_delta[:, 0:1],
+        toe_vertical_velocity,
+        toe_vertical_velocity_delta,
+        toe_forward_velocity,
+        toe_forward_velocity_delta,
         sole_vector,
         sole_pitch,
         toe_heel_height_gap,
@@ -983,6 +1038,7 @@ def _toe_riser_deploy_v3_obs(
   parts.extend(
     [
       per_foot_features(
+        name="left_toe",
         toe=left_toe,
         heel=left_heel_b,
         opposite_center=right_center_b,
@@ -991,6 +1047,7 @@ def _toe_riser_deploy_v3_obs(
         action_slice=slice(0, 6),
       ),
       per_foot_features(
+        name="right_toe",
         toe=right_toe,
         heel=right_heel_b,
         opposite_center=left_center_b,
@@ -1285,6 +1342,9 @@ def write_dataset_outputs(
     ),
     "input_feature_scales": foot_event_input_feature_scales(
       include_gait_phase=cfg.include_gait_phase,
+      input_schema=cfg.input_schema,
+    ),
+    "temporal_feature_contract": foot_event_temporal_feature_contract(
       input_schema=cfg.input_schema,
     ),
     "label_names": list(FOOT_EVENT_LABEL_NAMES),
