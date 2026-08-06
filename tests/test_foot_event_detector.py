@@ -47,6 +47,7 @@ from scripts.velocity_eval.train_foot_event_detector_online import (
   _metric_improved,
   _mine_false_positive_touchdown_hard_negatives,
   _should_mine_touchdown_false_positive_hard_negatives,
+  _stair_hard_negative_label_indices_for_config,
   _training_loss,
 )
 from scripts.velocity_eval.train_footprint_detector_v3 import (
@@ -58,6 +59,24 @@ from scripts.velocity_eval.train_footprint_detector_v3 import (
 from scripts.velocity_eval.train_footprint_detector_v3 import (
   FOOTPRINT_V3_REQUIRED_BASELINE_METRICS,
   _with_footprint_v3_defaults,
+)
+from scripts.velocity_eval.train_toe_riser_detector_v3 import (
+  DEFAULT_CHECKPOINT_FILE as TOE_RISER_V3_DEFAULT_CHECKPOINT_FILE,
+)
+from scripts.velocity_eval.train_toe_riser_detector_v3 import (
+  DEFAULT_OUTPUT_DIR as TOE_RISER_V3_DEFAULT_OUTPUT_DIR,
+)
+from scripts.velocity_eval.train_toe_riser_detector_v3 import (
+  TOE_RISER_V3_DUMMY_LOW_LOGIT_INDICES,
+  TOE_RISER_V3_EXPECTED_OBS_DIM,
+  TOE_RISER_V3_FRAME_HIDDEN_DIM,
+  TOE_RISER_V3_HEAD_HIDDEN_DIM,
+  TOE_RISER_V3_HISTORY_LEN,
+  TOE_RISER_V3_INPUT_SCHEMA,
+  TOE_RISER_V3_OUTPUT_DIM,
+  TOE_RISER_V3_RECURRENT_HIDDEN_DIM,
+  TOE_RISER_V3_TRAINED_LABEL_INDICES,
+  _with_toe_riser_v3_defaults,
 )
 
 from mjlab.tasks.velocity.mdp.observations import _G1_LEG_JOINT_NAMES
@@ -409,6 +428,70 @@ def test_footprint_deploy_v3_schema_is_independent_of_legacy_latent() -> None:
   assert "right_joint_vel" in names
 
 
+def test_toe_riser_deploy_v3_schema_focuses_on_toe_kinematics() -> None:
+  groups = foot_event_input_feature_groups(
+    include_gait_phase=True,
+    input_schema="toe_riser_deploy_v3",
+  )
+  names = [str(group["name"]) for group in groups]
+  widths = [int(group["width"]) for group in groups]
+
+  assert (
+    foot_event_detector_obs_dim(
+      include_gait_phase=False,
+      input_schema="toe_riser_deploy_v3",
+    )
+    == 104
+  )
+  assert (
+    foot_event_detector_obs_dim(
+      include_gait_phase=True,
+      input_schema="toe_riser_deploy_v3",
+    )
+    == 106
+  )
+  assert (
+    resolve_foot_event_detector_obs_dim(
+      None,
+      include_gait_phase=True,
+      input_schema="toe_riser_deploy_v3",
+    )
+    == 106
+  )
+  assert sum(widths) == 106
+  assert names[:6] == [
+    "projected_gravity",
+    "base_ang_vel",
+    "base_ang_vel_delta",
+    "command_xyz",
+    "gait_phase_sin",
+    "gait_phase_cos",
+  ]
+  assert (
+    len(
+      foot_event_input_feature_scales(
+        include_gait_phase=True,
+        input_schema="toe_riser_deploy_v3",
+      )
+    )
+    == 106
+  )
+  scale_groups = foot_event_input_feature_scale_groups(
+    include_gait_phase=True,
+    input_schema="toe_riser_deploy_v3",
+  )
+  assert [str(group["name"]) for group in scale_groups] == names
+  assert "left_endpoint_pos_body" not in names
+  assert "left_gravity_height" not in names
+  assert "previous_action_leg" not in names
+  assert "left_landing_shape" not in names
+  assert "left_toe_pos_body" in names
+  assert "left_toe_forward_velocity" in names
+  assert "left_toe_opposite_center_delta_body" in names
+  assert "right_sole_pitch_proxy" in names
+  assert "right_joint_vel" in names
+
+
 def test_footprint_detector_v3_training_preset_pins_compatible_layout() -> None:
   cfg = _with_footprint_v3_defaults(OnlineFootEventDetectorConfig(progress=False))
 
@@ -427,6 +510,18 @@ def test_footprint_detector_v3_training_preset_pins_compatible_layout() -> None:
   assert cfg.toe_positive_fraction == 0.0
   assert cfg.toe_soft_positive_fraction == 0.0
   assert cfg.false_negative_toe_hard_positive_fraction == 0.0
+  assert cfg.stair_hard_negative_fraction == 0.10
+  assert (
+    cfg.toe_positive_fraction
+    + cfg.toe_soft_positive_fraction
+    + cfg.touchdown_positive_fraction
+    + cfg.touchdown_soft_positive_fraction
+    + cfg.stair_hard_negative_fraction
+    + cfg.false_positive_hard_negative_fraction
+    + cfg.false_negative_hard_positive_fraction
+    + cfg.false_negative_toe_hard_positive_fraction
+    <= 1.0
+  )
   assert cfg.soft_toe_hit_radius == 0
   assert not cfg.mine_false_positive_hard_negatives
   assert not cfg.mine_false_negative_toe_hard_positives
@@ -444,6 +539,69 @@ def test_footprint_detector_v3_training_preset_pins_compatible_layout() -> None:
   assert not cfg.baseline_guard_gates_best
   assert not cfg.require_baseline_guard
   assert _should_mine_touchdown_false_positive_hard_negatives(cfg)
+
+
+def test_toe_riser_detector_v3_training_preset_pins_compatible_layout() -> None:
+  cfg = _with_toe_riser_v3_defaults(OnlineFootEventDetectorConfig(progress=False))
+  footprint_cfg = _with_footprint_v3_defaults(
+    OnlineFootEventDetectorConfig(progress=False)
+  )
+
+  assert cfg.checkpoint_file == TOE_RISER_V3_DEFAULT_CHECKPOINT_FILE
+  assert cfg.output_dir == TOE_RISER_V3_DEFAULT_OUTPUT_DIR
+  assert cfg.input_schema == TOE_RISER_V3_INPUT_SCHEMA
+  assert cfg.include_gait_phase
+  assert cfg.expected_obs_dim == TOE_RISER_V3_EXPECTED_OBS_DIM
+  assert TOE_RISER_V3_OUTPUT_DIM == len(FOOT_EVENT_LABEL_NAMES)
+  assert cfg.toe_riser_only_model
+  assert not cfg.toe_only_finetune
+  assert not cfg.footprint_only_model
+  assert cfg.history_len == TOE_RISER_V3_HISTORY_LEN == footprint_cfg.history_len
+  assert cfg.frame_hidden_dim == TOE_RISER_V3_FRAME_HIDDEN_DIM
+  assert cfg.frame_hidden_dim == footprint_cfg.frame_hidden_dim
+  assert cfg.recurrent_hidden_dim == TOE_RISER_V3_RECURRENT_HIDDEN_DIM
+  assert cfg.recurrent_hidden_dim == footprint_cfg.recurrent_hidden_dim
+  assert cfg.head_hidden_dim == TOE_RISER_V3_HEAD_HIDDEN_DIM
+  assert cfg.head_hidden_dim == footprint_cfg.head_hidden_dim
+  assert cfg.selection_metric == "toe_riser_high_recall_score"
+  assert cfg.touchdown_positive_fraction == 0.0
+  assert cfg.touchdown_soft_positive_fraction == 0.0
+  assert cfg.false_negative_hard_positive_fraction == 0.0
+  assert cfg.toe_positive_fraction == 0.30
+  assert cfg.toe_soft_positive_fraction == 0.20
+  assert cfg.stair_hard_negative_fraction == 0.20
+  assert cfg.false_positive_hard_negative_fraction == 0.10
+  assert cfg.false_negative_toe_hard_positive_fraction == 0.20
+  assert (
+    cfg.toe_positive_fraction
+    + cfg.toe_soft_positive_fraction
+    + cfg.touchdown_positive_fraction
+    + cfg.touchdown_soft_positive_fraction
+    + cfg.stair_hard_negative_fraction
+    + cfg.false_positive_hard_negative_fraction
+    + cfg.false_negative_hard_positive_fraction
+    + cfg.false_negative_toe_hard_positive_fraction
+    <= 1.0
+  )
+  assert cfg.soft_touchdown_radius == 0
+  assert cfg.soft_toe_hit_radius == 2
+  assert cfg.tversky_alpha == 0.15
+  assert cfg.tversky_beta == 0.90
+  assert cfg.mine_false_positive_hard_negatives
+  assert not cfg.mine_false_positive_touchdown_hard_negatives
+  assert not cfg.mine_false_negative_hard_positives
+  assert cfg.mine_false_negative_toe_hard_positives
+  assert cfg.hard_toe_positive_mining_threshold == 0.75
+  assert cfg.sweep_threshold_min == 0.02
+  assert cfg.sweep_threshold_max == 0.9999
+  assert cfg.sweep_threshold_steps == 81
+  assert cfg.baseline_toe_metric == "toe_riser_high_recall_macro_f1"
+  assert not cfg.baseline_guard_gates_best
+  assert not cfg.require_baseline_guard
+  assert not _should_mine_touchdown_false_positive_hard_negatives(cfg)
+  assert _stair_hard_negative_label_indices_for_config(cfg) == (
+    TOE_RISER_V3_TRAINED_LABEL_INDICES
+  )
 
 
 def test_footprint_deployment_contract_marks_dummy_toe_outputs() -> None:
@@ -465,6 +623,34 @@ def test_footprint_deployment_contract_marks_dummy_toe_outputs() -> None:
   assert contract["training_label_contract"]["stair_hard_negative_label_indices"] == [
     2,
     3,
+  ]
+
+
+def test_toe_riser_deployment_contract_marks_dummy_footprint_outputs() -> None:
+  cfg = _with_toe_riser_v3_defaults(OnlineFootEventDetectorConfig())
+
+  contract = _deployment_contract_payload(
+    task_id="unit-task",
+    cfg=cfg,
+    obs_dim=TOE_RISER_V3_EXPECTED_OBS_DIM,
+    trained_label_indices=TOE_RISER_V3_TRAINED_LABEL_INDICES,
+    stair_hard_negative_label_indices=TOE_RISER_V3_TRAINED_LABEL_INDICES,
+    best_deployment_thresholds={"left_toe_riser_hit_deploy_threshold": 0.4},
+    onnx_path=None,
+  )
+
+  assert contract["obs_history_shape"] == [
+    1,
+    TOE_RISER_V3_HISTORY_LEN,
+    TOE_RISER_V3_EXPECTED_OBS_DIM,
+  ]
+  assert contract["trained_label_indices"] == list(TOE_RISER_V3_TRAINED_LABEL_INDICES)
+  assert contract["dummy_low_logit_indices"] == list(
+    TOE_RISER_V3_DUMMY_LOW_LOGIT_INDICES
+  )
+  assert contract["training_label_contract"]["stair_hard_negative_label_indices"] == [
+    4,
+    5,
   ]
 
 
@@ -788,6 +974,150 @@ def test_footprint_deploy_v3_obs_uses_deployable_fk_imu_and_action_features() ->
     torch.zeros(num_envs, 9),
   )
   assert second.abs().max().item() < 70.0
+
+
+def test_toe_riser_deploy_v3_obs_uses_focused_toe_motion_features() -> None:
+  num_envs = 2
+  device = torch.device("cpu")
+  site_pos_w = torch.tensor(
+    [
+      [
+        [0.20, 0.10, 0.00],
+        [0.22, -0.10, 0.01],
+        [0.00, 0.10, -0.02],
+        [0.02, -0.10, -0.03],
+      ],
+      [
+        [0.30, 0.10, 0.01],
+        [0.32, -0.10, 0.02],
+        [0.10, 0.10, -0.01],
+        [0.12, -0.10, -0.02],
+      ],
+    ],
+    dtype=torch.float32,
+  )
+  joint_count = len(_G1_LEG_JOINT_NAMES)
+  action = torch.zeros(num_envs, joint_count)
+  action[:, 0] = 0.25
+  command = torch.tensor([[0.5, 0.2, -0.1], [0.3, -0.4, 0.6]])
+  robot = SimpleNamespace(
+    site_names=["left_toe", "right_toe", "left_heel", "right_heel"],
+    joint_names=list(_G1_LEG_JOINT_NAMES),
+    data=SimpleNamespace(
+      root_link_pos_w=torch.zeros(num_envs, 3),
+      root_link_quat_w=torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(num_envs, 1),
+      site_pos_w=site_pos_w,
+      projected_gravity_b=torch.tensor([[0.0, 0.0, -1.0]]).repeat(num_envs, 1),
+      root_link_ang_vel_b=torch.tensor([[0.10, -0.20, 0.30]]).repeat(
+        num_envs,
+        1,
+      ),
+      default_joint_pos=torch.zeros(num_envs, joint_count),
+      joint_pos=torch.zeros(num_envs, joint_count),
+      joint_vel=torch.arange(
+        num_envs * joint_count,
+        dtype=torch.float32,
+      ).reshape(num_envs, joint_count)
+      * 0.01,
+    ),
+  )
+  env: Any = SimpleNamespace(
+    num_envs=num_envs,
+    device=device,
+    step_dt=0.02,
+    episode_length_buf=torch.arange(num_envs),
+    extras={},
+    scene={"robot": robot},
+    action_manager=SimpleNamespace(
+      action=action,
+      total_action_dim=joint_count,
+    ),
+    command_manager=SimpleNamespace(get_command=lambda _name: command),
+  )
+
+  first = foot_event_detector_obs(
+    {"latent": torch.full((num_envs, 173), 70.0)},
+    cast(Any, env),
+    input_schema="toe_riser_deploy_v3",
+    include_gait_phase=True,
+    gait_period=0.6,
+    command_name="twist",
+    reset_mask=torch.ones(num_envs, dtype=torch.bool),
+  )
+  groups = foot_event_input_feature_groups(
+    include_gait_phase=True,
+    input_schema="toe_riser_deploy_v3",
+  )
+  offset = 0
+  slices: dict[str, slice] = {}
+  for group in groups:
+    width = int(group["width"])
+    slices[str(group["name"])] = slice(offset, offset + width)
+    offset += width
+
+  assert first.shape == (num_envs, 106)
+  torch.testing.assert_close(
+    first[:, slices["left_toe_pos_body"]],
+    5.0 * site_pos_w[:, 0],
+  )
+  torch.testing.assert_close(
+    first[:, slices["left_toe_height"]],
+    5.0 * site_pos_w[:, 0, 2:3],
+  )
+  torch.testing.assert_close(
+    first[:, slices["left_sole_vector_body"]],
+    5.0 * (site_pos_w[:, 0] - site_pos_w[:, 2]),
+  )
+  left_toe_heel_gap = site_pos_w[:, 0, 2:3] - site_pos_w[:, 2, 2:3]
+  left_sole_len = (site_pos_w[:, 0] - site_pos_w[:, 2]).norm(dim=-1, keepdim=True)
+  torch.testing.assert_close(
+    first[:, slices["left_sole_pitch_proxy"]],
+    left_toe_heel_gap / left_sole_len.clamp_min(1.0e-6),
+  )
+  right_center = 0.5 * (site_pos_w[:, 1] + site_pos_w[:, 3])
+  torch.testing.assert_close(
+    first[:, slices["left_toe_opposite_center_delta_body"]],
+    5.0 * (site_pos_w[:, 0] - right_center),
+  )
+  torch.testing.assert_close(
+    first[:, slices["left_toe_vel_body"]],
+    torch.zeros(num_envs, 3),
+  )
+  torch.testing.assert_close(first[:, slices["left_action"]][:, 0], action[:, 0])
+  torch.testing.assert_close(
+    first[:, slices["left_action_delta"]],
+    torch.zeros(num_envs, 6),
+  )
+  assert first.abs().max().item() < 70.0
+
+  robot.data.site_pos_w = site_pos_w + torch.tensor([0.02, 0.0, 0.0])
+  env.action_manager.action[:, 0] += 0.40
+  second = foot_event_detector_obs(
+    {},
+    cast(Any, env),
+    input_schema="toe_riser_deploy_v3",
+    include_gait_phase=True,
+    gait_period=0.6,
+    command_name="twist",
+    reset_mask=torch.zeros(num_envs, dtype=torch.bool),
+  )
+
+  torch.testing.assert_close(
+    second[:, slices["left_toe_vel_body"]],
+    0.5 * torch.tensor([[1.0, 0.0, 0.0]]).repeat(num_envs, 1),
+  )
+  torch.testing.assert_close(
+    second[:, slices["left_toe_vel_delta_body"]],
+    0.5 * torch.tensor([[1.0, 0.0, 0.0]]).repeat(num_envs, 1),
+  )
+  torch.testing.assert_close(
+    second[:, slices["left_toe_forward_velocity"]],
+    0.5 * torch.ones(num_envs, 1),
+  )
+  torch.testing.assert_close(
+    second[:, slices["left_action_delta"]][:, 0],
+    torch.full((num_envs,), 0.80),
+  )
 
 
 def test_footprint_deploy_v3_uses_body_frame_endpoints_with_gravity_scalars() -> None:
@@ -1157,6 +1487,19 @@ def test_footprint_replay_buffer_stair_hard_negatives_ignore_toe_labels() -> Non
     device=torch.device("cpu"),
     stair_hard_negative_label_indices=(2, 3),
   )
+  toe = OnlineFootEventReplayBuffer(
+    capacity=3,
+    history_len=1,
+    obs_dim=1,
+    label_dim=len(FOOT_EVENT_LABEL_NAMES),
+    num_envs=1,
+    soft_touchdown_radius=0,
+    soft_toe_hit_radius=0,
+    soft_event_radius1_value=0.7,
+    soft_event_radius2_value=0.4,
+    device=torch.device("cpu"),
+    stair_hard_negative_label_indices=(4, 5),
+  )
   common = {
     "obs_history": torch.zeros(3, 1, 1),
     "labels": labels,
@@ -1170,9 +1513,11 @@ def test_footprint_replay_buffer_stair_hard_negatives_ignore_toe_labels() -> Non
 
   generic.add(**common)
   footprint.add(**common)
+  toe.add(**common)
 
   assert generic.snapshot()["stair_hard_negative"].tolist() == [False, False, True]
   assert footprint.snapshot()["stair_hard_negative"].tolist() == [True, False, True]
+  assert toe.snapshot()["stair_hard_negative"].tolist() == [False, True, True]
 
 
 def test_online_replay_buffer_retroactively_softens_event_neighbors() -> None:

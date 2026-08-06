@@ -95,3 +95,10 @@ def unitree_g1_footprint_detector_env_cfg(
     }
 
   return cfg
+
+
+def unitree_g1_toe_riser_detector_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Create the rollout env used by the deployable toe-riser detector."""
+  return unitree_g1_footprint_detector_env_cfg(play=play)

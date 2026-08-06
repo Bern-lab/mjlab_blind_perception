@@ -35,6 +35,7 @@ from mjlab.tasks.velocity.config.g1.footprint_detector_env_cfg import (
   FOOTPRINT_DETECTOR_LEVEL_WEIGHTS,
   FOOTPRINT_DETECTOR_STANDALONE_FRACTION,
   unitree_g1_footprint_detector_env_cfg,
+  unitree_g1_toe_riser_detector_env_cfg,
 )
 from mjlab.tasks.velocity.config.g1.rl_cfg import (
   G1SlowLatentPolicyModelParams,
@@ -63,13 +64,23 @@ from mjlab.terrains.primitive_terrains import (
   BoxPyramidStairsTerrainCfg,
 )
 
+FOOTPRINT_DETECTOR_TASK_ID = (
+  "Mjlab-Velocity-Blind-Rough-TargetNavigation-FootprintDetector-"
+  "SlowLatent-TeacherKL-Unitree-G1"
+)
+TOE_RISER_DETECTOR_TASK_ID = (
+  "Mjlab-Velocity-Blind-Rough-TargetNavigation-ToeRiserDetector-"
+  "SlowLatent-TeacherKL-Unitree-G1"
+)
 MAIN_BRANCH_VELOCITY_TASK_IDS = (
+  FOOTPRINT_DETECTOR_TASK_ID,
   "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2GeometryProbe-Unitree-G1",
   "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2SafeStrideProbe-Unitree-G1",
   "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2Shadow-TeacherKL-Unitree-G1",
   "Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1",
   "Mjlab-Velocity-Blind-Rough-TargetNavigation-StepDanger-TeacherKL-Unitree-G1",
   "Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1",
+  TOE_RISER_DETECTOR_TASK_ID,
   "Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1",
 )
 
@@ -326,6 +337,8 @@ def test_teacherkl_target_navigation_switch() -> None:
 
 def test_g1_high_stairs_tasks_enable_mixed_terrain_replay() -> None:
   for task_id in MAIN_BRANCH_VELOCITY_TASK_IDS:
+    if "Detector" in task_id:
+      continue
     cfg = load_env_cfg(task_id)
     params = cfg.curriculum["terrain_levels"].params
     assert params["mixed_replay_start_level"] == 8
@@ -377,6 +390,54 @@ def test_g1_footprint_detector_task_uses_fixed_terrain_pools() -> None:
   )
   assert terrain_params["level_ranges"] == ((0, 2), (3, 5), (6, 9))
   assert terrain_params["level_weights"] == FOOTPRINT_DETECTOR_LEVEL_WEIGHTS
+
+
+def test_g1_toe_riser_detector_task_reuses_footprint_rollout_cfg() -> None:
+  footprint_cfg = load_env_cfg(FOOTPRINT_DETECTOR_TASK_ID)
+  toe_cfg = load_env_cfg(TOE_RISER_DETECTOR_TASK_ID)
+  direct_toe_cfg = unitree_g1_toe_riser_detector_env_cfg()
+
+  assert footprint_cfg.scene.terrain is not None
+  assert toe_cfg.scene.terrain is not None
+  assert direct_toe_cfg.scene.terrain is not None
+  assert toe_cfg.scene.terrain.max_init_terrain_level == (
+    footprint_cfg.scene.terrain.max_init_terrain_level
+  )
+  assert toe_cfg.scene.terrain.standalone_spawn_start_level == (
+    footprint_cfg.scene.terrain.standalone_spawn_start_level
+  )
+  assert direct_toe_cfg.scene.terrain.standalone_spawn_start_level == (
+    footprint_cfg.scene.terrain.standalone_spawn_start_level
+  )
+
+  footprint_generator = footprint_cfg.scene.terrain.terrain_generator
+  toe_generator = toe_cfg.scene.terrain.terrain_generator
+  assert footprint_generator is not None
+  assert toe_generator is not None
+  assert toe_generator.standalone_terrains.keys() == (
+    footprint_generator.standalone_terrains.keys()
+  )
+  assert toe_generator.sub_terrains.keys() == footprint_generator.sub_terrains.keys()
+
+  for name, footprint_runway in footprint_generator.standalone_terrains.items():
+    toe_runway = toe_generator.standalone_terrains[name]
+    assert type(toe_runway) is type(footprint_runway)
+    assert toe_runway.proportion == pytest.approx(footprint_runway.proportion)
+    assert toe_runway.size == footprint_runway.size
+
+  for name, footprint_sub_terrain in footprint_generator.sub_terrains.items():
+    toe_sub_terrain = toe_generator.sub_terrains[name]
+    assert type(toe_sub_terrain) is type(footprint_sub_terrain)
+    assert toe_sub_terrain.proportion == pytest.approx(footprint_sub_terrain.proportion)
+
+  footprint_terrain_curriculum = footprint_cfg.curriculum["terrain_levels"]
+  toe_terrain_curriculum = toe_cfg.curriculum["terrain_levels"]
+  assert toe_terrain_curriculum.func is footprint_terrain_curriculum.func
+  assert toe_terrain_curriculum.params == footprint_terrain_curriculum.params
+  assert toe_cfg.events["reset_base"].func is footprint_cfg.events["reset_base"].func
+  assert (
+    toe_cfg.events["reset_base"].params == footprint_cfg.events["reset_base"].params
+  )
 
 
 def _assert_eight_stair_depth_variants(terrain_generator) -> None:

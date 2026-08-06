@@ -1,3 +1,4 @@
+# ruff: noqa: E402,I001
 """Preset training entrypoint for the deploy-friendly footprint detector."""
 
 from __future__ import annotations
@@ -7,6 +8,11 @@ from dataclasses import replace
 from pathlib import Path
 
 import tyro
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+  sys.path.insert(0, str(_REPO_ROOT))
+
 from scripts.velocity_eval.train_foot_event_detector_online import (
   OnlineFootEventDetectorConfig,
   run_online_train,
@@ -101,6 +107,10 @@ def _with_footprint_v3_defaults(
     if cfg.false_positive_hard_negative_fraction
     == OnlineFootEventDetectorConfig.false_positive_hard_negative_fraction
     else cfg.false_positive_hard_negative_fraction,
+    stair_hard_negative_fraction=0.10
+    if cfg.stair_hard_negative_fraction
+    == OnlineFootEventDetectorConfig.stair_hard_negative_fraction
+    else cfg.stair_hard_negative_fraction,
     touchdown_positive_fraction=0.30
     if cfg.touchdown_positive_fraction
     == OnlineFootEventDetectorConfig.touchdown_positive_fraction

@@ -1,3 +1,4 @@
+# ruff: noqa: E402,I001
 """Online Stage 2D foot-event detector training with a frozen policy rollout."""
 
 from __future__ import annotations
@@ -11,6 +12,10 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+  sys.path.insert(0, str(_REPO_ROOT))
 
 import numpy as np
 import torch
@@ -1962,6 +1967,17 @@ def _should_mine_touchdown_false_positive_hard_negatives(
   )
 
 
+def _stair_hard_negative_label_indices_for_config(
+  cfg: OnlineFootEventDetectorConfig,
+) -> tuple[int, ...]:
+  """Return label columns that make a stair sample event-negative for training."""
+  if cfg.footprint_only_model:
+    return (2, 3)
+  if cfg.toe_riser_only_model:
+    return (4, 5)
+  return (2, 3, 4, 5)
+
+
 def _metric_improved(
   *,
   metric_value: float,
@@ -2335,9 +2351,7 @@ def run_online_train(
     obs_dim=obs_dim,
     device=device,
   )
-  stair_hard_negative_label_indices = (
-    (2, 3) if cfg.footprint_only_model else (2, 3, 4, 5)
-  )
+  stair_hard_negative_label_indices = _stair_hard_negative_label_indices_for_config(cfg)
   train_buffer = OnlineFootEventReplayBuffer(
     capacity=cfg.train_buffer_capacity,
     history_len=cfg.history_len,
