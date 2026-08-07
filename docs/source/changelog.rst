@@ -20,9 +20,8 @@ Added
 - Added a footprint-detector-only G1 rollout task with fixed 70/30
   long-stair/grid terrain pools, hard-biased difficulty sampling, and explicit
   long-stair tread-depth variants for deployable footprint detector retraining.
-- Added a toe-riser-detector G1 rollout task that reuses the footprint-detector
-  fixed terrain pools and spawn curriculum for deployable toe-collision
-  detector training.
+- Added a toe-riser-detector G1 rollout task with long-stair-only level-3+
+  spawning for denser deployable toe-collision detector training.
 - Added a ``toe_riser_deploy_v3`` detector training preset with a dedicated
   106-dimensional non-privileged toe-kinematics observation schema, standard
   six-logit outputs, and trained toe-hit logits ``4:6``.

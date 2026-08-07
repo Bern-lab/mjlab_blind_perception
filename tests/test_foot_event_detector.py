@@ -574,13 +574,18 @@ def test_toe_riser_detector_v3_training_preset_pins_compatible_layout() -> None:
   assert cfg.recurrent_hidden_dim == footprint_cfg.recurrent_hidden_dim
   assert cfg.head_hidden_dim == TOE_RISER_V3_HEAD_HIDDEN_DIM
   assert cfg.head_hidden_dim == footprint_cfg.head_hidden_dim
-  assert cfg.selection_metric == "toe_riser_high_recall_score"
+  assert cfg.selection_metric == "toe_riser_high_recall_macro_f1"
+  assert cfg.max_updates == 18_000
+  assert cfg.steps == 18_000
+  assert cfg.min_val_samples == 32_768
+  assert cfg.train_buffer_capacity == 480_000
+  assert cfg.val_buffer_capacity == 240_000
   assert cfg.touchdown_positive_fraction == 0.0
   assert cfg.touchdown_soft_positive_fraction == 0.0
   assert cfg.false_negative_hard_positive_fraction == 0.0
-  assert cfg.toe_positive_fraction == 0.30
-  assert cfg.toe_soft_positive_fraction == 0.20
-  assert cfg.stair_hard_negative_fraction == 0.20
+  assert cfg.toe_positive_fraction == 0.35
+  assert cfg.toe_soft_positive_fraction == 0.25
+  assert cfg.stair_hard_negative_fraction == 0.10
   assert cfg.false_positive_hard_negative_fraction == 0.10
   assert cfg.false_negative_toe_hard_positive_fraction == 0.20
   assert (

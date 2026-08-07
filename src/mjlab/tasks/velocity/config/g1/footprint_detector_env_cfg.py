@@ -21,14 +21,18 @@ FOOTPRINT_DETECTOR_LEVEL_WEIGHTS = (0.15, 0.25, 0.60)
 FOOTPRINT_DETECTOR_GRID_FLAT_RAW_WEIGHT = 0.10
 FOOTPRINT_DETECTOR_RUNWAY_SIZE = (10.9, 2.5)
 FOOTPRINT_DETECTOR_RUNWAY_PREFIX = "long_stair_runway_w"
+TOE_RISER_DETECTOR_STANDALONE_FRACTION = 1.0
+TOE_RISER_DETECTOR_LEVEL_RANGES = ((3, 5), (6, 9))
+TOE_RISER_DETECTOR_LEVEL_WEIGHTS = (0.35, 0.65)
 
 
-def _rescale_grid_proportions(terrain_cfg) -> None:
+def _rescale_grid_proportions(terrain_cfg, *, grid_fraction: float) -> None:
   sub_terrains = {name: deepcopy(cfg) for name, cfg in terrain_cfg.sub_terrains.items()}
   raw_weights = {
     name: max(0.0, float(cfg.proportion)) for name, cfg in sub_terrains.items()
   }
-  if "flat" in raw_weights:
+  grid_fraction = max(0.0, min(1.0, float(grid_fraction)))
+  if grid_fraction > 0.0 and "flat" in raw_weights:
     raw_weights["flat"] = max(
       raw_weights["flat"],
       FOOTPRINT_DETECTOR_GRID_FLAT_RAW_WEIGHT,
@@ -39,17 +43,23 @@ def _rescale_grid_proportions(terrain_cfg) -> None:
     total = float(len(raw_weights))
 
   for name, sub_cfg in sub_terrains.items():
-    sub_cfg.proportion = FOOTPRINT_DETECTOR_GRID_FRACTION * raw_weights[name] / total
+    sub_cfg.proportion = grid_fraction * raw_weights[name] / total
   terrain_cfg.sub_terrains = sub_terrains
 
 
-def _footprint_detector_terrain_cfg(terrain_generator):
+def _detector_long_stair_runway_terrain_cfg(
+  terrain_generator,
+  *,
+  standalone_fraction: float,
+):
   terrain_cfg = deepcopy(terrain_generator)
-  _rescale_grid_proportions(terrain_cfg)
-
-  runway_weight = FOOTPRINT_DETECTOR_STANDALONE_FRACTION / len(
-    BLIND_HIGH_STAIRS_TREAD_DEPTHS
+  standalone_fraction = max(0.0, min(1.0, float(standalone_fraction)))
+  _rescale_grid_proportions(
+    terrain_cfg,
+    grid_fraction=1.0 - standalone_fraction,
   )
+
+  runway_weight = standalone_fraction / len(BLIND_HIGH_STAIRS_TREAD_DEPTHS)
   terrain_cfg.standalone_terrains = {
     f"{FOOTPRINT_DETECTOR_RUNWAY_PREFIX}{index:02d}": BoxLongStairRunwayTerrainCfg(
       proportion=runway_weight,
@@ -71,6 +81,20 @@ def _footprint_detector_terrain_cfg(terrain_generator):
     for index, tread_depth in enumerate(BLIND_HIGH_STAIRS_TREAD_DEPTHS)
   }
   return terrain_cfg
+
+
+def _footprint_detector_terrain_cfg(terrain_generator):
+  return _detector_long_stair_runway_terrain_cfg(
+    terrain_generator,
+    standalone_fraction=FOOTPRINT_DETECTOR_STANDALONE_FRACTION,
+  )
+
+
+def _toe_riser_detector_terrain_cfg(terrain_generator):
+  return _detector_long_stair_runway_terrain_cfg(
+    terrain_generator,
+    standalone_fraction=TOE_RISER_DETECTOR_STANDALONE_FRACTION,
+  )
 
 
 def unitree_g1_footprint_detector_env_cfg(
@@ -101,4 +125,21 @@ def unitree_g1_toe_riser_detector_env_cfg(
   play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
   """Create the rollout env used by the deployable toe-riser detector."""
-  return unitree_g1_footprint_detector_env_cfg(play=play)
+  cfg = unitree_g1_blind_rough_target_navigation_slow_latent_env_cfg(play=play)
+
+  if cfg.scene.terrain is not None and cfg.scene.terrain.terrain_generator is not None:
+    cfg.scene.terrain.terrain_generator = _toe_riser_detector_terrain_cfg(
+      cfg.scene.terrain.terrain_generator
+    )
+    cfg.scene.terrain.max_init_terrain_level = None
+    cfg.scene.terrain.standalone_spawn_start_level = 3
+
+  if not play and "terrain_levels" in cfg.curriculum:
+    cfg.curriculum["terrain_levels"].func = mdp.fixed_pool_terrain_levels_vel
+    cfg.curriculum["terrain_levels"].params = {
+      "standalone_fraction": TOE_RISER_DETECTOR_STANDALONE_FRACTION,
+      "level_ranges": TOE_RISER_DETECTOR_LEVEL_RANGES,
+      "level_weights": TOE_RISER_DETECTOR_LEVEL_WEIGHTS,
+    }
+
+  return cfg

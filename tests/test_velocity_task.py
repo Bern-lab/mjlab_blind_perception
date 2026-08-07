@@ -34,6 +34,9 @@ from mjlab.tasks.velocity.config.g1.blind_rough_step_danger_env_cfg import (
 from mjlab.tasks.velocity.config.g1.footprint_detector_env_cfg import (
   FOOTPRINT_DETECTOR_LEVEL_WEIGHTS,
   FOOTPRINT_DETECTOR_STANDALONE_FRACTION,
+  TOE_RISER_DETECTOR_LEVEL_RANGES,
+  TOE_RISER_DETECTOR_LEVEL_WEIGHTS,
+  TOE_RISER_DETECTOR_STANDALONE_FRACTION,
   unitree_g1_footprint_detector_env_cfg,
   unitree_g1_toe_riser_detector_env_cfg,
 )
@@ -392,7 +395,7 @@ def test_g1_footprint_detector_task_uses_fixed_terrain_pools() -> None:
   assert terrain_params["level_weights"] == FOOTPRINT_DETECTOR_LEVEL_WEIGHTS
 
 
-def test_g1_toe_riser_detector_task_reuses_footprint_rollout_cfg() -> None:
+def test_g1_toe_riser_detector_task_uses_long_stairs_level3_plus() -> None:
   footprint_cfg = load_env_cfg(FOOTPRINT_DETECTOR_TASK_ID)
   toe_cfg = load_env_cfg(TOE_RISER_DETECTOR_TASK_ID)
   direct_toe_cfg = unitree_g1_toe_riser_detector_env_cfg()
@@ -403,12 +406,8 @@ def test_g1_toe_riser_detector_task_reuses_footprint_rollout_cfg() -> None:
   assert toe_cfg.scene.terrain.max_init_terrain_level == (
     footprint_cfg.scene.terrain.max_init_terrain_level
   )
-  assert toe_cfg.scene.terrain.standalone_spawn_start_level == (
-    footprint_cfg.scene.terrain.standalone_spawn_start_level
-  )
-  assert direct_toe_cfg.scene.terrain.standalone_spawn_start_level == (
-    footprint_cfg.scene.terrain.standalone_spawn_start_level
-  )
+  assert toe_cfg.scene.terrain.standalone_spawn_start_level == 3
+  assert direct_toe_cfg.scene.terrain.standalone_spawn_start_level == 3
 
   footprint_generator = footprint_cfg.scene.terrain.terrain_generator
   toe_generator = toe_cfg.scene.terrain.terrain_generator
@@ -422,18 +421,34 @@ def test_g1_toe_riser_detector_task_reuses_footprint_rollout_cfg() -> None:
   for name, footprint_runway in footprint_generator.standalone_terrains.items():
     toe_runway = toe_generator.standalone_terrains[name]
     assert type(toe_runway) is type(footprint_runway)
-    assert toe_runway.proportion == pytest.approx(footprint_runway.proportion)
+    assert toe_runway.proportion == pytest.approx(
+      TOE_RISER_DETECTOR_STANDALONE_FRACTION / len(BLIND_HIGH_STAIRS_TREAD_DEPTHS)
+    )
     assert toe_runway.size == footprint_runway.size
+    assert toe_runway.num_steps == footprint_runway.num_steps
+    assert toe_runway.start_platform_length == footprint_runway.start_platform_length
+    assert toe_runway.end_platform_length == footprint_runway.end_platform_length
 
-  for name, footprint_sub_terrain in footprint_generator.sub_terrains.items():
+  for name, _footprint_sub_terrain in footprint_generator.sub_terrains.items():
     toe_sub_terrain = toe_generator.sub_terrains[name]
-    assert type(toe_sub_terrain) is type(footprint_sub_terrain)
-    assert toe_sub_terrain.proportion == pytest.approx(footprint_sub_terrain.proportion)
+    assert toe_sub_terrain.proportion == pytest.approx(0.0)
 
   footprint_terrain_curriculum = footprint_cfg.curriculum["terrain_levels"]
   toe_terrain_curriculum = toe_cfg.curriculum["terrain_levels"]
   assert toe_terrain_curriculum.func is footprint_terrain_curriculum.func
-  assert toe_terrain_curriculum.params == footprint_terrain_curriculum.params
+  assert toe_terrain_curriculum.params["standalone_fraction"] == pytest.approx(
+    TOE_RISER_DETECTOR_STANDALONE_FRACTION
+  )
+  assert toe_terrain_curriculum.params["level_ranges"] == (
+    TOE_RISER_DETECTOR_LEVEL_RANGES
+  )
+  assert toe_terrain_curriculum.params["level_weights"] == (
+    TOE_RISER_DETECTOR_LEVEL_WEIGHTS
+  )
+  assert all(
+    min_level >= 3
+    for min_level, _max_level in toe_terrain_curriculum.params["level_ranges"]
+  )
   assert toe_cfg.events["reset_base"].func is footprint_cfg.events["reset_base"].func
   assert (
     toe_cfg.events["reset_base"].params == footprint_cfg.events["reset_base"].params

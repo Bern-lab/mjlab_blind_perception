@@ -30,7 +30,8 @@ DEFAULT_CHECKPOINT_FILE = (
   "base_stride_phase_event_impulse_m2000/model_2000.pt"
 )
 DEFAULT_OUTPUT_DIR = (
-  "eval_outputs/stair_stage2/model2000_seed42_toe_riser_deploy_v3_fixed_pool_v1"
+  "eval_outputs/stair_stage2/model2000_seed42_toe_riser_deploy_v3_"
+  "long_stairs_l3plus_v2_f1"
 )
 
 TOE_RISER_V3_INPUT_SCHEMA = "toe_riser_deploy_v3"
@@ -77,31 +78,34 @@ def _with_toe_riser_v3_defaults(
     if cfg.head_hidden_dim == OnlineFootEventDetectorConfig.head_hidden_dim
     else cfg.head_hidden_dim,
     selection_metric=(
-      "toe_riser_high_recall_score"
+      "toe_riser_high_recall_macro_f1"
       if cfg.selection_metric == OnlineFootEventDetectorConfig.selection_metric
       else cfg.selection_metric
     ),
-    max_updates=12_000
+    max_updates=18_000
     if cfg.max_updates == OnlineFootEventDetectorConfig.max_updates
     else cfg.max_updates,
-    steps=12_000 if cfg.steps == OnlineFootEventDetectorConfig.steps else cfg.steps,
-    train_buffer_capacity=240_000
+    steps=18_000 if cfg.steps == OnlineFootEventDetectorConfig.steps else cfg.steps,
+    min_val_samples=32_768
+    if cfg.min_val_samples == OnlineFootEventDetectorConfig.min_val_samples
+    else cfg.min_val_samples,
+    train_buffer_capacity=480_000
     if cfg.train_buffer_capacity == OnlineFootEventDetectorConfig.train_buffer_capacity
     else cfg.train_buffer_capacity,
-    val_buffer_capacity=120_000
+    val_buffer_capacity=240_000
     if cfg.val_buffer_capacity == OnlineFootEventDetectorConfig.val_buffer_capacity
     else cfg.val_buffer_capacity,
     touchdown_positive_fraction=0.0,
     touchdown_soft_positive_fraction=0.0,
     false_negative_hard_positive_fraction=0.0,
-    toe_positive_fraction=0.30
+    toe_positive_fraction=0.35
     if cfg.toe_positive_fraction == OnlineFootEventDetectorConfig.toe_positive_fraction
     else cfg.toe_positive_fraction,
-    toe_soft_positive_fraction=0.20
+    toe_soft_positive_fraction=0.25
     if cfg.toe_soft_positive_fraction
     == OnlineFootEventDetectorConfig.toe_soft_positive_fraction
     else cfg.toe_soft_positive_fraction,
-    stair_hard_negative_fraction=0.20
+    stair_hard_negative_fraction=0.10
     if cfg.stair_hard_negative_fraction
     == OnlineFootEventDetectorConfig.stair_hard_negative_fraction
     else cfg.stair_hard_negative_fraction,
