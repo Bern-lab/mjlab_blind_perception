@@ -23,32 +23,39 @@ if TYPE_CHECKING:
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
 
-def _sample_terrain_levels(
+def _validate_weighted_level_ranges(
+  level_ranges: tuple[tuple[int, int], ...],
+  level_weights: tuple[float, ...],
+) -> None:
+  if len(level_ranges) != len(level_weights):
+    raise ValueError("level_ranges and level_weights must have the same length")
+  if len(level_ranges) == 0:
+    raise ValueError("level_ranges must contain at least one range")
+  if any(weight < 0.0 for weight in level_weights):
+    raise ValueError("level_weights must be non-negative")
+  if sum(level_weights) <= 0.0:
+    raise ValueError("level_weights must contain at least one positive weight")
+
+
+def _sample_weighted_levels(
   num_samples: int,
   num_rows: int,
   level_ranges: tuple[tuple[int, int], ...],
   level_weights: tuple[float, ...],
-  device: str | torch.device,
+  device: torch.device,
 ) -> torch.Tensor:
-  """Sample terrain rows from inclusive low/high buckets."""
-  if len(level_ranges) != len(level_weights):
-    raise ValueError("level_ranges and level_weights must have the same length")
-  if len(level_ranges) == 0:
-    raise ValueError("level_ranges must not be empty")
-
+  _validate_weighted_level_ranges(level_ranges, level_weights)
   weights = torch.tensor(level_weights, dtype=torch.float, device=device)
-  if torch.any(weights < 0.0) or torch.sum(weights) <= 0.0:
-    raise ValueError("level_weights must contain at least one positive value")
+  bucket_ids = torch.multinomial(weights / weights.sum(), num_samples, replacement=True)
 
-  clamped_ranges = []
-  for raw_low, raw_high in level_ranges:
-    low = max(0, min(num_rows - 1, int(raw_low)))
-    high = max(0, min(num_rows - 1, int(raw_high)))
-    if low > high:
-      low, high = high, low
-    clamped_ranges.append((low, high))
+  clamped_ranges: list[tuple[int, int]] = []
+  for raw_min, raw_max in level_ranges:
+    raw_low = min(int(raw_min), int(raw_max))
+    raw_high = max(int(raw_min), int(raw_max))
+    min_level = max(0, min(num_rows - 1, raw_low))
+    max_level = max(0, min(num_rows - 1, raw_high))
+    clamped_ranges.append((min_level, max_level))
 
-  bucket_ids = torch.multinomial(weights / torch.sum(weights), num_samples, True)
   ranges = torch.tensor(clamped_ranges, dtype=torch.long, device=device)
   lows = ranges[:, 0][bucket_ids]
   highs = ranges[:, 1][bucket_ids]
@@ -62,24 +69,31 @@ def _sample_terrain_types(
   num_samples: int,
   num_cols: int,
   use_sub_terrain_proportions: bool,
+  device: torch.device,
 ) -> torch.Tensor:
-  """Sample terrain columns uniformly or from generator sub-terrain proportions."""
   if not use_sub_terrain_proportions:
-    return torch.randint(0, num_cols, (num_samples,), device=env.device)
+    return torch.randint(0, num_cols, (num_samples,), device=device)
 
-  terrain_generator = getattr(env.scene.terrain.cfg, "terrain_generator", None)
-  sub_terrains = getattr(terrain_generator, "sub_terrains", None)
-  if sub_terrains is None or len(sub_terrains) != num_cols:
-    return torch.randint(0, num_cols, (num_samples,), device=env.device)
+  terrain = env.scene.terrain
+  assert terrain is not None
+  type_proportions = getattr(terrain, "terrain_type_proportions", None)
+  if isinstance(type_proportions, torch.Tensor) and len(type_proportions) == num_cols:
+    weights = type_proportions.to(device=device, dtype=torch.float)
+    if torch.sum(weights) > 0.0:
+      return torch.multinomial(weights / weights.sum(), num_samples, replacement=True)
 
-  weights = torch.tensor(
-    [max(0.0, float(sub_cfg.proportion)) for sub_cfg in sub_terrains.values()],
-    dtype=torch.float,
-    device=env.device,
-  )
-  if torch.sum(weights) <= 0.0:
-    return torch.randint(0, num_cols, (num_samples,), device=env.device)
-  return torch.multinomial(weights / torch.sum(weights), num_samples, True)
+  terrain_generator = terrain.cfg.terrain_generator
+  if terrain_generator is None:
+    return torch.randint(0, num_cols, (num_samples,), device=device)
+
+  proportions = [
+    float(sub_cfg.proportion) for sub_cfg in terrain_generator.sub_terrains.values()
+  ]
+  if len(proportions) != num_cols or sum(proportions) <= 0.0:
+    return torch.randint(0, num_cols, (num_samples,), device=device)
+
+  weights = torch.tensor(proportions, dtype=torch.float, device=device)
+  return torch.multinomial(weights / weights.sum(), num_samples, replacement=True)
 
 
 def randomize_terrain(
@@ -98,47 +112,38 @@ def randomize_terrain(
     env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int)
 
   terrain = env.scene.terrain
-  if terrain is None or terrain.terrain_origins is None:
+  if terrain is None:
     return
-
-  if level_ranges is None and level_weights is None and not use_sub_terrain_proportions:
+  if level_ranges is None or level_weights is None:
     terrain.randomize_env_origins(env_ids)
     return
 
-  if level_ranges is None:
-    level_ranges = ()
-  if level_weights is None:
-    level_weights = ()
-
+  terrain_origins = terrain.terrain_origins
+  if terrain_origins is None:
+    return
   assert terrain.env_origins is not None
-  num_rows, num_cols = terrain.terrain_origins.shape[:2]
+
+  num_rows, num_cols = terrain_origins.shape[:2]
   num_envs = len(env_ids)
-  if level_ranges:
-    terrain.terrain_levels[env_ids] = _sample_terrain_levels(
-      num_envs,
-      num_rows,
-      level_ranges,
-      level_weights,
-      env.device,
-    )
-  else:
-    terrain.terrain_levels[env_ids] = torch.randint(
-      0, num_rows, (num_envs,), device=env.device
-    )
-  terrain.terrain_types[env_ids] = _sample_terrain_types(
+  levels = _sample_weighted_levels(
+    num_envs,
+    num_rows,
+    level_ranges,
+    level_weights,
+    env_ids.device,
+  )
+  types = _sample_terrain_types(
     env,
     num_envs,
     num_cols,
     use_sub_terrain_proportions,
+    env_ids.device,
   )
-  new_origins = terrain.terrain_origins[
-    terrain.terrain_levels[env_ids],
-    terrain.terrain_types[env_ids],
-  ]
-  terrain.env_origins[env_ids] = new_origins
-  scene_env_origins = getattr(env.scene, "env_origins", None)
-  if scene_env_origins is not None:
-    scene_env_origins[env_ids] = new_origins
+  terrain.terrain_levels[env_ids] = levels
+  terrain.terrain_types[env_ids] = types
+  origins = terrain_origins[levels, types]
+  terrain.env_origins[env_ids] = origins
+  env.scene.env_origins[env_ids] = origins
 
 
 def reset_scene_to_default(
@@ -278,6 +283,101 @@ def reset_root_state_uniform(
   )
 
   asset.write_root_link_velocity_to_sim(velocities, env_ids=env_ids)
+
+
+def reset_root_state_uniform_with_standalone_heading(
+  env: ManagerBasedRlEnv,
+  env_ids: torch.Tensor | None,
+  pose_range: dict[str, tuple[float, float]],
+  velocity_range: dict[str, tuple[float, float]] | None = None,
+  standalone_pose_range: dict[str, tuple[float, float]] | None = None,
+  target_patch_name: str = "target",
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+  """Reset normal terrain envs uniformly and standalone tracks facing target."""
+  if env_ids is None:
+    env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int)
+
+  terrain = env.scene.terrain
+  if terrain is None or not hasattr(terrain, "is_standalone_env"):
+    reset_root_state_uniform(env, env_ids, pose_range, velocity_range, asset_cfg)
+    return
+
+  standalone_mask = terrain.is_standalone_env(env_ids)
+  normal_ids = env_ids[~standalone_mask]
+  standalone_ids = env_ids[standalone_mask]
+
+  if len(normal_ids) > 0:
+    reset_root_state_uniform(
+      env,
+      normal_ids,
+      pose_range=pose_range,
+      velocity_range=velocity_range,
+      asset_cfg=asset_cfg,
+    )
+  if len(standalone_ids) == 0:
+    return
+
+  asset: Entity = env.scene[asset_cfg.name]
+  default_root_state = asset.data.default_root_state
+  assert default_root_state is not None
+  root_states = default_root_state[standalone_ids].clone()
+
+  standalone_pose_range = standalone_pose_range or {
+    "x": (-0.15, 0.15),
+    "y": (-0.15, 0.15),
+    "z": (0.01, 0.05),
+    "yaw": (-0.05, 0.05),
+  }
+  range_list = [
+    standalone_pose_range.get(key, (0.0, 0.0))
+    for key in ["x", "y", "z", "roll", "pitch", "yaw"]
+  ]
+  ranges = torch.tensor(range_list, device=env.device)
+  pose_samples = sample_uniform(
+    ranges[:, 0], ranges[:, 1], (len(standalone_ids), 6), device=env.device
+  )
+
+  positions = root_states[:, 0:3] + env.scene.env_origins[standalone_ids]
+  positions += pose_samples[:, 0:3]
+
+  target_pos = positions.clone()
+  if target_patch_name in terrain.flat_patches and terrain.terrain_origins is not None:
+    levels = terrain.terrain_levels[standalone_ids]
+    types = terrain.terrain_types[standalone_ids]
+    target_pos = terrain.flat_patches[target_patch_name][levels, types, 0]
+
+  target_delta = target_pos[:, :2] - env.scene.env_origins[standalone_ids, :2]
+  yaw = torch.atan2(target_delta[:, 1], target_delta[:, 0]) + pose_samples[:, 5]
+  orientations_delta = quat_from_euler_xyz(pose_samples[:, 3], pose_samples[:, 4], yaw)
+  orientations = quat_mul(root_states[:, 3:7], orientations_delta)
+
+  if asset.is_fixed_base:
+    if not asset.is_mocap:
+      raise ValueError(
+        f"Cannot reset root state for fixed-base non-mocap entity '{asset_cfg.name}'."
+      )
+    asset.write_mocap_pose_to_sim(
+      torch.cat([positions, orientations], dim=-1), env_ids=standalone_ids
+    )
+    return
+
+  if velocity_range is None:
+    velocity_range = {}
+  vel_range_list = [
+    velocity_range.get(key, (0.0, 0.0))
+    for key in ["x", "y", "z", "roll", "pitch", "yaw"]
+  ]
+  vel_ranges = torch.tensor(vel_range_list, device=env.device)
+  vel_samples = sample_uniform(
+    vel_ranges[:, 0], vel_ranges[:, 1], (len(standalone_ids), 6), device=env.device
+  )
+  velocities = root_states[:, 7:13] + vel_samples
+
+  asset.write_root_link_pose_to_sim(
+    torch.cat([positions, orientations], dim=-1), env_ids=standalone_ids
+  )
+  asset.write_root_link_velocity_to_sim(velocities, env_ids=standalone_ids)
 
 
 def reset_root_state_from_flat_patches(

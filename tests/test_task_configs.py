@@ -157,6 +157,7 @@ def test_step_boundary_rewards_scoped_to_target_stair_tasks(
   }
   slow_latent_rewards = {
     "toe_step_riser_slab_penalty",
+    "stair_stride_phase_reward",
     "shank_front_edge_clearance_penalty",
     "stair_skip_layer_penalty",
     "target_tread_midline_shaping",

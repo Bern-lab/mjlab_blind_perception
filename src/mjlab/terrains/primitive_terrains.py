@@ -580,6 +580,135 @@ class BoxInvertedPyramidStairsTerrainCfg(BoxPyramidStairsTerrainCfg):
 
 
 @dataclass(kw_only=True)
+class BoxLongStairRunwayTerrainCfg(SubTerrainCfg):
+  """Long one-way staircase runway along +x.
+
+  The terrain is intended to be placed as a standalone training track rather
+  than as a square cell in the main terrain grid.
+  """
+
+  step_height_range: tuple[float, float] = (0.04, 0.2)
+  """Min and max step height, in meters. Interpolated by difficulty."""
+  step_width_range: tuple[float, float] = (0.25, 0.35)
+  """Depth range for every tread, matching the high-stairs training range."""
+  num_steps: int = 14
+  """Preferred number of consecutive upward steps."""
+  start_platform_length: float = 2.0
+  """Length of the flat start platform before the first riser."""
+  end_platform_length: float = 2.0
+  """Length of the flat goal platform after the final riser."""
+  end_target_fraction: float = 0.5
+  """Position of the target patch within the end platform, from 0=start to 1=end."""
+  foundation_depth: float = 1.0
+  """How far boxes extend below z=0 for stable collision support."""
+
+  def function(
+    self, difficulty: float, spec: mujoco.MjSpec, rng: np.random.Generator
+  ) -> TerrainOutput:
+    body = spec.body("terrain")
+    geometries: list[TerrainGeometry] = []
+    step_boundaries: list[np.ndarray] = []
+    step_boundary_sequence_ids: list[int] = []
+    step_boundary_layers: list[int] = []
+
+    step_height = self.step_height_range[0] + difficulty * (
+      self.step_height_range[1] - self.step_height_range[0]
+    )
+    step_width = float(rng.uniform(*self.step_width_range))
+    usable_step_length = (
+      self.size[0] - self.start_platform_length - (self.end_platform_length)
+    )
+    num_steps = min(self.num_steps, int(usable_step_length // step_width))
+    if num_steps <= 0:
+      raise ValueError(
+        "BoxLongStairRunwayTerrainCfg needs enough x-size for at least one step."
+      )
+
+    width = self.size[1]
+    y_min = 0.0
+    y_max = width
+
+    def add_box(
+      x_min: float,
+      x_max: float,
+      top_z: float,
+      color: tuple[float, float, float, float],
+    ) -> None:
+      height = max(self.foundation_depth + top_z, 1e-6)
+      center = (
+        0.5 * (x_min + x_max),
+        0.5 * (y_min + y_max),
+        0.5 * (top_z - self.foundation_depth),
+      )
+      size = (
+        max(0.5 * (x_max - x_min), 1e-6),
+        max(0.5 * (y_max - y_min), 1e-6),
+        max(0.5 * height, 1e-6),
+      )
+      geom = body.add_geom(
+        type=mujoco.mjtGeom.mjGEOM_BOX,
+        size=size,
+        pos=center,
+      )
+      geometries.append(TerrainGeometry(geom=geom, color=color))
+
+    start_rgba = _get_platform_color(_MUJOCO_BLUE, 0.5, 0.2)
+    end_rgba = _get_platform_color(_MUJOCO_BLUE, 0.35, 0.35)
+    add_box(0.0, self.start_platform_length, 0.0, start_rgba)
+
+    for step_idx in range(num_steps):
+      tread_start = self.start_platform_length + step_idx * step_width
+      tread_end = tread_start + step_width
+      z_low = step_idx * step_height
+      z_high = (step_idx + 1) * step_height
+      rgba = brand_ramp(_MUJOCO_BLUE, step_idx / max(num_steps - 1, 1))
+      add_box(tread_start, tread_end, z_high, rgba)
+      _append_step_boundary(
+        step_boundaries,
+        (tread_start, y_min, z_high),
+        (tread_start, y_max, z_high),
+        (-1.0, 0.0, 0.0),
+        z_low,
+        z_high,
+      )
+      step_boundary_sequence_ids.append(1)
+      step_boundary_layers.append(step_idx + 1)
+
+    end_start = self.start_platform_length + num_steps * step_width
+    end_end = end_start + self.end_platform_length
+    total_height = num_steps * step_height
+    add_box(end_start, end_end, total_height, end_rgba)
+
+    origin = np.array([0.5 * self.start_platform_length, 0.5 * width, 0.0])
+    target_fraction = float(np.clip(self.end_target_fraction, 0.0, 1.0))
+    target = np.array(
+      [
+        end_start + target_fraction * self.end_platform_length,
+        0.5 * width,
+        total_height,
+      ]
+    )
+    flat_patches: dict[str, np.ndarray] | None = None
+    if self.flat_patch_sampling is not None:
+      flat_patches = {}
+      for name, patch_cfg in self.flat_patch_sampling.items():
+        point = target if name == "target" else origin
+        flat_patches[name] = np.tile(point, (patch_cfg.num_patches, 1))
+
+    return TerrainOutput(
+      origin=origin,
+      geometries=geometries,
+      bounds=(0.0, end_end, y_min, y_max),
+      flat_patches=flat_patches,
+      step_boundaries=(
+        np.asarray(step_boundaries, dtype=np.float32) if step_boundaries else None
+      ),
+      step_boundary_sequence_ids=np.asarray(step_boundary_sequence_ids, dtype=np.int32),
+      step_boundary_layers=np.asarray(step_boundary_layers, dtype=np.int32),
+    )
+
+
+@dataclass(kw_only=True)
 class BoxRandomGridTerrainCfg(SubTerrainCfg):
   grid_width: float
   """Side length of each square grid cell, in meters."""

@@ -187,11 +187,38 @@ class G1SlowLatentRewardParams:
   toe_stair_touchdown_height_tolerance: float = 0.08
   toe_stair_touchdown_lateral_margin: float = 0.03
   toe_stair_min_safe_stride: float = 0.10
-  toe_stair_max_safe_stride: float = 0.55
-  toe_stair_max_tracking_stride: float = 0.80
+  toe_stair_max_safe_stride: float = 0.85
+  toe_stair_max_tracking_stride: float = 0.85
   toe_stair_touchdown_lip_clearance: float = 0.02
   toe_stair_touchdown_lip_height_band: float = 0.06
   toe_safe_stride_containment_margin: float = 0.003
+  stride_phase_weight: float = 1.0
+  stride_phase_probe_scale: float = 2.0
+  stride_phase_confirmation_scale: float = 1.0
+  stride_phase_backoff_scale: float = 2.4
+  stride_phase_lock_scale: float = 1.2
+  stride_phase_probe_growth_scale: float = 0.05
+  stride_phase_probe_reference_tolerance: float = 0.025
+  stride_phase_probe_growth_weight: float = 0.50
+  stride_phase_probe_target_progress_weight: float = 0.50
+  stride_phase_probe_completion_start: float = 0.03
+  stride_phase_probe_completion_span: float = 0.02
+  stride_phase_probe_completion_bonus: float = 0.35
+  stride_phase_probe_overshoot_penalty: float = 1.0
+  stride_phase_backoff_progress_scale: float = 0.03
+  stride_phase_backoff_tolerance: float = 0.06
+  stride_phase_backoff_progress_weight: float = 0.80
+  stride_phase_backoff_proximity_weight: float = 0.20
+  stride_phase_backoff_completion_lower_tolerance: float = 0.025
+  stride_phase_backoff_completion_upper_tolerance: float = 0.025
+  stride_phase_backoff_min_reduction: float = 0.005
+  stride_phase_backoff_completion_bonus: float = 0.50
+  stride_phase_recovery_offset: float = 0.04
+  stride_phase_lock_progress_scale: float = 0.03
+  stride_phase_lock_tolerance: float = 0.05
+  stride_phase_lock_intent_tolerance: float = 0.03
+  stride_phase_lock_progress_weight: float = 0.40
+  stride_phase_lock_tracking_weight: float = 0.60
   stair_entry_evidence_time: float = 0.80
   safe_stride_evidence_window_steps: int = 15
   safe_stride_rear_partial_weight: float = 2.0
@@ -288,14 +315,18 @@ class G1SlowLatentEnvParams:
   """Observation group consumed by the slow-latent encoder."""
   latent_obs_term_name: str = "stair_latent"
   """Observation term name for stair-focused latent encoder features."""
+  stair_phase_state_group_name: str = "stair_phase_state"
+  """Hidden observation group that produces reward-only stair phase events."""
   foot_event_memory_term_name: str = "foot_event_memory"
   """Observation term name for footprint/toe-mark event memory features."""
   enable_foot_event_memory_obs: bool = True
-  """Append deployable-shaped footprint/toe-mark memory to latent obs."""
+  """Enable deployable-shaped footprint/toe-mark memory state."""
   include_foot_event_summary_obs: bool = True
   """Append deterministic footprint/toe-mark geometry belief summary."""
   include_raw_foot_event_memory_obs: bool = False
   """Expose raw footprint/toe-mark slots, not just the compact summary."""
+  log_foot_event_summary_metrics: bool = False
+  """Log detailed foot-event summary diagnostics during training."""
   foot_event_memory_length: int = 6
   """Number of recent footprint and toe-mark slots kept per env."""
   foot_event_memory_age_norm_s: float = 1.5
@@ -389,6 +420,36 @@ def configure_g1_step_danger_rewards(
       "command_threshold": params.toe_stair_command_threshold,
       "ground_contact_sensor_name": "feet_ground_contact",
       "asset_cfg": foot_asset_cfg(),
+    },
+  )
+  cfg.rewards["stair_stride_phase_reward"] = RewardTermCfg(
+    func=mdp.stair_stride_phase_reward,
+    weight=params.stride_phase_weight,
+    params={
+      "probe_scale": params.stride_phase_probe_scale,
+      "confirmation_scale": params.stride_phase_confirmation_scale,
+      "backoff_scale": params.stride_phase_backoff_scale,
+      "lock_scale": params.stride_phase_lock_scale,
+      "probe_growth_scale": params.stride_phase_probe_growth_scale,
+      "probe_reference_tolerance": params.stride_phase_probe_reference_tolerance,
+      "probe_growth_weight": params.stride_phase_probe_growth_weight,
+      "probe_target_progress_weight": (
+        params.stride_phase_probe_target_progress_weight
+      ),
+      "probe_completion_start": params.stride_phase_probe_completion_start,
+      "probe_completion_span": params.stride_phase_probe_completion_span,
+      "probe_completion_bonus": params.stride_phase_probe_completion_bonus,
+      "probe_overshoot_penalty": params.stride_phase_probe_overshoot_penalty,
+      "backoff_progress_scale": params.stride_phase_backoff_progress_scale,
+      "backoff_tolerance": params.stride_phase_backoff_tolerance,
+      "backoff_progress_weight": params.stride_phase_backoff_progress_weight,
+      "backoff_proximity_weight": params.stride_phase_backoff_proximity_weight,
+      "backoff_completion_bonus": params.stride_phase_backoff_completion_bonus,
+      "lock_progress_scale": params.stride_phase_lock_progress_scale,
+      "lock_tolerance": params.stride_phase_lock_tolerance,
+      "lock_progress_weight": params.stride_phase_lock_progress_weight,
+      "lock_tracking_weight": params.stride_phase_lock_tracking_weight,
+      "second_hit_penalty_refund_weight": abs(params.toe_slab_weight),
     },
   )
   cfg.rewards["shank_front_edge_clearance_penalty"] = RewardTermCfg(
@@ -705,27 +766,89 @@ def _configure_latent_observations(
       },
     ),
   }
+  foot_event_memory_params: dict[str, object] | None = None
   if params.enable_foot_event_memory_obs:
+    foot_event_memory_params = {
+      "memory_len": params.foot_event_memory_length,
+      "include_summary": params.include_foot_event_summary_obs,
+      "include_raw_memory": params.include_raw_foot_event_memory_obs,
+      "log_summary_metrics": params.log_foot_event_summary_metrics,
+      "age_norm_s": params.foot_event_memory_age_norm_s,
+      "stance_age_norm_s": params.foot_event_memory_age_norm_s,
+      "gait_period": params.rewards.foot_gait_period,
+      "command_name": "twist",
+      "noise_enabled": not play,
+      "ratchet_height_threshold_m": 0.025,
+      "ratchet_flat_height_threshold_m": 0.02,
+      "ratchet_probe_increment_m": 0.05,
+      "ratchet_probe_bootstrap_increment_m": 0.10,
+      "ratchet_probe_provisional_min_target_m": 0.50,
+      "ratchet_probe_cap_m": 0.76,
+      "ratchet_probe_target_tolerance_m": 0.025,
+      "ratchet_post_first_collision_probe_increment_m": 0.05,
+      "ratchet_sequence_min_confidence": 0.30,
+      "ratchet_sequence_height_tolerance_m": 0.06,
+      "ratchet_sequence_max_adjacent_height_m": 0.24,
+      "ratchet_no_hit_lower_margin_m": 0.0,
+      "ratchet_interval_target_margin_m": 0.01,
+      "ratchet_collision_margin_m": 0.02,
+      "ratchet_toe_anchor_offset_m": 0.085,
+      "ratchet_recovery_completion_tolerance_m": (
+        params.rewards.stride_phase_backoff_completion_upper_tolerance
+      ),
+      "ratchet_recovery_completion_lower_tolerance_m": (
+        params.rewards.stride_phase_backoff_completion_lower_tolerance
+      ),
+      "ratchet_recovery_min_reduction_m": (
+        params.rewards.stride_phase_backoff_min_reduction
+      ),
+      "ratchet_recovery_offset_m": params.rewards.stride_phase_recovery_offset,
+      "ratchet_lock_probe_lower_margin_m": 0.01,
+      "ratchet_lock_margin_m": 0.005,
+      "ratchet_lock_intent_tolerance_m": (
+        params.rewards.stride_phase_lock_intent_tolerance
+      ),
+      "ratchet_lock_stable_steps": 2,
+      "ratchet_lock_target_stable_enabled": False,
+      "ratchet_lock_phase_correction_enabled": False,
+      "ratchet_lock_phase_correction_gain": 0.60,
+      "ratchet_lock_phase_deadband_m": 0.005,
+      "ratchet_lock_phase_initial_front_error_m": 0.0,
+      "ratchet_lock_phase_max_backoff_m": 0.030,
+      "ratchet_lock_phase_max_forward_m": 0.015,
+      "ratchet_lock_phase_max_error_m": 0.080,
+      "ratchet_soft_upper_ttl_steps": 5,
+      "ratchet_first_collision_enters_stair_mode": True,
+      "ratchet_single_collision_confirms_interval": False,
+      "ratchet_two_collision_enabled": True,
+      "ratchet_two_collision_interval_margin_m": 0.025,
+      "ratchet_two_collision_stride_layers": 2.0,
+      "ratchet_two_collision_min_layer_delta": 1,
+      "ratchet_two_collision_min_height_delta_m": 0.055,
+      "ratchet_two_collision_nominal_riser_height_m": 0.15,
+      "ratchet_two_collision_height_layer_tolerance_m": 0.06,
+      "ratchet_two_collision_use_height_layers": True,
+      "ratchet_two_collision_lower_cross_margin_m": 0.10,
+      "ratchet_two_collision_upper_cross_margin_m": 0.08,
+      "ratchet_rejected_second_hit_confirm_count": 2,
+      "ratchet_rejected_second_hit_target_tolerance_m": 0.05,
+      "ratchet_second_collision_requires_up_step": True,
+      "ratchet_two_collision_tread_min_m": 0.23,
+      "ratchet_two_collision_tread_max_m": 0.37,
+      "ratchet_anchor_collision_enabled": True,
+      "ratchet_lower_target_lag_margin_m": 0.0,
+      "ratchet_same_foot_stride_guard_layers": 2.0,
+      "ratchet_same_foot_stride_guard_margin_m": 0.04,
+      "ratchet_collision_min_confidence": 0.45,
+      "ratchet_post_first_collision_collision_min_confidence": 0.30,
+      "ratchet_min_interval_width_m": 0.04,
+      "ratchet_min_stride_m": params.rewards.toe_stair_min_safe_stride,
+      "ratchet_max_stride_m": params.rewards.toe_stair_max_tracking_stride,
+      "ratchet_reset_flat_pairs": 4,
+    }
     latent_terms[params.foot_event_memory_term_name] = ObservationTermCfg(
       func=mdp.FootEventMemoryObs,
-      params={
-        "memory_len": params.foot_event_memory_length,
-        "include_summary": params.include_foot_event_summary_obs,
-        "include_raw_memory": params.include_raw_foot_event_memory_obs,
-        "age_norm_s": params.foot_event_memory_age_norm_s,
-        "stance_age_norm_s": params.foot_event_memory_age_norm_s,
-        "gait_period": params.rewards.foot_gait_period,
-        "command_name": "twist",
-        "noise_enabled": not play,
-        "ratchet_height_threshold_m": 0.025,
-        "ratchet_flat_height_threshold_m": 0.02,
-        "ratchet_probe_increment_m": 0.025,
-        "ratchet_collision_margin_m": 0.02,
-        "ratchet_min_interval_width_m": 0.04,
-        "ratchet_min_stride_m": params.rewards.toe_stair_min_safe_stride,
-        "ratchet_max_stride_m": params.rewards.toe_stair_max_safe_stride,
-        "ratchet_reset_flat_pairs": 4,
-      },
+      params=foot_event_memory_params,
     )
   cfg.observations[params.latent_group_name] = ObservationGroupCfg(
     terms=latent_terms,
@@ -733,6 +856,26 @@ def _configure_latent_observations(
     enable_corruption=params.enable_latent_obs_corruption,
     history_length=0,
   )
+  if foot_event_memory_params is not None:
+    cfg.observations[params.stair_phase_state_group_name] = ObservationGroupCfg(
+      terms={
+        params.foot_event_memory_term_name: ObservationTermCfg(
+          func=mdp.FootEventMemoryObs,
+          params=dict(foot_event_memory_params),
+        ),
+      },
+      concatenate_terms=True,
+      enable_corruption=False,
+      history_length=0,
+    )
+  stride_phase_reward = cfg.rewards.get("stair_stride_phase_reward")
+  if stride_phase_reward is not None and foot_event_memory_params is not None:
+    stride_phase_reward.params.update(
+      {
+        "event_observation_group_name": params.stair_phase_state_group_name,
+        "event_observation_term_name": params.foot_event_memory_term_name,
+      }
+    )
   if params.enable_latent_labels:
     cfg.observations[params.label_group_name] = ObservationGroupCfg(
       terms={

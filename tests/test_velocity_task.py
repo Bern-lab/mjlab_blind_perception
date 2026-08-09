@@ -1,7 +1,7 @@
 """Tests specific to velocity tasks."""
 
 from dataclasses import asdict
-from typing import cast
+from typing import Any, cast
 
 import pytest
 import torch
@@ -21,6 +21,9 @@ from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg
 from mjlab.tasks.velocity.config.g1.blind_rough_lstm_teacher_kl_env_cfg import (
   unitree_g1_blind_rough_lstm_teacherkl_env_cfg,
   unitree_g1_blind_rough_target_navigation_ablation_env_cfg,
+)
+from mjlab.tasks.velocity.config.g1.blind_rough_slow_latent_env_cfg import (
+  unitree_g1_blind_rough_target_navigation_slow_latent_env_cfg,
 )
 from mjlab.tasks.velocity.config.g1.blind_stairs_flag_teacher_kl_env_cfg import (
   unitree_g1_blind_stairs_flag_teacherkl_env_cfg,
@@ -42,6 +45,55 @@ BOOLEAN_ABLATION_TASK_IDS = (
   "Mjlab-Velocity-Blind-StairsFlag-TeacherKL-Unitree-G1",
   "Mjlab-Velocity-Blind-StairsFlag-LSTM-TeacherKL-Unitree-G1",
 )
+
+
+def _term_table(
+  terms: dict[str, Any],
+  *,
+  normalize_phase_event_source: bool = False,
+) -> dict[str, tuple[str, float | None, str]]:
+  table = {}
+  for name, term in terms.items():
+    params = getattr(term, "params", {})
+    if normalize_phase_event_source and name == "stair_stride_phase_reward":
+      params = dict(params)
+      params.pop("event_observation_group_name", None)
+      params.pop("event_observation_term_name", None)
+    table[name] = (repr(term.func), getattr(term, "weight", None), repr(params))
+  return table
+
+
+def _objective_fingerprint(
+  cfg: Any,
+  *,
+  ignore_latent_cache_event: bool = False,
+  normalize_phase_event_source: bool = False,
+) -> dict[str, Any]:
+  terrain = cfg.scene.terrain
+  terrain_generator = None if terrain is None else terrain.terrain_generator
+  events = {
+    name: term
+    for name, term in cfg.events.items()
+    if not ignore_latent_cache_event or name != "reset_stair_latent_cache"
+  }
+  return {
+    "sim": repr(cfg.sim),
+    "terrain": repr(terrain_generator),
+    "terrain_max_init": None if terrain is None else terrain.max_init_terrain_level,
+    "terrain_standalone_start": (
+      None if terrain is None else terrain.standalone_spawn_start_level
+    ),
+    "sensors": repr(cfg.scene.sensors),
+    "commands": {name: repr(term) for name, term in cfg.commands.items()},
+    "events": _term_table(events),
+    "rewards": _term_table(
+      cfg.rewards,
+      normalize_phase_event_source=normalize_phase_event_source,
+    ),
+    "terminations": _term_table(cfg.terminations),
+    "curriculum": _term_table(cfg.curriculum),
+    "episode_length_s": cfg.episode_length_s,
+  }
 
 
 @pytest.fixture(scope="module")
@@ -91,6 +143,7 @@ def test_g1_teacherkl_ablation_tasks_match_slowlatent_conditions() -> None:
   )
   expected_step_rewards = {
     "toe_step_riser_slab_penalty": -4.2,
+    "stair_stride_phase_reward": 1.0,
     "shank_front_edge_clearance_penalty": -3.0,
     "stair_skip_layer_penalty": -1.0,
     "target_tread_midline_shaping": 1.2,
@@ -113,21 +166,39 @@ def test_g1_teacherkl_ablation_tasks_match_slowlatent_conditions() -> None:
     terrain_generator = cfg.scene.terrain.terrain_generator
     assert terrain_generator is not None
     assert tuple(terrain_generator.sub_terrains) == expected_terrain_names
+    assert tuple(terrain_generator.standalone_terrains) == ("long_stair_runway",)
     assert terrain_generator.curriculum is True
     assert cfg.scene.terrain.max_init_terrain_level == 2
+    assert cfg.scene.terrain.standalone_spawn_start_level == 3
 
     assert "latent" not in cfg.observations
     assert "latent_labels" not in cfg.observations
+    assert "stair_phase_state" in cfg.observations
+    assert "foot_event_memory" in cfg.observations["stair_phase_state"].terms
     assert "reset_stair_latent_cache" not in cfg.events
     assert "toe_riser_contact_memory_penalty" not in cfg.rewards
     for reward_name, weight in expected_step_rewards.items():
       assert cfg.rewards[reward_name].weight == weight
+    phase_params = cfg.rewards["stair_stride_phase_reward"].params
+    assert phase_params["event_observation_group_name"] == "stair_phase_state"
+    assert phase_params["event_observation_term_name"] == "foot_event_memory"
 
     velocity_stages = cfg.curriculum["command_vel"].params["velocity_stages"]
     assert velocity_stages[0]["lin_vel_x"] == (0.4, 0.8)
     assert velocity_stages[1]["lin_vel_x"] == (0.4, 1.0)
+    terrain_params = cfg.curriculum["terrain_levels"].params
+    assert terrain_params["mixed_replay_start_level"] == 8
+    assert terrain_params["mixed_replay_level_ranges"] == ((0, 2), (3, 5), (6, 9))
+    assert terrain_params["mixed_replay_weights"] == (0.2, 0.3, 0.5)
+    assert terrain_params["standalone_replay_start_level"] == 3
+    assert terrain_params["standalone_replay_probability"] == 0.5
 
     assert rl_cfg.num_steps_per_env == 64
+    assert rl_cfg.obs_groups == {
+      "actor": ("actor",),
+      "critic": ("critic",),
+      "teacher": ("teacher", "camera"),
+    }
     assert rl_cfg.save_interval == 500
     algorithm_cfg = cast(RslRlPpoTeacherKLAlgorithmCfg, rl_cfg.algorithm)
     teacher_cfg = algorithm_cfg.teacher_kl_cfg
@@ -137,6 +208,40 @@ def test_g1_teacherkl_ablation_tasks_match_slowlatent_conditions() -> None:
     assert teacher_cfg.loss_type == "mean_huber"
     assert teacher_cfg.lambda_start == 0.05
     assert teacher_cfg.warmup_iters == 0
+
+
+def test_ablation_objective_fingerprint_matches_across_all_five_tasks() -> None:
+  """Only actor/model inputs may differ; objective conditions stay identical."""
+  reference = _objective_fingerprint(load_env_cfg(SLOW_LATENT_ABLATION_TASK_IDS[0]))
+  for task_id in SLOW_LATENT_ABLATION_TASK_IDS[1:]:
+    assert _objective_fingerprint(load_env_cfg(task_id)) == reference
+
+
+def test_ablation_objective_fingerprint_matches_slowlatent_reference() -> None:
+  """Ablations differ from SlowLatent only in policy-visible state."""
+  slow_cfg = unitree_g1_blind_rough_target_navigation_slow_latent_env_cfg()
+  reference = _objective_fingerprint(
+    slow_cfg,
+    ignore_latent_cache_event=True,
+    normalize_phase_event_source=True,
+  )
+  reference_memory_params = (
+    slow_cfg.observations["latent"].terms["foot_event_memory"].params
+  )
+
+  for task_id in SLOW_LATENT_ABLATION_TASK_IDS:
+    cfg = load_env_cfg(task_id)
+    assert (
+      _objective_fingerprint(
+        cfg,
+        normalize_phase_event_source=True,
+      )
+      == reference
+    )
+    assert (
+      cfg.observations["stair_phase_state"].terms["foot_event_memory"].params
+      == reference_memory_params
+    )
 
 
 def test_boolean_and_lstm_ablation_boundaries() -> None:
