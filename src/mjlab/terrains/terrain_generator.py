@@ -53,6 +53,10 @@ class TerrainOutput:
   """Spawn origin position (x, y, z) in the sub-terrain's local frame."""
   geometries: list[TerrainGeometry]
   """List of geometry elements comprising this terrain."""
+  bounds: tuple[float, float, float, float] | None = None
+  """Optional local XY bounds as ``(x_min, x_max, y_min, y_max)``.
+
+  When omitted, the full rectangular sub-terrain ``size`` is used."""
   flat_patches: dict[str, np.ndarray] | None = (
     None  # 关联平坦点，保存找到的点位置，key是点的名字，value是一个(N, 3)的数组，包含N个平坦点的世界坐标。如果某个地形没有生成平坦点，则对应的值为None。
   )
@@ -150,6 +154,14 @@ class TerrainGeneratorCfg:
   "random" assigns random colors, "none" uses uniform gray."""
   sub_terrains: dict[str, SubTerrainCfg] = field(default_factory=dict)
   """Named sub-terrain configurations to populate the grid."""
+  standalone_terrains: dict[str, SubTerrainCfg] = field(default_factory=dict)
+  """Named terrains placed outside the tiled grid.
+
+  These terrains are still exposed as terrain columns for spawning, target
+  sampling, and curriculum bookkeeping, but they are not square-patched into the
+  main grid and keep their own ``SubTerrainCfg.size`` values."""
+  standalone_spacing: float = 4.0
+  """Gap between standalone terrains and between standalone terrain rows."""
   difficulty_range: tuple[float, float] = (0.0, 1.0)
   """Min and max difficulty values used when generating sub-terrains."""
   add_lights: bool = False
@@ -188,14 +200,36 @@ class TerrainGenerator:
     self.cfg = cfg
     self.device = device
 
-    # In curriculum mode, one column per terrain type.
+    # In curriculum mode, one column per grid terrain type.
     if self.cfg.curriculum:
-      self._num_cols = len(self.cfg.sub_terrains)
+      self._grid_num_cols = len(self.cfg.sub_terrains)
     else:
-      self._num_cols = self.cfg.num_cols
+      self._grid_num_cols = self.cfg.num_cols
+    self._standalone_names = tuple(self.cfg.standalone_terrains.keys())
+    self._num_cols = self._grid_num_cols + len(self._standalone_names)
 
     for sub_cfg in self.cfg.sub_terrains.values():
       sub_cfg.size = self.cfg.size
+
+    if self.cfg.curriculum:
+      grid_names = tuple(self.cfg.sub_terrains.keys())
+      grid_proportions = tuple(
+        float(sub_cfg.proportion) for sub_cfg in self.cfg.sub_terrains.values()
+      )
+    else:
+      grid_names = tuple(f"grid_{col}" for col in range(self._grid_num_cols))
+      grid_proportions = (1.0,) * self._grid_num_cols
+    standalone_proportions = tuple(
+      float(sub_cfg.proportion) for sub_cfg in self.cfg.standalone_terrains.values()
+    )
+    self.terrain_type_names = grid_names + self._standalone_names
+    self.terrain_type_proportions = np.asarray(
+      grid_proportions + standalone_proportions, dtype=np.float64
+    )
+    self.standalone_terrain_type_names = self._standalone_names
+    self.standalone_terrain_type_mask = np.zeros(self._num_cols, dtype=bool)
+    if self._standalone_names:
+      self.standalone_terrain_type_mask[self._grid_num_cols :] = True
 
     if self.cfg.seed is not None:
       seed = self.cfg.seed
@@ -228,12 +262,17 @@ class TerrainGenerator:
     self.step_boundary_counts = np.zeros(
       (self.cfg.num_rows, self._num_cols), dtype=np.int32
     )
+    self.terrain_bounds_by_tile = np.zeros(
+      (self.cfg.num_rows, self._num_cols, 4), dtype=np.float32
+    )
 
     # Pre-allocate flat patch storage by scanning all sub-terrain configs.
     self.flat_patches: dict[str, np.ndarray] = {}
     self.flat_patch_radii: dict[str, float] = {}
     patch_names: dict[str, int] = {}
-    for sub_cfg in self.cfg.sub_terrains.values():
+    for sub_cfg in list(self.cfg.sub_terrains.values()) + list(
+      self.cfg.standalone_terrains.values()
+    ):
       if sub_cfg.flat_patch_sampling is not None:
         for name, patch_cfg in sub_cfg.flat_patch_sampling.items():
           if name in patch_names:
@@ -254,12 +293,14 @@ class TerrainGenerator:
     if self.cfg.curriculum:
       tic = time.perf_counter()
       self._generate_curriculum_terrains(spec)
+      self._generate_standalone_terrains(spec)
       toc = time.perf_counter()
       print(f"Curriculum terrain generation took {toc - tic:.4f} seconds.")
 
     else:
       tic = time.perf_counter()
       self._generate_random_terrains(spec)
+      self._generate_standalone_terrains(spec)
       toc = time.perf_counter()
       print(f"Terrain generation took {toc - tic:.4f} seconds.")
 
@@ -287,8 +328,10 @@ class TerrainGenerator:
     sub_terrains_cfgs = list(self.cfg.sub_terrains.values())
 
     # Randomly sample and place sub-terrains in the grid.
-    for index in range(self.cfg.num_rows * self._num_cols):
-      sub_row, sub_col = np.unravel_index(index, (self.cfg.num_rows, self._num_cols))
+    for index in range(self.cfg.num_rows * self._grid_num_cols):
+      sub_row, sub_col = np.unravel_index(
+        index, (self.cfg.num_rows, self._grid_num_cols)
+      )
       sub_row = int(sub_row)
       sub_col = int(sub_col)
 
@@ -316,7 +359,7 @@ class TerrainGenerator:
     # One column per terrain type — proportion is only for spawning.
     sub_terrains_cfgs = list(self.cfg.sub_terrains.values())
 
-    for sub_col in range(self._num_cols):
+    for sub_col in range(self._grid_num_cols):
       for sub_row in range(self.cfg.num_rows):
         lower, upper = self.cfg.difficulty_range
         difficulty = (sub_row + self.np_rng.uniform()) / self.cfg.num_rows
@@ -344,9 +387,46 @@ class TerrainGenerator:
 
     # Offset to center the entire grid at world origin.
     grid_offset_x = -self.cfg.num_rows * self.cfg.size[0] * 0.5
-    grid_offset_y = -self._num_cols * self.cfg.size[1] * 0.5
+    grid_offset_y = -self._grid_num_cols * self.cfg.size[1] * 0.5
 
     return np.array([grid_offset_x + rel_x, grid_offset_y + rel_y, 0.0])
+
+  def _generate_standalone_terrains(self, spec: mujoco.MjSpec) -> None:
+    if not self.cfg.standalone_terrains:
+      return
+
+    x_base = (
+      self.cfg.num_rows * self.cfg.size[0] * 0.5
+      + self.cfg.border_width
+      + self.cfg.standalone_spacing
+    )
+    for standalone_index, standalone_cfg in enumerate(
+      self.cfg.standalone_terrains.values()
+    ):
+      col = self._grid_num_cols + standalone_index
+      row_stride = standalone_cfg.size[1] + self.cfg.standalone_spacing
+      total_y = self.cfg.num_rows * standalone_cfg.size[1]
+      total_y += max(0, self.cfg.num_rows - 1) * self.cfg.standalone_spacing
+      y_base = -0.5 * total_y
+
+      for row in range(self.cfg.num_rows):
+        lower, upper = self.cfg.difficulty_range
+        difficulty = (row + self.np_rng.uniform()) / self.cfg.num_rows
+        difficulty = lower + (upper - lower) * difficulty
+        world_position = np.array(
+          [x_base, y_base + row * row_stride, 0.0], dtype=np.float64
+        )
+        spawn_origin = self._create_terrain_geom(
+          spec,
+          world_position,
+          difficulty,
+          standalone_cfg,
+          row,
+          col,
+        )
+        self.terrain_origins[row, col] = spawn_origin
+
+      x_base += standalone_cfg.size[0] + self.cfg.standalone_spacing
 
   def _create_terrain_geom(
     self,
@@ -385,6 +465,19 @@ class TerrainGenerator:
 
     # Collect flat patches into pre-allocated arrays.
     spawn_origin = output.origin + world_position
+    if output.bounds is None:
+      bounds = np.asarray([0.0, cfg.size[0], 0.0, cfg.size[1]], dtype=np.float32)
+    else:
+      bounds = np.asarray(output.bounds, dtype=np.float32)
+      if bounds.shape != (4,):
+        raise ValueError(
+          "TerrainOutput.bounds must be a tuple of (x_min, x_max, y_min, y_max)."
+        )
+    bounds = bounds.copy()
+    bounds[0:2] += world_position[0]
+    bounds[2:4] += world_position[1]
+    self.terrain_bounds_by_tile[sub_row, sub_col] = bounds
+
     for name, arr in self.flat_patches.items():
       if output.flat_patches is not None and name in output.flat_patches:
         patches = output.flat_patches[name]
@@ -562,11 +655,11 @@ class TerrainGenerator:
     body = spec.body("terrain")
     border_size = (
       self.cfg.num_rows * self.cfg.size[0] + 2 * self.cfg.border_width,
-      self._num_cols * self.cfg.size[1] + 2 * self.cfg.border_width,
+      self._grid_num_cols * self.cfg.size[1] + 2 * self.cfg.border_width,
     )
     inner_size = (
       self.cfg.num_rows * self.cfg.size[0],
-      self._num_cols * self.cfg.size[1],
+      self._grid_num_cols * self.cfg.size[1],
     )
     # Border should be centered at origin since the terrain grid is centered.
     border_center = (0, 0, -self.cfg.border_height / 2)
@@ -588,7 +681,7 @@ class TerrainGenerator:
       return
 
     total_width = self.cfg.size[0] * self.cfg.num_rows
-    total_height = self.cfg.size[1] * self._num_cols
+    total_height = self.cfg.size[1] * self._grid_num_cols
     light_height = max(total_width, total_height) * 0.6
 
     spec.body("terrain").add_light(

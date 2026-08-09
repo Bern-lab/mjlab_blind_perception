@@ -123,7 +123,11 @@ def _terrain_level_active(
   levels = getattr(terrain, "terrain_levels", None)
   if levels is None:
     return torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
-  return levels >= min_terrain_level
+  level_active = levels >= min_terrain_level
+  is_standalone_env = getattr(terrain, "is_standalone_env", None)
+  if callable(is_standalone_env):
+    level_active = level_active | is_standalone_env()
+  return level_active
 
 
 def _step_boundary_layers(

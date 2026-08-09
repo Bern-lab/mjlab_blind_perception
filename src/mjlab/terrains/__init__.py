@@ -16,6 +16,9 @@ from mjlab.terrains.primitive_terrains import (
   BoxInvertedPyramidStairsTerrainCfg as BoxInvertedPyramidStairsTerrainCfg,
 )
 from mjlab.terrains.primitive_terrains import (
+  BoxLongStairRunwayTerrainCfg as BoxLongStairRunwayTerrainCfg,
+)
+from mjlab.terrains.primitive_terrains import (
   BoxNarrowBeamsTerrainCfg as BoxNarrowBeamsTerrainCfg,
 )
 from mjlab.terrains.primitive_terrains import (

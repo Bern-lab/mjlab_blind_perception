@@ -39,6 +39,8 @@ from .blind_rough_toe_contact_cfg import (
 G1_HIGH_STAIRS_MIXED_REPLAY_START_LEVEL = 8
 G1_HIGH_STAIRS_MIXED_REPLAY_LEVEL_RANGES = ((0, 2), (3, 5), (6, 9))
 G1_HIGH_STAIRS_MIXED_REPLAY_WEIGHTS = (0.2, 0.3, 0.5)
+G1_HIGH_STAIRS_STANDALONE_REPLAY_START_LEVEL = 3
+G1_HIGH_STAIRS_STANDALONE_REPLAY_PROBABILITY = 0.5
 G1_HIGH_STAIRS_PLAY_NUM_ROWS = 10
 
 
@@ -65,6 +67,30 @@ def configure_g1_high_stairs_mixed_replay(
   params["mixed_replay_start_level"] = start_level
   params["mixed_replay_level_ranges"] = level_ranges
   params["mixed_replay_weights"] = weights
+
+
+def configure_g1_high_stairs_standalone_replay(
+  cfg: ManagerBasedRlEnvCfg,
+  start_level: int | None = G1_HIGH_STAIRS_STANDALONE_REPLAY_START_LEVEL,
+  probability: float | None = G1_HIGH_STAIRS_STANDALONE_REPLAY_PROBABILITY,
+) -> None:
+  """Enable standalone stair runway replay after the normal grid curriculum gate."""
+  terrain_levels = cfg.curriculum.get("terrain_levels")
+  if terrain_levels is None:
+    return
+
+  params = terrain_levels.params
+  if start_level is None:
+    params.pop("standalone_replay_start_level", None)
+    params.pop("standalone_replay_probability", None)
+    if cfg.scene.terrain is not None:
+      cfg.scene.terrain.standalone_spawn_start_level = None
+    return
+
+  params["standalone_replay_start_level"] = start_level
+  params["standalone_replay_probability"] = probability
+  if cfg.scene.terrain is not None:
+    cfg.scene.terrain.standalone_spawn_start_level = start_level
 
 
 def configure_g1_high_stairs_play_terrain_generator(

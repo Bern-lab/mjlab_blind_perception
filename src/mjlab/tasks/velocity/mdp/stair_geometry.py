@@ -31,6 +31,7 @@ STAIR_CLEARANCE_SEQUENCE_ID_KEY = "slow_latent_stair_clearance_sequence_id"
 STAIR_CLEARANCE_ASCENT_DIR_KEY = "slow_latent_stair_clearance_ascent_dir"
 STAIR_ASCENT_DIR_KEY = "slow_latent_stair_ascent_dir"
 STAIR_TREAD_DEPTH_LABEL_KEY = "slow_latent_stair_tread_depth_label"
+STAIR_SAME_FOOT_STRIDE_LABEL_KEY = "slow_latent_stair_same_foot_stride_label"
 STAIR_RISER_HEIGHT_LABEL_KEY = "slow_latent_stair_riser_height_label"
 STAIR_SHAPE_LABEL_VALID_KEY = "slow_latent_stair_shape_label_valid"
 STAIR_DEPTH_LABEL_VALID_KEY = "slow_latent_stair_depth_label_valid"
@@ -98,7 +99,37 @@ OBSERVED_STEP_STRIDE_KEY = "slow_latent_observed_step_stride"
 COLLISION_RISK_KEY = "slow_latent_collision_risk_now"
 LANDING_TOUCHDOWN_KEY = "slow_latent_landing_touchdown_now"
 LANDING_QUALITY_KEY = "slow_latent_landing_quality_now"
+STAIR_STRIDE_PHASE_EVENT_ID_KEY = "slow_latent_stair_stride_phase_event_id"
+STAIR_STRIDE_PHASE_EVENT_TYPE_KEY = "slow_latent_stair_stride_phase_event_type"
+STAIR_STRIDE_PHASE_EVENT_ACTUAL_KEY = "slow_latent_stair_stride_phase_event_actual"
+STAIR_STRIDE_PHASE_EVENT_PREVIOUS_KEY = "slow_latent_stair_stride_phase_event_previous"
+STAIR_STRIDE_PHASE_EVENT_TARGET_KEY = "slow_latent_stair_stride_phase_event_target"
+STAIR_STRIDE_PHASE_EVENT_COMPLETED_KEY = (
+  "slow_latent_stair_stride_phase_event_completed"
+)
+STAIR_STRIDE_PHASE_EVENT_COLLISION_PENALTY_KEY = (
+  "slow_latent_stair_stride_phase_event_collision_penalty"
+)
+STAIR_TOE_RISER_TOTAL_PENALTY_KEY = "slow_latent_stair_toe_riser_total_penalty"
+
+STAIR_STRIDE_EVENT_NONE = 0
+STAIR_STRIDE_EVENT_PROBE_TOUCHDOWN = 1
+STAIR_STRIDE_EVENT_VALID_SECOND_HIT = 2
+STAIR_STRIDE_EVENT_BACKOFF_TOUCHDOWN = 3
+STAIR_STRIDE_EVENT_LOCK_TOUCHDOWN = 4
 _STAIR_SHAPE_CACHE_KEY = "_privileged_stair_shape_cache"
+
+
+def stride_target_interval_contains(
+  actual: torch.Tensor,
+  target: torch.Tensor,
+  lower_tolerance: float,
+  upper_tolerance: float,
+) -> torch.Tensor:
+  """Return whether a stride is inside an asymmetric target interval."""
+  return (actual >= target - float(lower_tolerance)) & (
+    actual <= target + float(upper_tolerance)
+  )
 
 
 def stair_shape_from_boundaries(

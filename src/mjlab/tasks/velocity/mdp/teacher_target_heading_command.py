@@ -93,6 +93,13 @@ class TeacherTargetHeadingVelocityCommand(UniformVelocityCommand):
     self.vel_command_b[env_ids, 2] = r.uniform_(*cfg.ranges.ang_vel_z)
     self.vel_command_w[env_ids, :] = 0.0
 
+    standalone_ids = self._standalone_env_ids(env_ids)
+    if len(standalone_ids) > 0:
+      self.is_target_env[standalone_ids] = True
+      self.is_random_heading_env[standalone_ids] = False
+      self.is_standing_env[standalone_ids] = False
+      self.is_heading_env[standalone_ids] = True
+
     zero_y_ids = env_ids[
       self.is_target_env[env_ids]
       | self.is_random_heading_env[env_ids]
@@ -201,24 +208,45 @@ class TeacherTargetHeadingVelocityCommand(UniformVelocityCommand):
     patches = terrain.flat_patches[cfg.patch_name]
     num_rows, num_cols, num_patches, _ = patches.shape
     rows, cols = self._current_tile_indices(env_ids, num_rows, num_cols)
+    standalone_mask = terrain.is_standalone_env(env_ids)
+    if standalone_mask.any():
+      standalone_target_ids = standalone_mask.nonzero(as_tuple=False).flatten()
+      targets = patches[
+        rows[standalone_target_ids],
+        cols[standalone_target_ids],
+        0,
+      ]
+      env_subset = env_ids[standalone_target_ids]
+      self.target_pos_w[env_subset] = targets
+      self.target_distance[env_subset] = torch.linalg.norm(
+        targets[:, :2] - self.robot.data.root_link_pos_w[env_subset, :2],
+        dim=1,
+      )
+    if standalone_mask.all():
+      return
+
+    sample_env_ids = env_ids[~standalone_mask]
+    sample_rows = rows[~standalone_mask]
+    sample_cols = cols[~standalone_mask]
+    sample_num_cols = self._grid_target_num_cols(num_cols)
     offsets = self._candidate_tile_offsets()
 
-    root_xy = self.robot.data.root_link_pos_w[env_ids, :2]
-    targets = self.target_pos_w[env_ids].clone()
-    valid_distance = torch.zeros(len(env_ids), dtype=torch.bool, device=self.device)
+    root_xy = self.robot.data.root_link_pos_w[sample_env_ids, :2]
+    targets = self.target_pos_w[sample_env_ids].clone()
+    valid_distance = torch.zeros(
+      len(sample_env_ids), dtype=torch.bool, device=self.device
+    )
 
     for _ in range(16):
       sample_ids = (~valid_distance).nonzero(as_tuple=False).flatten()
       if len(sample_ids) == 0:
         break
 
-      sample_rows = rows[sample_ids]
-      sample_cols = cols[sample_ids]
       target_rows, target_cols = self._sample_neighbor_tiles(
-        sample_rows,
-        sample_cols,
+        sample_rows[sample_ids],
+        sample_cols[sample_ids],
         num_rows,
-        num_cols,
+        sample_num_cols,
         offsets,
       )
       patch_ids = torch.randint(0, num_patches, (len(sample_ids),), device=self.device)
@@ -235,10 +263,10 @@ class TeacherTargetHeadingVelocityCommand(UniformVelocityCommand):
     if not valid_distance.all():
       fallback_ids = (~valid_distance).nonzero(as_tuple=False).flatten()
       target_rows, target_cols = self._sample_neighbor_tiles(
-        rows[fallback_ids],
-        cols[fallback_ids],
+        sample_rows[fallback_ids],
+        sample_cols[fallback_ids],
         num_rows,
-        num_cols,
+        sample_num_cols,
         offsets,
       )
       patch_ids = torch.randint(
@@ -246,10 +274,25 @@ class TeacherTargetHeadingVelocityCommand(UniformVelocityCommand):
       )
       targets[fallback_ids] = patches[target_rows, target_cols, patch_ids]
 
-    self.target_pos_w[env_ids] = targets
-    self.target_distance[env_ids] = torch.linalg.norm(
-      self.target_pos_w[env_ids, :2] - root_xy, dim=1
+    self.target_pos_w[sample_env_ids] = targets
+    self.target_distance[sample_env_ids] = torch.linalg.norm(
+      self.target_pos_w[sample_env_ids, :2] - root_xy, dim=1
     )
+
+  def _standalone_env_ids(self, env_ids: torch.Tensor) -> torch.Tensor:
+    terrain = self._env.scene.terrain
+    if terrain is None or not hasattr(terrain, "is_standalone_env"):
+      return env_ids[:0]
+    return env_ids[terrain.is_standalone_env(env_ids)]
+
+  def _grid_target_num_cols(self, fallback_num_cols: int) -> int:
+    terrain = self._env.scene.terrain
+    if terrain is None or terrain.cfg.terrain_generator is None:
+      return fallback_num_cols
+    terrain_generator = terrain.cfg.terrain_generator
+    if terrain_generator.curriculum:
+      return min(len(terrain_generator.sub_terrains), fallback_num_cols)
+    return min(terrain_generator.num_cols, fallback_num_cols)
 
   def _current_tile_indices(
     self,
@@ -263,19 +306,25 @@ class TeacherTargetHeadingVelocityCommand(UniformVelocityCommand):
     assert terrain_generator is not None
 
     size_x, size_y = terrain_generator.size
+    if terrain_generator.curriculum:
+      grid_num_cols = len(terrain_generator.sub_terrains)
+    else:
+      grid_num_cols = terrain_generator.num_cols
     grid_min_x = -num_rows * size_x * 0.5
-    grid_min_y = -num_cols * size_y * 0.5
+    grid_min_y = -grid_num_cols * size_y * 0.5
 
     root_pos = self.robot.data.root_link_pos_w[env_ids]
     rows = torch.floor((root_pos[:, 0] - grid_min_x) / size_x).long()
     cols = torch.floor((root_pos[:, 1] - grid_min_y) / size_y).long()
     rows = torch.clamp(rows, 0, num_rows - 1)
-    cols = torch.clamp(cols, 0, num_cols - 1)
+    cols = torch.clamp(cols, 0, min(grid_num_cols, num_cols) - 1)
 
-    first_command = self.command_counter[env_ids] == 0
     if terrain.terrain_levels is not None and terrain.terrain_types is not None:
-      rows = torch.where(first_command, terrain.terrain_levels[env_ids], rows)
-      cols = torch.where(first_command, terrain.terrain_types[env_ids], cols)
+      assigned_tile = self.command_counter[env_ids] == 0
+      if hasattr(terrain, "is_standalone_env"):
+        assigned_tile |= terrain.is_standalone_env(env_ids)
+      rows = torch.where(assigned_tile, terrain.terrain_levels[env_ids], rows)
+      cols = torch.where(assigned_tile, terrain.terrain_types[env_ids], cols)
 
     return rows, cols
 

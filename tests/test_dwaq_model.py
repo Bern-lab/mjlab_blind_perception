@@ -292,6 +292,8 @@ def test_dwaq_ablation_is_the_only_registered_task_and_keeps_env_contract() -> N
 
   assert "latent" not in env_cfg.observations
   assert "latent_labels" not in env_cfg.observations
+  assert "stair_phase_state" in env_cfg.observations
+  assert "foot_event_memory" in env_cfg.observations["stair_phase_state"].terms
   assert "reset_stair_latent_cache" not in env_cfg.events
   assert env_cfg.observations["actor"].history_length == 0
   assert env_cfg.observations["dwaq_history"].history_length == 5
@@ -302,6 +304,10 @@ def test_dwaq_ablation_is_the_only_registered_task_and_keeps_env_contract() -> N
   assert tuple(env_cfg.observations["dwaq_velocity_target"].terms) == ("base_lin_vel",)
   assert set(play_cfg.observations) == set(env_cfg.observations)
   assert "toe_step_riser_slab_penalty" in env_cfg.rewards
+  assert "stair_stride_phase_reward" in env_cfg.rewards
+  phase_params = env_cfg.rewards["stair_stride_phase_reward"].params
+  assert phase_params["event_observation_group_name"] == "stair_phase_state"
+  assert phase_params["event_observation_term_name"] == "foot_event_memory"
   assert "target_tread_midline_shaping" in env_cfg.rewards
   assert "teacher" in env_cfg.observations
   assert "camera" in env_cfg.observations
@@ -313,6 +319,7 @@ def test_dwaq_ablation_is_the_only_registered_task_and_keeps_env_contract() -> N
   assert algorithm_cfg.dwaq_velocity_target_groups == ("dwaq_velocity_target",)
   assert algorithm_cfg.dwaq_beta == 0.01
   assert not hasattr(algorithm_cfg, "next_observation_groups")
+  assert rl_cfg.num_steps_per_env == 64
   assert rl_cfg.obs_groups == {
     "actor": ("actor",),
     "dwaq_history": ("dwaq_history",),

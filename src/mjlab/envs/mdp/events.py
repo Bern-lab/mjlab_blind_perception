@@ -76,6 +76,12 @@ def _sample_terrain_types(
 
   terrain = env.scene.terrain
   assert terrain is not None
+  type_proportions = getattr(terrain, "terrain_type_proportions", None)
+  if isinstance(type_proportions, torch.Tensor) and len(type_proportions) == num_cols:
+    weights = type_proportions.to(device=device, dtype=torch.float)
+    if torch.sum(weights) > 0.0:
+      return torch.multinomial(weights / weights.sum(), num_samples, replacement=True)
+
   terrain_generator = terrain.cfg.terrain_generator
   if terrain_generator is None:
     return torch.randint(0, num_cols, (num_samples,), device=device)
@@ -277,6 +283,101 @@ def reset_root_state_uniform(
   )
 
   asset.write_root_link_velocity_to_sim(velocities, env_ids=env_ids)
+
+
+def reset_root_state_uniform_with_standalone_heading(
+  env: ManagerBasedRlEnv,
+  env_ids: torch.Tensor | None,
+  pose_range: dict[str, tuple[float, float]],
+  velocity_range: dict[str, tuple[float, float]] | None = None,
+  standalone_pose_range: dict[str, tuple[float, float]] | None = None,
+  target_patch_name: str = "target",
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+  """Reset normal terrain envs uniformly and standalone tracks facing target."""
+  if env_ids is None:
+    env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int)
+
+  terrain = env.scene.terrain
+  if terrain is None or not hasattr(terrain, "is_standalone_env"):
+    reset_root_state_uniform(env, env_ids, pose_range, velocity_range, asset_cfg)
+    return
+
+  standalone_mask = terrain.is_standalone_env(env_ids)
+  normal_ids = env_ids[~standalone_mask]
+  standalone_ids = env_ids[standalone_mask]
+
+  if len(normal_ids) > 0:
+    reset_root_state_uniform(
+      env,
+      normal_ids,
+      pose_range=pose_range,
+      velocity_range=velocity_range,
+      asset_cfg=asset_cfg,
+    )
+  if len(standalone_ids) == 0:
+    return
+
+  asset: Entity = env.scene[asset_cfg.name]
+  default_root_state = asset.data.default_root_state
+  assert default_root_state is not None
+  root_states = default_root_state[standalone_ids].clone()
+
+  standalone_pose_range = standalone_pose_range or {
+    "x": (-0.15, 0.15),
+    "y": (-0.15, 0.15),
+    "z": (0.01, 0.05),
+    "yaw": (-0.05, 0.05),
+  }
+  range_list = [
+    standalone_pose_range.get(key, (0.0, 0.0))
+    for key in ["x", "y", "z", "roll", "pitch", "yaw"]
+  ]
+  ranges = torch.tensor(range_list, device=env.device)
+  pose_samples = sample_uniform(
+    ranges[:, 0], ranges[:, 1], (len(standalone_ids), 6), device=env.device
+  )
+
+  positions = root_states[:, 0:3] + env.scene.env_origins[standalone_ids]
+  positions += pose_samples[:, 0:3]
+
+  target_pos = positions.clone()
+  if target_patch_name in terrain.flat_patches and terrain.terrain_origins is not None:
+    levels = terrain.terrain_levels[standalone_ids]
+    types = terrain.terrain_types[standalone_ids]
+    target_pos = terrain.flat_patches[target_patch_name][levels, types, 0]
+
+  target_delta = target_pos[:, :2] - env.scene.env_origins[standalone_ids, :2]
+  yaw = torch.atan2(target_delta[:, 1], target_delta[:, 0]) + pose_samples[:, 5]
+  orientations_delta = quat_from_euler_xyz(pose_samples[:, 3], pose_samples[:, 4], yaw)
+  orientations = quat_mul(root_states[:, 3:7], orientations_delta)
+
+  if asset.is_fixed_base:
+    if not asset.is_mocap:
+      raise ValueError(
+        f"Cannot reset root state for fixed-base non-mocap entity '{asset_cfg.name}'."
+      )
+    asset.write_mocap_pose_to_sim(
+      torch.cat([positions, orientations], dim=-1), env_ids=standalone_ids
+    )
+    return
+
+  if velocity_range is None:
+    velocity_range = {}
+  vel_range_list = [
+    velocity_range.get(key, (0.0, 0.0))
+    for key in ["x", "y", "z", "roll", "pitch", "yaw"]
+  ]
+  vel_ranges = torch.tensor(vel_range_list, device=env.device)
+  vel_samples = sample_uniform(
+    vel_ranges[:, 0], vel_ranges[:, 1], (len(standalone_ids), 6), device=env.device
+  )
+  velocities = root_states[:, 7:13] + vel_samples
+
+  asset.write_root_link_pose_to_sim(
+    torch.cat([positions, orientations], dim=-1), env_ids=standalone_ids
+  )
+  asset.write_root_link_velocity_to_sim(velocities, env_ids=standalone_ids)
 
 
 def reset_root_state_from_flat_patches(

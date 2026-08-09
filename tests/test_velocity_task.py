@@ -1,7 +1,7 @@
 """Tests specific to velocity tasks."""
 
 import importlib
-from typing import cast
+from typing import Any, cast
 
 import pytest
 import torch
@@ -43,6 +43,7 @@ from mjlab.tasks.velocity.mdp import (
   UniformVelocityCommandCfg,
   stair_aware_feet_gait,
   stair_sequence_event_logger,
+  stair_stride_phase_reward,
   target_tread_midline_shaping,
 )
 from mjlab.tasks.velocity.mdp.teacher_target_heading_command import (
@@ -57,6 +58,55 @@ from mjlab.terrains.primitive_terrains import (
 MAIN_BRANCH_VELOCITY_TASK_IDS = (
   "Mjlab-Velocity-Blind-Rough-TargetNavigation-DWAQ-TeacherKL-Unitree-G1",
 )
+
+
+def _term_table(
+  terms: dict[str, Any],
+  *,
+  normalize_phase_event_source: bool = False,
+) -> dict[str, tuple[str, float | None, str]]:
+  table = {}
+  for name, term in terms.items():
+    params = getattr(term, "params", {})
+    if normalize_phase_event_source and name == "stair_stride_phase_reward":
+      params = dict(params)
+      params.pop("event_observation_group_name", None)
+      params.pop("event_observation_term_name", None)
+    table[name] = (repr(term.func), getattr(term, "weight", None), repr(params))
+  return table
+
+
+def _objective_fingerprint(
+  cfg: Any,
+  *,
+  ignore_latent_cache_event: bool = False,
+  normalize_phase_event_source: bool = False,
+) -> dict[str, Any]:
+  terrain = cfg.scene.terrain
+  terrain_generator = None if terrain is None else terrain.terrain_generator
+  events = {
+    name: term
+    for name, term in cfg.events.items()
+    if not ignore_latent_cache_event or name != "reset_stair_latent_cache"
+  }
+  return {
+    "sim": repr(cfg.sim),
+    "terrain": repr(terrain_generator),
+    "terrain_max_init": None if terrain is None else terrain.max_init_terrain_level,
+    "terrain_standalone_start": (
+      None if terrain is None else terrain.standalone_spawn_start_level
+    ),
+    "sensors": repr(cfg.scene.sensors),
+    "commands": {name: repr(term) for name, term in cfg.commands.items()},
+    "events": _term_table(events),
+    "rewards": _term_table(
+      cfg.rewards,
+      normalize_phase_event_source=normalize_phase_event_source,
+    ),
+    "terminations": _term_table(cfg.terminations),
+    "curriculum": _term_table(cfg.curriculum),
+    "episode_length_s": cfg.episode_length_s,
+  }
 
 
 def test_teacherkl_algorithm_class_path_imports_from_installed_rsl_rl() -> None:
@@ -79,6 +129,29 @@ def test_velocity_registry_contains_only_main_branch_tasks(
   velocity_task_ids: list[str],
 ) -> None:
   assert velocity_task_ids == sorted(MAIN_BRANCH_VELOCITY_TASK_IDS)
+
+
+def test_dwaq_objective_fingerprint_matches_slowlatent_reference() -> None:
+  """DWAQ keeps the SlowLatent objective and moves events to hidden state."""
+  slow_cfg = unitree_g1_blind_rough_target_navigation_slow_latent_env_cfg()
+  dwaq_cfg = load_env_cfg(MAIN_BRANCH_VELOCITY_TASK_IDS[0])
+  reference = _objective_fingerprint(
+    slow_cfg,
+    ignore_latent_cache_event=True,
+    normalize_phase_event_source=True,
+  )
+
+  assert (
+    _objective_fingerprint(
+      dwaq_cfg,
+      normalize_phase_event_source=True,
+    )
+    == reference
+  )
+  assert (
+    dwaq_cfg.observations["stair_phase_state"].terms["foot_event_memory"].params
+    == slow_cfg.observations["latent"].terms["foot_event_memory"].params
+  )
 
 
 @pytest.fixture(scope="module")
@@ -277,6 +350,8 @@ def test_g1_high_stairs_tasks_enable_mixed_terrain_replay() -> None:
     assert params["mixed_replay_start_level"] == 8
     assert params["mixed_replay_level_ranges"] == ((0, 2), (3, 5), (6, 9))
     assert params["mixed_replay_weights"] == (0.2, 0.3, 0.5)
+    assert params["standalone_replay_start_level"] == 3
+    assert params["standalone_replay_probability"] == 0.5
 
 
 def _assert_eight_stair_depth_variants(terrain_generator) -> None:
@@ -315,6 +390,7 @@ def test_g1_high_stairs_tasks_cover_eight_step_depths_per_level() -> None:
     terrain_generator = cfg.scene.terrain.terrain_generator
     assert terrain_generator is not None
     assert terrain_generator.num_cols == len(terrain_generator.sub_terrains) == 11
+    assert tuple(terrain_generator.standalone_terrains) == ("long_stair_runway",)
     _assert_eight_stair_depth_variants(terrain_generator)
 
 
@@ -755,8 +831,12 @@ def test_slow_latent_explicit_param_interfaces_drive_configs() -> None:
   toe_params = env_cfg.rewards["toe_step_riser_slab_penalty"].params
   assert toe_params["contact_penalty_scale"] == 0.7
   assert toe_params["stair_min_safe_stride"] == 0.14
-  assert toe_params["stair_max_safe_stride"] == 0.55
+  assert toe_params["stair_max_safe_stride"] == 0.85
   assert toe_params["stair_entry_evidence_time"] == 0.9
+  phase_reward = env_cfg.rewards["stair_stride_phase_reward"]
+  assert phase_reward.func is stair_stride_phase_reward
+  assert phase_reward.params["event_observation_group_name"] == "stair_phase_state"
+  assert "foot_event_memory" in env_cfg.observations["stair_phase_state"].terms
   replay_params = train_env_cfg.curriculum["terrain_levels"].params
   assert replay_params["mixed_replay_start_level"] == 7
   assert replay_params["mixed_replay_level_ranges"] == ((0, 1), (2, 4), (5, 9))
@@ -890,6 +970,10 @@ def test_blind_rough_variants_share_toe_riser_contact_penalty() -> None:
   assert "foot_step_lip_volume_penalty" not in cfg.rewards
   assert "toe_step_riser_slab_penalty" in cfg.rewards
   assert cfg.rewards["toe_step_riser_slab_penalty"].weight == -4.2
+  assert "stair_stride_phase_reward" in cfg.rewards
+  phase_params = cfg.rewards["stair_stride_phase_reward"].params
+  assert phase_params["event_observation_group_name"] == "stair_phase_state"
+  assert phase_params["event_observation_term_name"] == "foot_event_memory"
   assert cfg.sim.contact_sensor_maxmatch == 256
   assert "toe_terrain_contact" not in cfg.observations["actor"].terms
   assert "toe_terrain_contact" in cfg.observations["critic"].terms

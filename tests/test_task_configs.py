@@ -161,6 +161,7 @@ def test_step_boundary_rewards_scoped_to_target_stair_tasks(
   dwaq_task = "Mjlab-Velocity-Blind-Rough-TargetNavigation-DWAQ-TeacherKL-Unitree-G1"
   lip_penalty_tasks: set[str] = set()
   slab_penalty_tasks = {dwaq_task}
+  phase_reward_tasks = {dwaq_task}
   for task_id in all_task_ids:
     cfg = load_env_cfg(task_id)
     if task_id in lip_penalty_tasks:
@@ -182,3 +183,11 @@ def test_step_boundary_rewards_scoped_to_target_stair_tasks(
       assert slab_params["slab_depth"] == 0.10
     else:
       assert "toe_step_riser_slab_penalty" not in cfg.rewards
+
+    if task_id in phase_reward_tasks:
+      assert "stair_stride_phase_reward" in cfg.rewards
+      phase_params = cfg.rewards["stair_stride_phase_reward"].params
+      assert phase_params["event_observation_group_name"] == "stair_phase_state"
+      assert phase_params["event_observation_term_name"] == "foot_event_memory"
+    else:
+      assert "stair_stride_phase_reward" not in cfg.rewards
