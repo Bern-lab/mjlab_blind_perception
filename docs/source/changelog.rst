@@ -143,6 +143,16 @@ Added
 Changed
 ^^^^^^^
 
+- SlowLatent stair probing now rewards both directional stride change and
+  reduction of target error, gives a bounded completion bonus near the next
+  reference, and removes the positive shortcut for large overshoots. Probe
+  references can advance by at most one configured increment per valid
+  alternating ``n -> n+2`` touchdown, while a capped reference keeps requesting
+  farther motion until the actor actually reaches it. A deployable higher-riser
+  collision freezes the fused lock center and first requests a short recovery
+  target behind it; recovery rewards both error improvement and proximity before
+  switching to center hold. Hold then rewards target-error correction as well as
+  centered tracking, with farther/closer/hold semantics using matching bands.
 - SlowLatent foot-event ratchet hints now compare each new footprint with the
   previous footprint from the same foot, so post-entry stair probes use the
   actual two-layer swing stride instead of adjacent left-right tread spacing.

@@ -31,22 +31,27 @@ from mjlab.tasks.velocity.mdp.stair_geometry import (
   STAIR_ADJACENT_PAIR_EVENT_KEY,
   STAIR_ADJACENT_PAIR_HEIGHT_KEY,
   STAIR_ADJACENT_PAIR_VALID_KEY,
-  STAIR_BACKOFF_STRIDE_REWARD_EVENT_ID_KEY,
-  STAIR_BACKOFF_STRIDE_REWARD_KEY,
   STAIR_DEPTH_CONFIRMATION_AGE_KEY,
   STAIR_DEPTH_CONFIRMATION_EVENT_KEY,
   STAIR_DEPTH_LABEL_VALID_KEY,
   STAIR_ENTRY_EVENT_KEY,
   STAIR_ENTRY_EVIDENCE_ASCENT_DIR_KEY,
   STAIR_ENTRY_RECENT_EVIDENCE_KEY,
-  STAIR_LOCK_STRIDE_REWARD_EVENT_ID_KEY,
-  STAIR_LOCK_STRIDE_REWARD_KEY,
   STAIR_PHASE_KEY,
-  STAIR_PROBE_STRIDE_REWARD_EVENT_ID_KEY,
-  STAIR_PROBE_STRIDE_REWARD_KEY,
   STAIR_RISER_HEIGHT_LABEL_KEY,
   STAIR_SAME_FOOT_STRIDE_LABEL_KEY,
   STAIR_SHAPE_LABEL_VALID_KEY,
+  STAIR_STRIDE_EVENT_BACKOFF_TOUCHDOWN,
+  STAIR_STRIDE_EVENT_LOCK_TOUCHDOWN,
+  STAIR_STRIDE_EVENT_PROBE_TOUCHDOWN,
+  STAIR_STRIDE_EVENT_VALID_SECOND_HIT,
+  STAIR_STRIDE_PHASE_EVENT_ACTUAL_KEY,
+  STAIR_STRIDE_PHASE_EVENT_COLLISION_PENALTY_KEY,
+  STAIR_STRIDE_PHASE_EVENT_COMPLETED_KEY,
+  STAIR_STRIDE_PHASE_EVENT_ID_KEY,
+  STAIR_STRIDE_PHASE_EVENT_PREVIOUS_KEY,
+  STAIR_STRIDE_PHASE_EVENT_TARGET_KEY,
+  STAIR_STRIDE_PHASE_EVENT_TYPE_KEY,
   STAIR_TREAD_DEPTH_LABEL_KEY,
   TOE_RISER_NEW_HIT_KEY,
   stair_shape_for_sequence,
@@ -673,73 +678,162 @@ def test_nonflat_stride_reset_keeps_stair_phase_and_shape_context() -> None:
   assert term._minimum_safe_stride_raw.tolist() == [0.0]
 
 
-def test_stair_probe_stride_growth_reward_consumes_events_once() -> None:
+def test_stair_stride_phase_reward_consumes_events_once() -> None:
   env = SimpleNamespace(
     num_envs=2,
     device=torch.device("cpu"),
+    step_dt=0.02,
     extras={
-      STAIR_PROBE_STRIDE_REWARD_KEY: torch.tensor([1.0, -0.5]),
-      STAIR_PROBE_STRIDE_REWARD_EVENT_ID_KEY: torch.tensor([1, 2]),
+      STAIR_STRIDE_PHASE_EVENT_ID_KEY: torch.tensor([1, 2]),
+      STAIR_STRIDE_PHASE_EVENT_TYPE_KEY: torch.tensor(
+        [STAIR_STRIDE_EVENT_PROBE_TOUCHDOWN, STAIR_STRIDE_EVENT_LOCK_TOUCHDOWN]
+      ),
+      STAIR_STRIDE_PHASE_EVENT_ACTUAL_KEY: torch.tensor([0.55, 0.62]),
+      STAIR_STRIDE_PHASE_EVENT_PREVIOUS_KEY: torch.tensor([0.50, 0.60]),
+      STAIR_STRIDE_PHASE_EVENT_TARGET_KEY: torch.tensor([0.55, 0.60]),
+      STAIR_STRIDE_PHASE_EVENT_COMPLETED_KEY: torch.tensor([True, True]),
+      STAIR_STRIDE_PHASE_EVENT_COLLISION_PENALTY_KEY: torch.zeros(2),
+      "log": {},
     },
   )
-  term = temporal_stair_rewards.stair_probe_stride_growth_reward(
+  term = temporal_stair_rewards.stair_stride_phase_reward(
     RewardTermCfg(
-      func=temporal_stair_rewards.stair_probe_stride_growth_reward,
+      func=temporal_stair_rewards.stair_stride_phase_reward,
       weight=1.0,
     ),
     env,
   )
 
-  torch.testing.assert_close(term(env), torch.tensor([1.0, -0.5]))
+  torch.testing.assert_close(
+    term(env),
+    torch.tensor([117.5, 5.6]),
+    atol=5.0e-5,
+    rtol=1.0e-5,
+  )
   torch.testing.assert_close(term(env), torch.tensor([0.0, 0.0]))
 
-  env.extras[STAIR_PROBE_STRIDE_REWARD_KEY] = torch.tensor([0.25, 0.75])
-  env.extras[STAIR_PROBE_STRIDE_REWARD_EVENT_ID_KEY] = torch.tensor([1, 3])
-  torch.testing.assert_close(term(env), torch.tensor([0.0, 0.75]))
+  env.extras[STAIR_STRIDE_PHASE_EVENT_ID_KEY] = torch.tensor([1, 3])
+  env.extras[STAIR_STRIDE_PHASE_EVENT_ACTUAL_KEY] = torch.tensor([0.55, 0.65])
+  torch.testing.assert_close(
+    term(env),
+    torch.tensor([0.0, -24.0]),
+    atol=5.0e-5,
+    rtol=1.0e-5,
+  )
 
 
-@pytest.mark.parametrize(
-  ("reward_cls", "reward_key", "event_id_key"),
-  [
-    (
-      temporal_stair_rewards.stair_confirmed_backoff_stride_reward,
-      STAIR_BACKOFF_STRIDE_REWARD_KEY,
-      STAIR_BACKOFF_STRIDE_REWARD_EVENT_ID_KEY,
-    ),
-    (
-      temporal_stair_rewards.stair_lock_stride_hold_reward,
-      STAIR_LOCK_STRIDE_REWARD_KEY,
-      STAIR_LOCK_STRIDE_REWARD_EVENT_ID_KEY,
-    ),
-  ],
-)
-def test_stair_confirmed_stride_rewards_consume_events_once(
-  reward_cls,
-  reward_key: str,
-  event_id_key: str,
-) -> None:
+def test_stair_stride_phase_reward_refreshes_event_before_scoring() -> None:
+  calls = 0
+
+  def produce_event(env) -> torch.Tensor:
+    nonlocal calls
+    calls += 1
+    env.extras.update(
+      {
+        STAIR_STRIDE_PHASE_EVENT_ID_KEY: torch.tensor([1]),
+        STAIR_STRIDE_PHASE_EVENT_TYPE_KEY: torch.tensor(
+          [STAIR_STRIDE_EVENT_PROBE_TOUCHDOWN]
+        ),
+        STAIR_STRIDE_PHASE_EVENT_ACTUAL_KEY: torch.tensor([0.55]),
+        STAIR_STRIDE_PHASE_EVENT_PREVIOUS_KEY: torch.tensor([0.50]),
+        STAIR_STRIDE_PHASE_EVENT_TARGET_KEY: torch.tensor([0.55]),
+        STAIR_STRIDE_PHASE_EVENT_COMPLETED_KEY: torch.tensor([True]),
+        STAIR_STRIDE_PHASE_EVENT_COLLISION_PENALTY_KEY: torch.zeros(1),
+      }
+    )
+    return torch.zeros(1, 80)
+
+  observation_manager = SimpleNamespace(
+    get_term_cfg=lambda group, term: SimpleNamespace(func=produce_event)
+  )
   env = SimpleNamespace(
-    num_envs=2,
+    num_envs=1,
     device=torch.device("cpu"),
+    step_dt=0.02,
+    extras={"log": {}},
+    observation_manager=observation_manager,
+  )
+  term = temporal_stair_rewards.stair_stride_phase_reward(
+    RewardTermCfg(
+      func=temporal_stair_rewards.stair_stride_phase_reward,
+      weight=1.0,
+      params={
+        "event_observation_group_name": "latent",
+        "event_observation_term_name": "foot_event_memory",
+      },
+    ),
+    env,
+  )
+
+  torch.testing.assert_close(term(env), torch.tensor([117.5]))
+  assert calls == 1
+
+
+def test_stair_stride_phase_backoff_completion_uses_state_event() -> None:
+  env = SimpleNamespace(
+    num_envs=4,
+    device=torch.device("cpu"),
+    step_dt=0.02,
     extras={
-      reward_key: torch.tensor([0.5, -1.0]),
-      event_id_key: torch.tensor([1, 2]),
+      STAIR_STRIDE_PHASE_EVENT_ID_KEY: torch.arange(1, 5),
+      STAIR_STRIDE_PHASE_EVENT_TYPE_KEY: torch.full(
+        (4,), STAIR_STRIDE_EVENT_BACKOFF_TOUCHDOWN
+      ),
+      STAIR_STRIDE_PHASE_EVENT_ACTUAL_KEY: torch.tensor([0.559, 0.565, 0.645, 0.651]),
+      STAIR_STRIDE_PHASE_EVENT_PREVIOUS_KEY: torch.full((4,), 0.80),
+      STAIR_STRIDE_PHASE_EVENT_TARGET_KEY: torch.full((4,), 0.60),
+      STAIR_STRIDE_PHASE_EVENT_COMPLETED_KEY: torch.tensor([False, True, True, False]),
+      STAIR_STRIDE_PHASE_EVENT_COLLISION_PENALTY_KEY: torch.zeros(4),
+      "log": {},
     },
   )
-  term = reward_cls(
+  term = temporal_stair_rewards.stair_stride_phase_reward(
     RewardTermCfg(
-      func=reward_cls,
+      func=temporal_stair_rewards.stair_stride_phase_reward,
       weight=1.0,
     ),
     env,
   )
 
-  torch.testing.assert_close(term(env), torch.tensor([0.5, -1.0]))
-  torch.testing.assert_close(term(env), torch.tensor([0.0, 0.0]))
+  reward = term(
+    env,
+    backoff_scale=0.0,
+    backoff_completion_bonus=1.0,
+  )
 
-  env.extras[reward_key] = torch.tensor([0.25, 0.75])
-  env.extras[event_id_key] = torch.tensor([2, 2])
-  torch.testing.assert_close(term(env), torch.tensor([0.25, 0.0]))
+  torch.testing.assert_close(reward, torch.tensor([0.0, 50.0, 50.0, 0.0]))
+
+
+def test_stair_stride_phase_confirmation_refunds_collision_penalty() -> None:
+  env = SimpleNamespace(
+    num_envs=1,
+    device=torch.device("cpu"),
+    step_dt=0.02,
+    extras={
+      STAIR_STRIDE_PHASE_EVENT_ID_KEY: torch.tensor([1]),
+      STAIR_STRIDE_PHASE_EVENT_TYPE_KEY: torch.tensor(
+        [STAIR_STRIDE_EVENT_VALID_SECOND_HIT]
+      ),
+      STAIR_STRIDE_PHASE_EVENT_ACTUAL_KEY: torch.tensor([0.0]),
+      STAIR_STRIDE_PHASE_EVENT_PREVIOUS_KEY: torch.tensor([0.0]),
+      STAIR_STRIDE_PHASE_EVENT_TARGET_KEY: torch.tensor([0.60]),
+      STAIR_STRIDE_PHASE_EVENT_COMPLETED_KEY: torch.tensor([True]),
+      STAIR_STRIDE_PHASE_EVENT_COLLISION_PENALTY_KEY: torch.tensor([0.50]),
+      "log": {},
+    },
+  )
+  term = temporal_stair_rewards.stair_stride_phase_reward(
+    RewardTermCfg(
+      func=temporal_stair_rewards.stair_stride_phase_reward,
+      weight=1.0,
+    ),
+    env,
+  )
+
+  reward = term(env, second_hit_penalty_refund_weight=4.2)
+
+  torch.testing.assert_close(reward, torch.tensor([52.1]))
+  assert reward.item() * env.step_dt == pytest.approx(1.042)
 
 
 def test_stair_entry_tread_support_fraction_detects_sixty_percent() -> None:

@@ -47,10 +47,8 @@ from mjlab.tasks.velocity.config.g1.rl_cfg import (
 from mjlab.tasks.velocity.mdp import (
   UniformVelocityCommandCfg,
   stair_aware_feet_gait,
-  stair_confirmed_backoff_stride_reward,
-  stair_lock_stride_hold_reward,
-  stair_probe_stride_growth_reward,
   stair_sequence_event_logger,
+  stair_stride_phase_reward,
   target_tread_midline_shaping,
 )
 from mjlab.tasks.velocity.mdp.teacher_target_heading_command import (
@@ -470,19 +468,29 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert foot_event_params["include_raw_memory"] is False
   assert foot_event_params["ratchet_height_threshold_m"] == 0.025
   assert foot_event_params["ratchet_probe_increment_m"] == 0.05
-  assert foot_event_params["ratchet_first_collision_probe_push_m"] == 0.16
-  assert foot_event_params["ratchet_post_first_collision_probe_increment_m"] == 0.14
+  assert foot_event_params["ratchet_probe_bootstrap_increment_m"] == 0.10
+  assert foot_event_params["ratchet_probe_provisional_min_target_m"] == 0.50
+  assert foot_event_params["ratchet_probe_cap_m"] == 0.76
+  assert foot_event_params["ratchet_probe_target_tolerance_m"] == 0.025
+  assert foot_event_params["ratchet_post_first_collision_probe_increment_m"] == 0.05
+  assert foot_event_params["ratchet_sequence_min_confidence"] == 0.30
+  assert foot_event_params["ratchet_sequence_height_tolerance_m"] == 0.06
+  assert foot_event_params["ratchet_sequence_max_adjacent_height_m"] == 0.24
   assert foot_event_params["ratchet_no_hit_lower_margin_m"] == 0.0
   assert foot_event_params["ratchet_interval_target_margin_m"] == 0.01
   assert foot_event_params["ratchet_collision_margin_m"] == 0.02
   assert foot_event_params["ratchet_toe_anchor_offset_m"] == 0.085
-  assert foot_event_params["ratchet_backoff_step_m"] == 0.07
-  assert foot_event_params["ratchet_first_collision_backoff_step_m"] == 0.025
-  assert foot_event_params["ratchet_backoff_margin_m"] == 0.03
-  assert foot_event_params["ratchet_confirmed_collision_recovery_margin_m"] == 0.05
+  assert foot_event_params["ratchet_recovery_completion_tolerance_m"] == 0.025
+  assert foot_event_params["ratchet_recovery_completion_lower_tolerance_m"] == 0.025
+  assert foot_event_params["ratchet_recovery_min_reduction_m"] == 0.005
+  assert foot_event_params["ratchet_recovery_offset_m"] == 0.04
+  assert foot_event_params["ratchet_lock_probe_lower_margin_m"] == 0.01
   assert foot_event_params["ratchet_lock_margin_m"] == 0.005
+  assert foot_event_params["ratchet_lock_intent_tolerance_m"] == 0.03
   assert foot_event_params["ratchet_lock_stable_steps"] == 2
   assert foot_event_params["ratchet_lock_target_stable_enabled"] is False
+  assert foot_event_params["ratchet_lock_phase_correction_enabled"] is False
+  assert foot_event_params["ratchet_lock_phase_initial_front_error_m"] == 0.0
   assert foot_event_params["ratchet_soft_upper_ttl_steps"] == 5
   assert foot_event_params["ratchet_first_collision_enters_stair_mode"] is True
   assert foot_event_params["ratchet_single_collision_confirms_interval"] is False
@@ -496,6 +504,8 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert foot_event_params["ratchet_two_collision_use_height_layers"] is True
   assert foot_event_params["ratchet_two_collision_lower_cross_margin_m"] == 0.10
   assert foot_event_params["ratchet_two_collision_upper_cross_margin_m"] == 0.08
+  assert foot_event_params["ratchet_rejected_second_hit_confirm_count"] == 2
+  assert foot_event_params["ratchet_rejected_second_hit_target_tolerance_m"] == 0.05
   assert foot_event_params["ratchet_second_collision_requires_up_step"] is True
   assert foot_event_params["ratchet_two_collision_tread_min_m"] == 0.23
   assert foot_event_params["ratchet_two_collision_tread_max_m"] == 0.37
@@ -506,14 +516,7 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert (
     foot_event_params["ratchet_post_first_collision_collision_min_confidence"] == 0.30
   )
-  assert foot_event_params["ratchet_post_first_collision_actual_stride_margin_m"] == (
-    0.04
-  )
-  assert foot_event_params["ratchet_first_layer_stride_scale"] == 2.0
-  assert foot_event_params["ratchet_probe_reward_min_growth_m"] == 0.04
-  assert foot_event_params["ratchet_probe_reward_target_tolerance_m"] == 0.04
-  assert foot_event_params["ratchet_backoff_reward_tolerance_m"] == 0.04
-  assert foot_event_params["ratchet_lock_reward_tolerance_m"] == 0.04
+  assert not any(name.endswith("_reward_tolerance_m") for name in foot_event_params)
   assert foot_event_params["ratchet_min_interval_width_m"] == 0.04
   assert foot_event_params["ratchet_min_stride_m"] == 0.10
   assert foot_event_params["ratchet_max_stride_m"] == 0.85
@@ -585,15 +588,38 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert shank_params["asset_cfg"].preserve_order is True
   skip_reward = env_cfg.rewards["stair_skip_layer_penalty"]
   assert skip_reward.weight == -1.0
-  probe_reward = env_cfg.rewards["stair_probe_stride_growth_reward"]
-  assert probe_reward.func is stair_probe_stride_growth_reward
-  assert probe_reward.weight == 0.40
-  backoff_reward = env_cfg.rewards["stair_confirmed_backoff_stride_reward"]
-  assert backoff_reward.func is stair_confirmed_backoff_stride_reward
-  assert backoff_reward.weight == 0.35
-  lock_reward = env_cfg.rewards["stair_lock_stride_hold_reward"]
-  assert lock_reward.func is stair_lock_stride_hold_reward
-  assert lock_reward.weight == 0.30
+  stride_phase_reward = env_cfg.rewards["stair_stride_phase_reward"]
+  assert stride_phase_reward.func is stair_stride_phase_reward
+  assert stride_phase_reward.weight == 1.0
+  assert stride_phase_reward.params == {
+    "probe_scale": 2.0,
+    "confirmation_scale": 1.0,
+    "backoff_scale": 2.4,
+    "lock_scale": 1.2,
+    "probe_growth_scale": 0.05,
+    "probe_reference_tolerance": 0.025,
+    "probe_growth_weight": 0.50,
+    "probe_target_progress_weight": 0.50,
+    "probe_completion_start": 0.03,
+    "probe_completion_span": 0.02,
+    "probe_completion_bonus": 0.35,
+    "probe_overshoot_penalty": 1.0,
+    "backoff_progress_scale": 0.03,
+    "backoff_tolerance": 0.06,
+    "backoff_progress_weight": 0.80,
+    "backoff_proximity_weight": 0.20,
+    "backoff_completion_bonus": 0.50,
+    "lock_progress_scale": 0.03,
+    "lock_tolerance": 0.05,
+    "lock_progress_weight": 0.40,
+    "lock_tracking_weight": 0.60,
+    "second_hit_penalty_refund_weight": 4.2,
+    "event_observation_group_name": "latent",
+    "event_observation_term_name": "foot_event_memory",
+  }
+  assert "stair_probe_stride_growth_reward" not in env_cfg.rewards
+  assert "stair_confirmed_backoff_stride_reward" not in env_cfg.rewards
+  assert "stair_lock_stride_hold_reward" not in env_cfg.rewards
   midline_reward = env_cfg.rewards["target_tread_midline_shaping"]
   assert midline_reward.func is target_tread_midline_shaping
   assert midline_reward.weight == 1.2
@@ -610,6 +636,7 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert midline_reward.params["max_progress_step"] == 0.20
   assert midline_reward.params["early_stance_time"] == 0.25
   assert midline_reward.params["stance_height_tolerance"] == 0.08
+  assert not any(name.startswith("adaptive_") for name in midline_reward.params)
   assert midline_reward.params["heading_cos"] == 0.70
   assert midline_reward.params["asset_cfg"].site_names == (
     "left_foot",
@@ -717,6 +744,122 @@ def test_target_tread_midline_edge_penalty_is_bounded() -> None:
   torch.testing.assert_close(
     penalty,
     torch.tensor([0.0, 0.5, 1.0, 1.0]),
+  )
+
+
+def test_stride_phase_probe_score_rewards_incremental_growth() -> None:
+  stride = torch.tensor([0.49, 0.50, 0.51, 0.53, 0.60])
+  previous = torch.full_like(stride, 0.50)
+
+  scores = stair_stride_phase_reward._probe_score(
+    stride,
+    previous,
+    0.05,
+  )
+
+  torch.testing.assert_close(
+    scores,
+    torch.tensor([-0.2, 0.0, 0.2, 0.6, 1.0]),
+  )
+
+
+def test_stride_phase_probe_components_prefer_bounded_target_progress() -> None:
+  previous = torch.full((4,), 0.50)
+  target = torch.full((4,), 0.55)
+  actual = torch.tensor([0.51, 0.53, 0.55, 0.65])
+
+  growth, progress, completion, overshoot = stair_stride_phase_reward._probe_components(
+    actual,
+    previous,
+    target,
+    0.05,
+    0.025,
+    0.03,
+    0.02,
+  )
+  score = 2.0 * 0.5 * (growth + progress) + 0.35 * completion - overshoot
+
+  assert score[0] > 0.0
+  assert score[0] < score[1] < score[2]
+  assert score[3] < 0.0
+  assert completion[2] == 1.0
+  assert overshoot[3] == 1.0
+
+
+def test_stride_phase_probe_components_reward_overshoot_correction() -> None:
+  previous = torch.tensor([0.70, 0.70])
+  target = torch.tensor([0.65, 0.65])
+  actual = torch.tensor([0.68, 0.72])
+
+  direction, progress, _, _ = stair_stride_phase_reward._probe_components(
+    actual,
+    previous,
+    target,
+    0.05,
+    0.025,
+    0.03,
+    0.02,
+  )
+
+  assert direction[0] > 0.0
+  assert progress[0] > 0.0
+  assert direction[1] < 0.0
+  assert progress[1] < 0.0
+
+
+def test_stride_phase_backoff_score_rewards_error_improvement() -> None:
+  target = torch.full((4,), 0.60)
+  previous = torch.full((4,), 0.80)
+  actual = torch.tensor([0.78, 0.70, 0.62, 0.50])
+
+  progress, tracking, error = stair_stride_phase_reward._backoff_components(
+    actual,
+    previous,
+    target,
+    0.05,
+    0.05,
+  )
+
+  assert progress[0] > 0.0
+  assert progress[1] > progress[0]
+  assert progress[2] == 1.0
+  assert progress[3] > 0.0
+  assert tracking[2] > tracking[1]
+  torch.testing.assert_close(error, torch.tensor([0.18, 0.10, 0.02, 0.10]))
+
+
+def test_stride_phase_lock_score_rewards_error_improvement_and_hold() -> None:
+  target = torch.full((3,), 0.60)
+  previous = torch.tensor([0.68, 0.60, 0.60])
+  actual = torch.tensor([0.64, 0.60, 0.66])
+
+  progress, tracking = stair_stride_phase_reward._lock_components(
+    actual,
+    previous,
+    target,
+    0.03,
+    0.05,
+  )
+
+  assert progress[0] > 0.0
+  assert tracking[1] == 1.0
+  assert progress[2] < 0.0
+  assert tracking[2] < 0.0
+
+
+def test_stride_phase_centered_score_rewards_backoff_and_lock_target() -> None:
+  stride = torch.tensor([0.50, 0.55, 0.60, 0.65, 0.70])
+  target = torch.full_like(stride, 0.60)
+
+  scores = stair_stride_phase_reward._centered_score(
+    stride,
+    target,
+    0.05,
+  )
+
+  torch.testing.assert_close(
+    scores,
+    torch.tensor([-1.0, 0.0, 1.0, 0.0, -1.0]),
   )
 
 

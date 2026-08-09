@@ -704,7 +704,7 @@ def test_safe_stride_trend_metrics_compare_farther_closer_and_hold() -> None:
 
 
 def test_safe_stride_dense_trend_uses_ratchet_probe_backoff_lock() -> None:
-    """Ratchet state should recover only after a soft/confirmed upper exists."""
+    """Ratchet stride intent should map directly to the three trend classes."""
     latent_obs = torch.zeros(4, 80)
     latent_obs[:, 70] = torch.tensor([1.0, 1.0, 1.0, 0.0])
     latent_obs[:, 71] = torch.tensor([0.30, 0.30, 0.30, 0.0])
@@ -727,7 +727,7 @@ def test_safe_stride_dense_trend_uses_ratchet_probe_backoff_lock() -> None:
 
 
 def test_safe_stride_phase_targets_read_ratchet_center_and_phase() -> None:
-    """Ratchet target should supervise center while upper/confirmed set phase."""
+    """Ratchet target should supervise center while intent sets trend."""
     latent_obs = torch.zeros(4, 80)
     latent_obs[:, 70] = 1.0
     latent_obs[:, 71] = torch.tensor([0.30, 0.30, 0.30, 0.30])
@@ -751,9 +751,59 @@ def test_safe_stride_phase_targets_read_ratchet_center_and_phase() -> None:
     torch.testing.assert_close(phase[:, 0], torch.tensor([0.52, 0.41, 0.35, 0.31]))
     torch.testing.assert_close(phase[:, 1], torch.ones(4))
     torch.testing.assert_close(phase[:, 2], torch.tensor([2.0, 0.0, 1.0, 1.0]))
-    torch.testing.assert_close(phase[:, 3], torch.tensor([1.0, 0.0, 0.0, 0.0]))
-    torch.testing.assert_close(phase[:, 4], torch.tensor([0.0, 1.0, 0.0, 0.0]))
+    torch.testing.assert_close(phase[:, 3], torch.tensor([1.0, 1.0, 1.0, 0.0]))
+    torch.testing.assert_close(phase[:, 4], torch.tensor([0.0, 0.0, 0.0, 0.0]))
     torch.testing.assert_close(phase[:, 5], torch.tensor([0.0, 0.0, 0.0, 1.0]))
+
+
+def test_safe_stride_phase_targets_keep_confirmed_farther_correction() -> None:
+    """A confirmed lock undershoot must remain farther instead of becoming hold."""
+    latent_obs = torch.zeros(1, 80)
+    latent_obs[:, 70] = 1.0
+    latent_obs[:, 72] = 0.60
+    latent_obs[:, 73] = 0.64
+    latent_obs[:, 76] = 1.0
+    latent_obs[:, 77] = 0.64
+    latent_obs[:, 78] = 0.8
+    latent_obs[:, 79] = 0.0
+    observations = TensorDict({"latent": latent_obs}, batch_size=[1])
+
+    phase = PPOTeacherKL._safe_stride_phase_targets_from_latent_obs(
+        observations,
+        "latent",
+        safe_stride_min=0.10,
+        safe_stride_max=0.80,
+        upper_margin=0.02,
+    )
+
+    assert phase is not None
+    torch.testing.assert_close(phase[:, 2], torch.tensor([2.0]))
+    torch.testing.assert_close(phase[:, 3], torch.tensor([0.0]))
+    torch.testing.assert_close(phase[:, 4], torch.tensor([1.0]))
+    torch.testing.assert_close(phase[:, 5], torch.tensor([0.0]))
+
+
+def test_safe_stride_phase_targets_keep_unconfirmed_cap_hold_in_probe_cohort() -> None:
+    """The maximum probe stays unconfirmed while its action intent becomes hold."""
+    latent_obs = torch.zeros(1, 80)
+    latent_obs[:, 70] = 1.0
+    latent_obs[:, 72] = 0.76
+    latent_obs[:, 78] = 0.8
+    latent_obs[:, 79] = 1.0
+    observations = TensorDict({"latent": latent_obs}, batch_size=[1])
+
+    phase = PPOTeacherKL._safe_stride_phase_targets_from_latent_obs(
+        observations,
+        "latent",
+        safe_stride_min=0.10,
+        safe_stride_max=0.80,
+    )
+
+    assert phase is not None
+    torch.testing.assert_close(phase[:, 2], torch.tensor([1.0]))
+    torch.testing.assert_close(phase[:, 3], torch.tensor([1.0]))
+    torch.testing.assert_close(phase[:, 4], torch.tensor([0.0]))
+    torch.testing.assert_close(phase[:, 5], torch.tensor([0.0]))
 
 
 def test_safe_stride_phase_targets_keep_first_collision_probe_open() -> None:

@@ -37,8 +37,6 @@ from .stair_geometry import (
   STAIR_ADJACENT_PAIR_HEIGHT_KEY,
   STAIR_ADJACENT_PAIR_VALID_KEY,
   STAIR_ASCENT_DIR_KEY,
-  STAIR_BACKOFF_STRIDE_REWARD_EVENT_ID_KEY,
-  STAIR_BACKOFF_STRIDE_REWARD_KEY,
   STAIR_CLEARANCE_ASCENT_DIR_KEY,
   STAIR_CLEARANCE_FOOT_LAYERS_KEY,
   STAIR_CLEARANCE_FOOT_LAYERS_VALID_KEY,
@@ -63,8 +61,6 @@ from .stair_geometry import (
   STAIR_LANDING_EXPECTED_LAYER_KEY,
   STAIR_LANDING_SEQUENCE_ID_KEY,
   STAIR_LANDING_TARGET_FOOT_KEY,
-  STAIR_LOCK_STRIDE_REWARD_EVENT_ID_KEY,
-  STAIR_LOCK_STRIDE_REWARD_KEY,
   STAIR_ORACLE_CONTACT_FORCE_BY_FOOT_KEY,
   STAIR_ORACLE_CONTACT_LAYER_BY_FOOT_KEY,
   STAIR_ORACLE_CONTACT_NORMAL_BY_FOOT_KEY,
@@ -80,15 +76,25 @@ from .stair_geometry import (
   STAIR_ORACLE_ROOT_S_BY_FOOT_KEY,
   STAIR_ORACLE_TOE_S_BY_FOOT_KEY,
   STAIR_PHASE_KEY,
-  STAIR_PROBE_STRIDE_REWARD_EVENT_ID_KEY,
-  STAIR_PROBE_STRIDE_REWARD_KEY,
   STAIR_RISER_HEIGHT_LABEL_KEY,
   STAIR_SAME_FOOT_STRIDE_LABEL_KEY,
   STAIR_SEQUENCE_ID_KEY,
   STAIR_SHAPE_LABEL_VALID_KEY,
   STAIR_SKIP_LAYER_PENALTY_KEY,
+  STAIR_STRIDE_EVENT_BACKOFF_TOUCHDOWN,
+  STAIR_STRIDE_EVENT_LOCK_TOUCHDOWN,
+  STAIR_STRIDE_EVENT_PROBE_TOUCHDOWN,
+  STAIR_STRIDE_EVENT_VALID_SECOND_HIT,
+  STAIR_STRIDE_PHASE_EVENT_ACTUAL_KEY,
+  STAIR_STRIDE_PHASE_EVENT_COLLISION_PENALTY_KEY,
+  STAIR_STRIDE_PHASE_EVENT_COMPLETED_KEY,
+  STAIR_STRIDE_PHASE_EVENT_ID_KEY,
+  STAIR_STRIDE_PHASE_EVENT_PREVIOUS_KEY,
+  STAIR_STRIDE_PHASE_EVENT_TARGET_KEY,
+  STAIR_STRIDE_PHASE_EVENT_TYPE_KEY,
   STAIR_TARGET_FOOT_KEY,
   STAIR_TOE_RISER_HIT_LAYER_KEY,
+  STAIR_TOE_RISER_TOTAL_PENALTY_KEY,
   STAIR_TREAD_DEPTH_LABEL_KEY,
   TOE_RISER_CONTACT_BY_FOOT_KEY,
   TOE_RISER_CONTACT_KEY,
@@ -701,6 +707,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       env.num_envs, device=env.device, dtype=torch.long
     )
     self._collision_risk_now = torch.zeros(env.num_envs, device=env.device)
+    self._toe_riser_total_penalty = torch.zeros(env.num_envs, device=env.device)
     self._landing_touchdown_now = torch.zeros(
       env.num_envs, device=env.device, dtype=torch.bool
     )
@@ -713,6 +720,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     env.extras[TOE_RISER_CONTACT_KEY] = self._toe_riser_contact
     env.extras[TOE_RISER_NEW_HIT_BY_FOOT_KEY] = self._toe_riser_new_hit_by_foot
     env.extras[TOE_RISER_CONTACT_BY_FOOT_KEY] = self._toe_riser_contact_by_foot
+    env.extras[STAIR_TOE_RISER_TOTAL_PENALTY_KEY] = self._toe_riser_total_penalty
     env.extras[STAIR_TOE_RISER_HIT_LAYER_KEY] = self._toe_riser_hit_layer
     env.extras[STAIR_ENTRY_RECENT_EVIDENCE_KEY] = self._recent_entry_evidence
     env.extras[STAIR_ENTRY_EVIDENCE_ASCENT_DIR_KEY] = self._entry_evidence_ascent_dir
@@ -852,6 +860,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     self._stair_depth_label_valid[env_ids] = False
     self._stair_depth_confirmation_event[env_ids] = False
     self._stair_depth_confirmation_age[env_ids] = -1
+    self._toe_riser_total_penalty[env_ids] = 0.0
     self._adjacent_support_pair_active[env_ids] = False
     self._adjacent_support_pair_depth[env_ids] = 0.0
     self._adjacent_support_pair_height[env_ids] = 0.0
@@ -3079,6 +3088,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       log["Metrics/stair_stride_tracking_reset_by_stale_stride_ratio"] = zero
 
     total_penalty = slab_penalty + contact_penalty
+    self._toe_riser_total_penalty.copy_(total_penalty)
     log["Metrics/toe_riser_total_penalty_mean"] = total_penalty.mean()
     log["Metrics/collision_risk_now_mean"] = self._collision_risk_now.mean()
     log["Metrics/stair_entry_active_ratio"] = (self._stair_phase == 1).float().mean()
@@ -3089,53 +3099,378 @@ class toe_step_riser_approach_penalty(toe_step_riser_slab_penalty):
   """Backward-compatible alias for the penalty-only stair entry term."""
 
 
-class _OneShotExtraReward:
-  """Consume a one-shot reward from env extras using a monotonically rising id."""
-
-  reward_key: str
-  event_id_key: str
+class stair_stride_phase_reward:
+  """Score probe, confirmation, recovery, and hold events without shaping swings."""
 
   def __init__(self, cfg: RewardTermCfg, env) -> None:
-    del cfg
     self._last_event_id = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
+    self._event_producer = None
+    observation_group = cfg.params.get("event_observation_group_name")
+    observation_term = cfg.params.get("event_observation_term_name")
+    if observation_group is not None and observation_term is not None:
+      term_cfg = env.observation_manager.get_term_cfg(
+        str(observation_group),
+        str(observation_term),
+      )
+      if not callable(term_cfg.func):
+        raise TypeError("Stride phase event observation term must be callable.")
+      self._event_producer = term_cfg.func
 
   def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
     if env_ids is None:
       env_ids = slice(None)
     self._last_event_id[env_ids] = 0
 
-  def __call__(self, env) -> torch.Tensor:
-    reward = env.extras.get(self.reward_key)
-    event_id = env.extras.get(self.event_id_key)
-    if not isinstance(reward, torch.Tensor) or not isinstance(event_id, torch.Tensor):
+  @staticmethod
+  def _probe_score(
+    actual: torch.Tensor,
+    previous: torch.Tensor,
+    growth_scale: float,
+  ) -> torch.Tensor:
+    return ((actual - previous) / max(growth_scale, 1.0e-6)).clamp(-1.0, 1.0)
+
+  @staticmethod
+  def _probe_components(
+    actual: torch.Tensor,
+    previous: torch.Tensor,
+    target: torch.Tensor,
+    growth_scale: float,
+    reference_tolerance: float,
+    completion_start: float,
+    completion_span: float,
+  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    target_delta = target - previous
+    target_distance = torch.abs(target_delta)
+    direction = torch.sign(target_delta)
+    desired_distance = target_distance.clamp(
+      min=1.0e-6,
+      max=max(growth_scale, 1.0e-6),
+    )
+    directional_delta = (actual - previous) * direction
+    directional_progress = (directional_delta / desired_distance).clamp(-1.0, 1.0)
+    previous_error = target_distance
+    current_error = torch.abs(actual - target)
+    target_progress = ((previous_error - current_error) / desired_distance).clamp(
+      -1.0, 1.0
+    )
+    target_tracking = (1.0 - current_error / max(reference_tolerance, 1.0e-6)).clamp(
+      -1.0, 1.0
+    )
+    target_progress = torch.where(
+      target_distance > 1.0e-6,
+      target_progress,
+      target_tracking,
+    )
+    completion_progress = (
+      (directional_delta - float(completion_start)) / max(completion_span, 1.0e-6)
+    ).clamp(0.0, 1.0)
+    completion_progress = (
+      completion_progress * (current_error <= float(reference_tolerance)).float()
+    )
+    directional_overshoot = direction * (actual - target)
+    overshoot = (
+      torch.relu(directional_overshoot - float(reference_tolerance))
+      / max(growth_scale, 1.0e-6)
+    ).clamp(0.0, 1.0)
+    return directional_progress, target_progress, completion_progress, overshoot
+
+  @staticmethod
+  def _backoff_components(
+    actual: torch.Tensor,
+    previous: torch.Tensor,
+    target: torch.Tensor,
+    progress_scale: float,
+    tolerance: float,
+  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    previous_error = torch.abs(previous - target)
+    current_error = torch.abs(actual - target)
+    improvement = (
+      (previous_error - current_error) / max(progress_scale, 1.0e-6)
+    ).clamp(-1.0, 1.0)
+    tracking = (1.0 - current_error / max(tolerance, 1.0e-6)).clamp(0.0, 1.0)
+    return improvement, tracking, current_error
+
+  @staticmethod
+  def _lock_components(
+    actual: torch.Tensor,
+    previous: torch.Tensor,
+    target: torch.Tensor,
+    progress_scale: float,
+    tolerance: float,
+  ) -> tuple[torch.Tensor, torch.Tensor]:
+    previous_error = torch.abs(previous - target)
+    current_error = torch.abs(actual - target)
+    improvement = (
+      (previous_error - current_error) / max(progress_scale, 1.0e-6)
+    ).clamp(-1.0, 1.0)
+    tracking = (1.0 - current_error / max(tolerance, 1.0e-6)).clamp(-1.0, 1.0)
+    return improvement, tracking
+
+  @staticmethod
+  def _centered_score(
+    actual: torch.Tensor,
+    target: torch.Tensor,
+    tolerance: float,
+  ) -> torch.Tensor:
+    error = torch.abs(actual - target)
+    return (1.0 - error / max(tolerance, 1.0e-6)).clamp(-1.0, 1.0)
+
+  def __call__(
+    self,
+    env,
+    probe_scale: float = 2.0,
+    confirmation_scale: float = 1.0,
+    backoff_scale: float = 2.4,
+    lock_scale: float = 1.2,
+    probe_growth_scale: float = 0.05,
+    probe_reference_tolerance: float = 0.025,
+    probe_growth_weight: float = 0.50,
+    probe_target_progress_weight: float = 0.50,
+    probe_completion_start: float = 0.03,
+    probe_completion_span: float = 0.02,
+    probe_completion_bonus: float = 0.35,
+    probe_overshoot_penalty: float = 1.0,
+    backoff_progress_scale: float = 0.03,
+    backoff_tolerance: float = 0.06,
+    backoff_progress_weight: float = 0.80,
+    backoff_proximity_weight: float = 0.20,
+    backoff_completion_bonus: float = 0.50,
+    lock_progress_scale: float = 0.03,
+    lock_tolerance: float = 0.05,
+    lock_progress_weight: float = 0.40,
+    lock_tracking_weight: float = 0.60,
+    second_hit_penalty_refund_weight: float = 0.0,
+    event_observation_group_name: str | None = None,
+    event_observation_term_name: str | None = None,
+  ) -> torch.Tensor:
+    del event_observation_group_name, event_observation_term_name
+    if self._event_producer is not None:
+      self._event_producer(env)
+
+    event_id = env.extras.get(STAIR_STRIDE_PHASE_EVENT_ID_KEY)
+    event_type = env.extras.get(STAIR_STRIDE_PHASE_EVENT_TYPE_KEY)
+    actual = env.extras.get(STAIR_STRIDE_PHASE_EVENT_ACTUAL_KEY)
+    previous = env.extras.get(STAIR_STRIDE_PHASE_EVENT_PREVIOUS_KEY)
+    target = env.extras.get(STAIR_STRIDE_PHASE_EVENT_TARGET_KEY)
+    completed = env.extras.get(STAIR_STRIDE_PHASE_EVENT_COMPLETED_KEY)
+    collision_penalty = env.extras.get(STAIR_STRIDE_PHASE_EVENT_COLLISION_PENALTY_KEY)
+    if not all(
+      isinstance(value, torch.Tensor)
+      for value in (
+        event_id,
+        event_type,
+        actual,
+        previous,
+        target,
+        completed,
+        collision_penalty,
+      )
+    ):
       return torch.zeros(env.num_envs, device=env.device)
 
-    reward = reward.to(device=env.device, dtype=torch.float32)
     event_id = event_id.to(device=env.device, dtype=torch.long)
+    event_type = event_type.to(device=env.device, dtype=torch.long)
+    actual = actual.to(device=env.device, dtype=torch.float32)
+    previous = previous.to(device=env.device, dtype=torch.float32)
+    target = target.to(device=env.device, dtype=torch.float32)
+    completed = completed.to(device=env.device, dtype=torch.bool)
+    collision_penalty = collision_penalty.to(device=env.device, dtype=torch.float32)
     new_event = event_id != self._last_event_id
     self._last_event_id.copy_(event_id)
-    return torch.where(new_event, reward, torch.zeros_like(reward))
 
+    probe = event_type == STAIR_STRIDE_EVENT_PROBE_TOUCHDOWN
+    confirmation = event_type == STAIR_STRIDE_EVENT_VALID_SECOND_HIT
+    backoff = event_type == STAIR_STRIDE_EVENT_BACKOFF_TOUCHDOWN
+    lock = event_type == STAIR_STRIDE_EVENT_LOCK_TOUCHDOWN
+    probe_growth = actual - previous
+    (
+      probe_progress,
+      probe_tracking,
+      probe_completion_progress,
+      probe_overshoot_penalty_score,
+    ) = self._probe_components(
+      actual,
+      previous,
+      target,
+      probe_growth_scale,
+      probe_reference_tolerance,
+      probe_completion_start,
+      probe_completion_span,
+    )
+    probe_complete = probe & (probe_completion_progress >= 1.0 - 1.0e-6)
+    probe_target_reached = torch.abs(actual - target) <= float(
+      probe_reference_tolerance
+    )
+    probe_direction = torch.sign(target - previous)
+    probe_overshot = probe_direction * (actual - target) > float(
+      probe_reference_tolerance
+    )
+    probe_score = float(probe_scale) * (
+      float(probe_growth_weight) * probe_progress
+      + float(probe_target_progress_weight) * probe_tracking
+    )
+    probe_score = (
+      probe_score + float(probe_completion_bonus) * probe_completion_progress
+    )
+    probe_score = (
+      probe_score - float(probe_overshoot_penalty) * probe_overshoot_penalty_score
+    )
+    backoff_progress, backoff_tracking, backoff_error = self._backoff_components(
+      actual,
+      previous,
+      target,
+      backoff_progress_scale,
+      backoff_tolerance,
+    )
+    backoff_complete = backoff & completed
+    backoff_score = float(backoff_scale) * (
+      float(backoff_progress_weight) * backoff_progress
+      + float(backoff_proximity_weight) * backoff_tracking
+    )
+    backoff_score = backoff_score + backoff_complete.float() * float(
+      backoff_completion_bonus
+    )
+    lock_progress, lock_tracking = self._lock_components(
+      actual,
+      previous,
+      target,
+      lock_progress_scale,
+      lock_tolerance,
+    )
+    lock_score = float(lock_scale) * (
+      float(lock_progress_weight) * lock_progress
+      + float(lock_tracking_weight) * lock_tracking
+    )
+    score = torch.zeros_like(actual)
+    score = torch.where(
+      probe,
+      probe_score,
+      score,
+    )
+    score = torch.where(
+      confirmation,
+      torch.full_like(score, float(confirmation_scale)),
+      score,
+    )
+    score = torch.where(
+      backoff,
+      backoff_score,
+      score,
+    )
+    score = torch.where(
+      lock,
+      lock_score,
+      score,
+    )
 
-class stair_probe_stride_growth_reward(_OneShotExtraReward):
-  """Consume the one-shot post-first-collision stride-growth reward signal."""
+    dt = max(float(env.step_dt), 1.0e-6)
+    collision_refund = torch.where(
+      confirmation,
+      collision_penalty * float(second_hit_penalty_refund_weight),
+      torch.zeros_like(collision_penalty),
+    )
+    reward = score / dt + collision_refund
+    reward = torch.where(new_event, reward, torch.zeros_like(reward))
 
-  reward_key = STAIR_PROBE_STRIDE_REWARD_KEY
-  event_id_key = STAIR_PROBE_STRIDE_REWARD_EVENT_ID_KEY
-
-
-class stair_confirmed_backoff_stride_reward(_OneShotExtraReward):
-  """Reward same-foot touchdown strides that have backed off after confirmation."""
-
-  reward_key = STAIR_BACKOFF_STRIDE_REWARD_KEY
-  event_id_key = STAIR_BACKOFF_STRIDE_REWARD_EVENT_ID_KEY
-
-
-class stair_lock_stride_hold_reward(_OneShotExtraReward):
-  """Reward same-foot touchdown strides that hold the confirmed stride center."""
-
-  reward_key = STAIR_LOCK_STRIDE_REWARD_KEY
-  event_id_key = STAIR_LOCK_STRIDE_REWARD_EVENT_ID_KEY
+    log = env.extras.get("log")
+    if isinstance(log, dict):
+      event_f = new_event.float()
+      event_count = event_f.sum().clamp_min(1.0)
+      log["Metrics/stair_stride_phase_event_ratio"] = event_f.mean()
+      log["Metrics/stair_stride_phase_probe_ratio"] = (new_event & probe).float().mean()
+      log["Metrics/stair_stride_phase_confirmation_ratio"] = (
+        (new_event & confirmation).float().mean()
+      )
+      log["Metrics/stair_stride_phase_backoff_ratio"] = (
+        (new_event & backoff).float().mean()
+      )
+      log["Metrics/stair_stride_phase_lock_ratio"] = (new_event & lock).float().mean()
+      log["Metrics/stair_stride_phase_score_mean"] = (
+        score * event_f
+      ).sum() / event_count
+      log["Metrics/stair_stride_phase_actual_mean"] = (
+        actual * event_f
+      ).sum() / event_count
+      log["Metrics/stair_stride_phase_target_mean"] = (
+        target * event_f
+      ).sum() / event_count
+      probe_event_f = (new_event & probe).float()
+      probe_count = probe_event_f.sum().clamp_min(1.0)
+      log["Metrics/stair_stride_phase_probe_growth_mean"] = (
+        probe_growth * probe_event_f
+      ).sum() / probe_count
+      log["Metrics/stair_stride_phase_probe_score_mean"] = (
+        score * probe_event_f
+      ).sum() / probe_count
+      log["Metrics/stair_stride_phase_probe_target_mae"] = (
+        torch.abs(actual - target) * probe_event_f
+      ).sum() / probe_count
+      log["Metrics/stair_stride_phase_probe_progress_mean"] = (
+        probe_progress * probe_event_f
+      ).sum() / probe_count
+      log["Metrics/stair_stride_phase_probe_tracking_mean"] = (
+        probe_tracking * probe_event_f
+      ).sum() / probe_count
+      log["Metrics/stair_stride_phase_probe_completion_progress_mean"] = (
+        probe_completion_progress * probe_event_f
+      ).sum() / probe_count
+      log["Metrics/stair_stride_phase_probe_overshoot_penalty_mean"] = (
+        probe_overshoot_penalty_score * probe_event_f
+      ).sum() / probe_count
+      for threshold_cm in (1, 3, 4, 5):
+        threshold_m = 0.01 * threshold_cm
+        log[f"Metrics/stair_stride_phase_probe_growth_ge_{threshold_cm}cm_ratio"] = (
+          ((probe_growth >= threshold_m) & probe).float() * event_f
+        ).sum() / probe_count
+      log["Metrics/stair_stride_phase_probe_target_reached_ratio"] = (
+        probe_target_reached.float() * probe_event_f
+      ).sum() / probe_count
+      log["Metrics/stair_stride_phase_probe_overshoot_ratio"] = (
+        probe_overshot.float() * probe_event_f
+      ).sum() / probe_count
+      log["Metrics/stair_stride_phase_probe_completion_ratio"] = (
+        probe_complete.float() * probe_event_f
+      ).sum() / probe_count
+      confirmation_event_f = (new_event & confirmation).float()
+      confirmation_count = confirmation_event_f.sum().clamp_min(1.0)
+      log["Metrics/stair_stride_phase_confirmation_score_mean"] = (
+        score * confirmation_event_f
+      ).sum() / confirmation_count
+      backoff_event_f = (new_event & backoff).float()
+      backoff_count = backoff_event_f.sum().clamp_min(1.0)
+      log["Metrics/stair_stride_phase_backoff_score_mean"] = (
+        score * backoff_event_f
+      ).sum() / backoff_count
+      log["Metrics/stair_stride_phase_backoff_target_mae"] = (
+        torch.abs(actual - target) * backoff_event_f
+      ).sum() / backoff_count
+      log["Metrics/stair_stride_phase_backoff_progress_mean"] = (
+        backoff_progress * backoff_event_f
+      ).sum() / backoff_count
+      log["Metrics/stair_stride_phase_backoff_tracking_mean"] = (
+        backoff_tracking * backoff_event_f
+      ).sum() / backoff_count
+      log["Metrics/stair_stride_phase_backoff_completion_ratio"] = (
+        backoff_complete.float() * backoff_event_f
+      ).sum() / backoff_count
+      lock_event_f = (new_event & lock).float()
+      lock_count = lock_event_f.sum().clamp_min(1.0)
+      log["Metrics/stair_stride_phase_lock_score_mean"] = (
+        score * lock_event_f
+      ).sum() / lock_count
+      log["Metrics/stair_stride_phase_lock_target_mae"] = (
+        torch.abs(actual - target) * lock_event_f
+      ).sum() / lock_count
+      log["Metrics/stair_stride_phase_lock_progress_mean"] = (
+        lock_progress * lock_event_f
+      ).sum() / lock_count
+      log["Metrics/stair_stride_phase_lock_tracking_mean"] = (
+        lock_tracking * lock_event_f
+      ).sum() / lock_count
+      log["Metrics/stair_stride_phase_collision_refund_mean"] = (
+        collision_refund * event_f
+      ).sum() / event_count
+    return reward
 
 
 def stair_skip_layer_penalty(env) -> torch.Tensor:

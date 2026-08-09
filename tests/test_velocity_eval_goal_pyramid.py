@@ -264,7 +264,18 @@ def test_goal_pyramid_probe_trace_summary_reports_probe_growth():
               },
               {
                 "kind": "higher_riser_collision",
+                "step": 20,
                 "ratchet_target": 0.60,
+                "ratchet_valid_second_hit": True,
+                "ratchet_recovery_target": 0.55,
+                "ratchet_lock_target": 0.60,
+              },
+              {
+                "kind": "same_foot_up_step",
+                "step": 22,
+                "same_foot_stride_growth": -0.05,
+                "ratchet_recovery_completed": True,
+                "ratchet_lock_target": 0.60,
               },
             ],
           },
@@ -304,6 +315,11 @@ def test_goal_pyramid_probe_trace_summary_reports_probe_growth():
   assert summary["post_first_probe_entry_scaled_monotonic_episode_rate"] == 1.0
   assert summary["mean_first_to_higher_collision_steps"] == pytest.approx(10.0)
   assert summary["mean_first_collision_ratchet_target"] == pytest.approx(0.535)
+  assert summary["episodes_with_ratchet_valid_second_hit_rate"] == 0.5
+  assert summary["episodes_with_recovery_completed_rate"] == 0.5
+  assert summary["mean_recovery_same_foot_stride_growth"] == pytest.approx(-0.05)
+  assert summary["mean_ratchet_recovery_target"] == pytest.approx(0.55)
+  assert summary["mean_ratchet_lock_target"] == pytest.approx(0.60)
   episodes = trace["episodes"]
   assert episodes[0]["post_first_probe_strides_excluding_entry"] == [0.54, 0.60]
   assert episodes[0]["post_first_probe_strides_entry_scaled"] == [0.48, 0.54, 0.60]

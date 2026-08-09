@@ -1126,11 +1126,9 @@ class PPOTeacherKL(PPO):
     ) -> torch.Tensor | None:
         """Extract dense closer/hold/farther trend labels from ratchet state.
 
-        Class layout is [0]=closer, [1]=hold, [2]=farther.  Before the first
-        usable upper bound, the label stays farther so the actor learns to keep
-        probing after stair entry.  Once a soft/confirmed upper exists, the
-        label switches to closer or hold so collision response remains learned
-        through latent semantics instead of a direct control bypass.
+        Class layout is [0]=closer, [1]=hold, [2]=farther. Ratchet slot 9
+        already encodes the current stride intent, including recovery and lock
+        correction, so this helper must not infer direction again from bounds.
         """
         phase_targets = PPOTeacherKL._safe_stride_phase_targets_from_latent_obs(
             observations,
@@ -1162,7 +1160,8 @@ class PPOTeacherKL(PPO):
         Returned columns are:
         [center_target, ratchet_valid, trend_class, probe, backoff, lock].
         Trend class layout is [0]=closer, [1]=hold, [2]=farther.
-        Ratchet slot 9 carries phase mode: probe=0.0, backoff=0.5, lock=1.0.
+        Ratchet slot 9 carries stride intent: farther=0.0, closer=0.5,
+        hold=1.0.
         """
         if observations is None or latent_obs_key not in observations:
             return None
@@ -1185,26 +1184,20 @@ class PPOTeacherKL(PPO):
             float(safe_stride_max),
         )
         confirmed = ratchet[..., 6:7] > 0.5
-        upper = torch.maximum(
-            ratchet[..., 3:4].clamp_min(0.0),
-            ratchet[..., 7:8].clamp_min(0.0),
-        )
-        has_upper = upper > max(float(upper_margin), 0.0)
-        mode_code = ratchet[..., 9:10].clamp(0.0, 1.0)
-        mode_probe = mode_code < 0.25
-        mode_backoff = (mode_code >= 0.25) & (mode_code < 0.75)
-        mode_lock = mode_code >= 0.75
+        intent_code = ratchet[..., 9:10].clamp(0.0, 1.0)
+        intent_closer = (intent_code >= 0.25) & (intent_code < 0.75)
+        intent_hold = intent_code >= 0.75
         closer = torch.zeros_like(center_target)
         hold = torch.ones_like(center_target)
         farther = torch.full_like(center_target, 2.0)
         trend_class = torch.where(
-            mode_backoff,
+            intent_closer,
             closer,
-            torch.where(mode_lock | has_upper | confirmed, hold, farther),
+            torch.where(intent_hold, hold, farther),
         )
-        probe = ratchet_valid & mode_probe & ~confirmed & ~has_upper
-        backoff = ratchet_valid & mode_backoff
-        lock = ratchet_valid & mode_lock & confirmed
+        probe = ratchet_valid & ~confirmed
+        backoff = ratchet_valid & confirmed & ~intent_hold
+        lock = ratchet_valid & intent_hold & confirmed
         valid_f = ratchet_valid.to(center_target.dtype)
         return torch.cat(
             [
@@ -2671,7 +2664,7 @@ class PPOTeacherKL(PPO):
             ratchet_phase_valid = phase_targets[..., 1:2]
             phase_trend_target = phase_targets[..., 2].long()
             stair_positive_for_phase = (stair_labels > 0.5).to(safe_stride_valid.dtype)
-            phase_center_valid = ratchet_phase_valid * safe_stride_valid * stair_positive_for_phase
+            phase_center_valid = ratchet_phase_valid * stair_positive_for_phase
             phase_probe = phase_targets[..., 3:4] * phase_center_valid
             phase_backoff = phase_targets[..., 4:5] * phase_center_valid
             phase_lock = phase_targets[..., 5:6] * phase_center_valid

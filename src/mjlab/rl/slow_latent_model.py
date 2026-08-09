@@ -32,6 +32,20 @@ _SAFE_STRIDE_TREND_HOLD_LOGIT = 2.0
 GatedHiddenState = torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor] | None
 
 
+def _safe_stride_bootstrap_pending(
+  latent_obs: torch.Tensor | None,
+  reference: torch.Tensor,
+) -> torch.Tensor:
+  pending = torch.zeros_like(reference, dtype=torch.bool)
+  if latent_obs is None or latent_obs.shape[-1] < 80:
+    return pending
+  ratchet = torch.nan_to_num(latent_obs[..., -10:])
+  active = ratchet[..., 0:1] > 0.5
+  confirmed = ratchet[..., 6:7] > 0.5
+  phase_ready = ratchet[..., 8:9] > 0.05
+  return active & ~confirmed & ~phase_ready
+
+
 class LSTMSlowLatentMLPModel(MLPModel):
   """LSTM gated latent memory actor for stair interaction.
 
@@ -763,7 +777,6 @@ class LSTMSlowLatentMLPModel(MLPModel):
       else safe_stride_confidence
     )
     confidence = torch.clamp(confidence, 0.0, 1.0)
-    del latent_obs
     safe_stride_control_norm = self._normalize_semantic_value(
       safe_stride_control,
       self.safe_stride_min,
@@ -773,6 +786,26 @@ class LSTMSlowLatentMLPModel(MLPModel):
       safe_stride_control_norm
       if safe_stride_trend_logits is None
       else self._safe_stride_trend_control(safe_stride_trend_logits)
+    )
+    bootstrap_pending = _safe_stride_bootstrap_pending(
+      latent_obs,
+      safe_stride_control_norm,
+    )
+    neutral_phase = torch.full_like(safe_stride_control_norm, 0.5)
+    safe_stride_control_norm = torch.where(
+      bootstrap_pending,
+      neutral_phase,
+      safe_stride_control_norm,
+    )
+    safe_stride_trend_norm = torch.where(
+      bootstrap_pending,
+      neutral_phase,
+      safe_stride_trend_norm,
+    )
+    confidence = torch.where(
+      bootstrap_pending,
+      torch.zeros_like(confidence),
+      confidence,
     )
     shape_semantic = torch.cat(
       [
@@ -2059,13 +2092,32 @@ class _OnnxStairLatentModel(nn.Module):
       1.0,
     )
     confidence = torch.clamp(safe_stride_confidence, 0.0, 1.0)
-    del latent_obs
     safe_stride_control_norm = self._normalize_semantic_value(
       safe_stride_control,
       self.safe_stride_min,
       self.safe_stride_max,
     )
     safe_stride_trend_norm = self._safe_stride_trend_control(safe_stride_trend_logits)
+    bootstrap_pending = _safe_stride_bootstrap_pending(
+      latent_obs,
+      safe_stride_control_norm,
+    )
+    neutral_phase = torch.full_like(safe_stride_control_norm, 0.5)
+    safe_stride_control_norm = torch.where(
+      bootstrap_pending,
+      neutral_phase,
+      safe_stride_control_norm,
+    )
+    safe_stride_trend_norm = torch.where(
+      bootstrap_pending,
+      neutral_phase,
+      safe_stride_trend_norm,
+    )
+    confidence = torch.where(
+      bootstrap_pending,
+      torch.zeros_like(confidence),
+      confidence,
+    )
     shape_semantic = torch.cat(
       [
         safe_stride_control_norm,

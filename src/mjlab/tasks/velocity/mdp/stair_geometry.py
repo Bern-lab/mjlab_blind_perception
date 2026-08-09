@@ -99,17 +99,37 @@ OBSERVED_STEP_STRIDE_KEY = "slow_latent_observed_step_stride"
 COLLISION_RISK_KEY = "slow_latent_collision_risk_now"
 LANDING_TOUCHDOWN_KEY = "slow_latent_landing_touchdown_now"
 LANDING_QUALITY_KEY = "slow_latent_landing_quality_now"
-STAIR_PROBE_STRIDE_REWARD_KEY = "slow_latent_stair_probe_stride_reward"
-STAIR_PROBE_STRIDE_REWARD_EVENT_ID_KEY = (
-  "slow_latent_stair_probe_stride_reward_event_id"
+STAIR_STRIDE_PHASE_EVENT_ID_KEY = "slow_latent_stair_stride_phase_event_id"
+STAIR_STRIDE_PHASE_EVENT_TYPE_KEY = "slow_latent_stair_stride_phase_event_type"
+STAIR_STRIDE_PHASE_EVENT_ACTUAL_KEY = "slow_latent_stair_stride_phase_event_actual"
+STAIR_STRIDE_PHASE_EVENT_PREVIOUS_KEY = "slow_latent_stair_stride_phase_event_previous"
+STAIR_STRIDE_PHASE_EVENT_TARGET_KEY = "slow_latent_stair_stride_phase_event_target"
+STAIR_STRIDE_PHASE_EVENT_COMPLETED_KEY = (
+  "slow_latent_stair_stride_phase_event_completed"
 )
-STAIR_BACKOFF_STRIDE_REWARD_KEY = "slow_latent_stair_backoff_stride_reward"
-STAIR_BACKOFF_STRIDE_REWARD_EVENT_ID_KEY = (
-  "slow_latent_stair_backoff_stride_reward_event_id"
+STAIR_STRIDE_PHASE_EVENT_COLLISION_PENALTY_KEY = (
+  "slow_latent_stair_stride_phase_event_collision_penalty"
 )
-STAIR_LOCK_STRIDE_REWARD_KEY = "slow_latent_stair_lock_stride_reward"
-STAIR_LOCK_STRIDE_REWARD_EVENT_ID_KEY = "slow_latent_stair_lock_stride_reward_event_id"
+STAIR_TOE_RISER_TOTAL_PENALTY_KEY = "slow_latent_stair_toe_riser_total_penalty"
+
+STAIR_STRIDE_EVENT_NONE = 0
+STAIR_STRIDE_EVENT_PROBE_TOUCHDOWN = 1
+STAIR_STRIDE_EVENT_VALID_SECOND_HIT = 2
+STAIR_STRIDE_EVENT_BACKOFF_TOUCHDOWN = 3
+STAIR_STRIDE_EVENT_LOCK_TOUCHDOWN = 4
 _STAIR_SHAPE_CACHE_KEY = "_privileged_stair_shape_cache"
+
+
+def stride_target_interval_contains(
+  actual: torch.Tensor,
+  target: torch.Tensor,
+  lower_tolerance: float,
+  upper_tolerance: float,
+) -> torch.Tensor:
+  """Return whether a stride is inside an asymmetric target interval."""
+  return (actual >= target - float(lower_tolerance)) & (
+    actual <= target + float(upper_tolerance)
+  )
 
 
 def stair_shape_from_boundaries(

@@ -255,9 +255,26 @@ class GoalPyramidProbeTraceRecorder:
         "ratchet_same_upper": None,
         "ratchet_confidence": None,
         "ratchet_mode": "unknown",
+        "ratchet_valid_second_hit": False,
+        "ratchet_recovery_pending": False,
+        "ratchet_recovery_target": None,
+        "ratchet_lock_target": None,
+        "ratchet_recovery_completed": False,
       }
     row = ratchet[env_index].detach().cpu()
     mode_code = float(row[9].item())
+    term = self._term
+    valid_second_hit = False
+    recovery_pending = False
+    recovery_target = None
+    lock_target = None
+    recovery_completed = False
+    if term is not None:
+      valid_second_hit = bool(term.ratchet_valid_second_hit[env_index].item())
+      recovery_pending = bool(term.ratchet_recovery_pending[env_index].item())
+      recovery_target = float(term.ratchet_recovery_target_s[env_index].item())
+      lock_target = float(term.ratchet_lock_target_s[env_index].item())
+      recovery_completed = bool(term.ratchet_recovery_completed[env_index].item())
     return {
       "ratchet_active": bool(row[0].item() > 0.5),
       "ratchet_lower": float(row[1].item()),
@@ -268,6 +285,11 @@ class GoalPyramidProbeTraceRecorder:
       "ratchet_same_upper": float(row[7].item()),
       "ratchet_confidence": float(row[8].item()),
       "ratchet_mode": _mode_name(mode_code),
+      "ratchet_valid_second_hit": valid_second_hit,
+      "ratchet_recovery_pending": recovery_pending,
+      "ratchet_recovery_target": recovery_target,
+      "ratchet_lock_target": lock_target,
+      "ratchet_recovery_completed": recovery_completed,
     }
 
   def _event_row(
@@ -1757,6 +1779,61 @@ def _summarize_probe_trace_batches(
     for target in episode["post_higher_targets"]
     if target is not None
   ]
+  valid_second_events_by_episode = [
+    [
+      event
+      for event in episode["events"]
+      if event.get("ratchet_valid_second_hit", False)
+    ]
+    for episode in episodes
+  ]
+  recovery_events_by_episode = [
+    [
+      event
+      for event in episode["events"]
+      if event.get("ratchet_recovery_completed", False)
+    ]
+    for episode in episodes
+  ]
+  with_valid_second = [events for events in valid_second_events_by_episode if events]
+  with_recovery_completed = [events for events in recovery_events_by_episode if events]
+  recovery_growth = [
+    float(event["same_foot_stride_growth"])
+    for events in recovery_events_by_episode
+    for event in events
+    if event.get("same_foot_stride_growth") is not None
+  ]
+  recovery_targets = [
+    float(event["ratchet_recovery_target"])
+    for events in valid_second_events_by_episode
+    for event in events
+    if event.get("ratchet_recovery_target") is not None
+  ]
+  lock_targets = [
+    float(event["ratchet_lock_target"])
+    for episode in episodes
+    for event in episode["events"]
+    if event.get("ratchet_lock_target") is not None
+    and float(event["ratchet_lock_target"]) > 0.0
+  ]
+  post_confirmation_collision_flags: list[float] = []
+  for episode, valid_events in zip(
+    episodes,
+    valid_second_events_by_episode,
+    strict=True,
+  ):
+    if not valid_events:
+      continue
+    confirmation_step = min(int(event["step"]) for event in valid_events)
+    post_confirmation_collision_flags.append(
+      float(
+        any(
+          event["kind"] == "higher_riser_collision"
+          and int(event["step"]) > confirmation_step
+          for event in episode["events"]
+        )
+      )
+    )
 
   total = max(1, len(episodes))
   summary = {
@@ -1796,6 +1873,16 @@ def _summarize_probe_trace_batches(
     "mean_first_collision_ratchet_target": _average_values(first_targets),
     "mean_higher_collision_ratchet_target": _average_values(higher_targets),
     "mean_post_higher_ratchet_target": _average_values(after_higher_targets),
+    "episodes_with_ratchet_valid_second_hit": len(with_valid_second),
+    "episodes_with_ratchet_valid_second_hit_rate": len(with_valid_second) / total,
+    "episodes_with_recovery_completed": len(with_recovery_completed),
+    "episodes_with_recovery_completed_rate": len(with_recovery_completed) / total,
+    "mean_recovery_same_foot_stride_growth": _average_values(recovery_growth),
+    "mean_ratchet_recovery_target": _average_values(recovery_targets),
+    "mean_ratchet_lock_target": _average_values(lock_targets),
+    "post_confirmation_higher_collision_episode_rate": _average_values(
+      post_confirmation_collision_flags
+    ),
   }
   return {"summary": summary, "episodes": episodes}
 

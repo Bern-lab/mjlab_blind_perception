@@ -364,6 +364,7 @@ def test_shadow_semantic_stride_slots_use_safe_stride_control() -> None:
   latent_obs[:, 75] = torch.tensor([0.30, 0.30, 0.30, 0.50, 0.64])
   latent_obs[:, 76] = torch.tensor([0.0, 0.0, 1.0, 0.0, 0.0])
   latent_obs[:, 77] = torch.tensor([0.0, 0.0, 0.50, 0.38, 0.0])
+  latent_obs[:, 78] = 0.8
 
   semantic = model._build_shadow_semantic(
     event_prob,
@@ -385,6 +386,35 @@ def test_shadow_semantic_stride_slots_use_safe_stride_control() -> None:
     semantic[:, 14],
     torch.tensor([0.0, 0.5, 1.0, 0.0, 0.5]),
   )
+
+
+def test_shadow_semantic_neutralizes_unready_stride_phase() -> None:
+  model = _make_model(
+    structured_safe_stride_enabled=True,
+    shadow_semantic_enabled=True,
+  )
+  batch = 2
+  latent_obs = torch.zeros(batch, 80)
+  latent_obs[:, 70] = 1.0
+  latent_obs[:, 72] = 0.65
+  latent_obs[1, 78] = 0.8
+  semantic = model._build_shadow_semantic(
+    torch.zeros(batch, 1),
+    torch.ones(batch, 1),
+    torch.zeros(batch, 5),
+    torch.tensor([[0.60, 0.15], [0.60, 0.15]]),
+    latent_obs[:, 72:73],
+    torch.tensor([[0.40, 0.70], [0.40, 0.70]]),
+    torch.ones(batch, 1),
+    latent_obs,
+    torch.tensor([[0.0, 0.0, 100.0], [0.0, 0.0, 100.0]]),
+  )
+
+  torch.testing.assert_close(semantic[0, [8, 12, 14]], torch.full((3,), 0.5))
+  torch.testing.assert_close(semantic[0, 15], torch.tensor(0.0))
+  assert semantic[1, 8].item() > 0.5
+  torch.testing.assert_close(semantic[1, 14], torch.tensor(1.0))
+  torch.testing.assert_close(semantic[1, 15], torch.tensor(1.0))
 
 
 def test_shadow_semantic_diagnostics_do_not_change_actor_output() -> None:
