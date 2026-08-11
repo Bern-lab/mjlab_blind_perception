@@ -72,6 +72,15 @@ Added
   upward stair runway, lets each stage use a different command-line riser
   height within the training range, and reports first-stage versus post-change
   foot-lift and predicted-riser deltas.
+- Added a stair latent visualization report that exports SlowLatent
+  encoder/hidden/candidate/memory diagnostics, plots gate switches, Semantic-v2
+  dynamics, z-memory heatmaps, gate rasters, head summaries, invariant checks,
+  representation probes, and offline interactive 3D embedding HTML files over a
+  fixed stair height/depth grid. Long embedding jobs also have a progress
+  watcher for generated report files.
+- Added a long-stair riser-height latent collection preset and report filters
+  for memory-only upstairs samples, so riser organization can be inspected
+  without post-stair platform samples dominating the embedding.
 - Added a standalone long stair-runway terrain for G1 target-navigation
   training, with fixed start/end target points, matched high-stair size ranges,
   and runway-specific reset and termination handling.

@@ -7,10 +7,12 @@ from typing import Literal
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
+from mjlab.terrains import BoxLongStairRunwayTerrainCfg
 from mjlab.terrains.config import flat, pyramid_stairs, pyramid_stairs_inv, random_rough
 from mjlab.terrains.terrain_generator import SubTerrainCfg, TerrainGeneratorCfg
 
 TerrainKind = Literal["flat", "rough", "upstairs", "downstairs"]
+StairLayout = Literal["pyramid", "long_runway"]
 
 
 @dataclass(frozen=True)
@@ -22,14 +24,22 @@ class EvalTerrainSpec:
   kind: TerrainKind
   height_m: float | None = None
   step_width: float = 0.30
+  layout: StairLayout = "pyramid"
   platform_width: float = 3.0
   terrain_size: tuple[float, float] = (8.0, 8.0)
   border_width: float = 20.0
   stair_riser_levels: int = 10
   stair_border_width: float = 1.0
+  runway_size: tuple[float, float] = (10.9, 2.5)
+  runway_num_steps: int = 14
+  runway_start_platform_length: float = 2.0
+  runway_end_platform_length: float = 4.0
+  runway_end_target_fraction: float = 0.85
 
   def generator_size(self) -> tuple[float, float]:
     """Return the terrain-generator tile size for this fixed terrain."""
+    if self.layout == "long_runway":
+      return self.runway_size
     if self.kind not in ("upstairs", "downstairs"):
       return self.terrain_size
 
@@ -60,6 +70,19 @@ class EvalTerrainSpec:
     if self.height_m is None:
       raise ValueError(f"Terrain '{self.name}' needs height_m.")
 
+    if self.layout == "long_runway":
+      if self.kind != "upstairs":
+        raise ValueError("Long stair runway evaluation only supports upstairs.")
+      return BoxLongStairRunwayTerrainCfg(
+        proportion=1.0,
+        step_height_range=(self.height_m, self.height_m),
+        step_width_range=(self.step_width, self.step_width),
+        num_steps=self.runway_num_steps,
+        start_platform_length=self.runway_start_platform_length,
+        end_platform_length=self.runway_end_platform_length,
+        end_target_fraction=self.runway_end_target_fraction,
+      )
+
     common = dict(
       proportion=1.0,
       step_height_range=(self.height_m, self.height_m),
@@ -77,6 +100,14 @@ class EvalTerrainSpec:
       return pyramid_stairs(**common)
 
     raise ValueError(f"Unsupported terrain kind: {self.kind!r}")
+
+  def stair_completion_root_x_m(self) -> float | None:
+    """Root x, relative to env origin, where the long stair run is complete."""
+    if self.layout != "long_runway" or self.kind != "upstairs":
+      return None
+    return (
+      0.5 * self.runway_start_platform_length + self.runway_num_steps * self.step_width
+    )
 
 
 EVAL_TERRAIN_SETS: dict[str, tuple[EvalTerrainSpec, ...]] = {  # 地形类型
@@ -139,6 +170,175 @@ EVAL_TERRAIN_SETS: dict[str, tuple[EvalTerrainSpec, ...]] = {  # 地形类型
       label="stair_down_10",
       kind="downstairs",
       height_m=0.10,
+    ),
+  ),
+  "stair_size_grid_v1": (
+    EvalTerrainSpec(name="flat", label="flat", kind="flat"),
+    EvalTerrainSpec(name="rough", label="rough", kind="rough"),
+    EvalTerrainSpec(
+      name="upstairs_h10_d25",
+      label="h10_d25",
+      kind="upstairs",
+      height_m=0.10,
+      step_width=0.25,
+    ),
+    EvalTerrainSpec(
+      name="upstairs_h10_d30",
+      label="h10_d30",
+      kind="upstairs",
+      height_m=0.10,
+      step_width=0.30,
+    ),
+    EvalTerrainSpec(
+      name="upstairs_h10_d35",
+      label="h10_d35",
+      kind="upstairs",
+      height_m=0.10,
+      step_width=0.35,
+    ),
+    EvalTerrainSpec(
+      name="upstairs_h15_d25",
+      label="h15_d25",
+      kind="upstairs",
+      height_m=0.15,
+      step_width=0.25,
+    ),
+    EvalTerrainSpec(
+      name="upstairs_h15_d30",
+      label="h15_d30",
+      kind="upstairs",
+      height_m=0.15,
+      step_width=0.30,
+    ),
+    EvalTerrainSpec(
+      name="upstairs_h15_d35",
+      label="h15_d35",
+      kind="upstairs",
+      height_m=0.15,
+      step_width=0.35,
+    ),
+    EvalTerrainSpec(
+      name="upstairs_h20_d25",
+      label="h20_d25",
+      kind="upstairs",
+      height_m=0.20,
+      step_width=0.25,
+    ),
+    EvalTerrainSpec(
+      name="upstairs_h20_d30",
+      label="h20_d30",
+      kind="upstairs",
+      height_m=0.20,
+      step_width=0.30,
+    ),
+    EvalTerrainSpec(
+      name="upstairs_h20_d35",
+      label="h20_d35",
+      kind="upstairs",
+      height_m=0.20,
+      step_width=0.35,
+    ),
+  ),
+  "slowlatent_repr_v1": (
+    EvalTerrainSpec(name="flat", label="flat", kind="flat"),
+    EvalTerrainSpec(
+      name="upstairs_h10_d24",
+      label="h10_d24",
+      kind="upstairs",
+      height_m=0.10,
+      step_width=0.24,
+    ),
+    EvalTerrainSpec(
+      name="upstairs_h10_d30",
+      label="h10_d30",
+      kind="upstairs",
+      height_m=0.10,
+      step_width=0.30,
+    ),
+    EvalTerrainSpec(
+      name="upstairs_h10_d36",
+      label="h10_d36",
+      kind="upstairs",
+      height_m=0.10,
+      step_width=0.36,
+    ),
+    EvalTerrainSpec(
+      name="upstairs_h15_d24",
+      label="h15_d24",
+      kind="upstairs",
+      height_m=0.15,
+      step_width=0.24,
+    ),
+    EvalTerrainSpec(
+      name="upstairs_h15_d30",
+      label="h15_d30",
+      kind="upstairs",
+      height_m=0.15,
+      step_width=0.30,
+    ),
+    EvalTerrainSpec(
+      name="upstairs_h15_d36",
+      label="h15_d36",
+      kind="upstairs",
+      height_m=0.15,
+      step_width=0.36,
+    ),
+    EvalTerrainSpec(
+      name="upstairs_h20_d24",
+      label="h20_d24",
+      kind="upstairs",
+      height_m=0.20,
+      step_width=0.24,
+    ),
+    EvalTerrainSpec(
+      name="upstairs_h20_d30",
+      label="h20_d30",
+      kind="upstairs",
+      height_m=0.20,
+      step_width=0.30,
+    ),
+    EvalTerrainSpec(
+      name="upstairs_h20_d36",
+      label="h20_d36",
+      kind="upstairs",
+      height_m=0.20,
+      step_width=0.36,
+    ),
+  ),
+  "long_stair_riser_grid_v1": (
+    EvalTerrainSpec(
+      name="flat_runway_size",
+      label="flat",
+      kind="flat",
+      terrain_size=(10.9, 2.5),
+      border_width=4.0,
+    ),
+    EvalTerrainSpec(
+      name="long_upstairs_h10_d30",
+      label="h10",
+      kind="upstairs",
+      height_m=0.10,
+      step_width=0.30,
+      layout="long_runway",
+      border_width=4.0,
+    ),
+    EvalTerrainSpec(
+      name="long_upstairs_h15_d30",
+      label="h15",
+      kind="upstairs",
+      height_m=0.15,
+      step_width=0.30,
+      layout="long_runway",
+      border_width=4.0,
+    ),
+    EvalTerrainSpec(
+      name="long_upstairs_h20_d30",
+      label="h20",
+      kind="upstairs",
+      height_m=0.20,
+      step_width=0.30,
+      layout="long_runway",
+      border_width=4.0,
     ),
   ),
 }

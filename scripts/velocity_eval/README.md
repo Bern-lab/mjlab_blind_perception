@@ -452,6 +452,43 @@ uv run python scripts/velocity_eval/collect_policy_latents.py \
 
 For MLP actors, the saved latent is the hidden activation before the final actor
 linear layer. For recurrent actors, it is the last recurrent hidden state.
+SlowLatent policies also save `encoder_out`, `h_t`, `c_t`, `z_candidate`,
+`z_memory`, state/shape memory splits, gate state, decoded stair/stride
+predictions, gate diagnostics, deployable `foot_event_summary`/`ratchet`
+features, and the 16-channel Semantic-v2 vector when those outputs are
+available. The legacy `latent` array is kept for compatibility; for recurrent
+SlowLatent policies it is the LSTM hidden state, not the 24-D `z_memory`.
+
+For stair-size clustering, use the flat/upstairs height/depth grid. The stair
+labels use `hXX_dYY`, where `h` is riser height and `d` is tread depth/step
+width in centimeters:
+
+```bash
+uv run python scripts/velocity_eval/collect_policy_latents.py \
+  Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1 \
+  --checkpoint-file logs/rsl_rl/.../model.pt \
+  --terrain-set slowlatent_repr_v1 \
+  --episodes-per-terrain 20 \
+  --num-envs 20 \
+  --steps-per-episode 500
+```
+
+For riser-height-only diagnostics on the same long upward stair runway used by
+training, collect flat plus fixed 10/15/20 cm upstairs runs. The upstairs
+samples stop as soon as the robot root reaches the end of the stair run, so the
+post-stair flat platform is not added to the latent file:
+
+```bash
+uv run python scripts/velocity_eval/collect_policy_latents.py \
+  Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1 \
+  --checkpoint-file logs/rsl_rl/.../model.pt \
+  --terrain-set long_stair_riser_grid_v1 \
+  --episodes-per-terrain 10 \
+  --num-envs 10 \
+  --steps-per-episode 1000 \
+  --stop-after-stair-completion \
+  --stop-on-episode-done
+```
 
 If `--output-file` is omitted, each collection run uses the same grouped folder
 layout, for example:
@@ -473,3 +510,60 @@ By default, analysis outputs are written next to the input `.npz`:
 - `latent_pca.csv`
 - `latent_pca.png`
 - `phase_bins/phase_*.png` when `--phase-bins` is provided
+
+## Stair Latent Report
+
+Use `plot_stair_latent_report.py` on a collected `.npz` to create the first
+mechanism figures: one episode-level gate/prediction timeline, a Semantic-v2
+heatmap, z-memory heatmaps, a gate-state raster, Semantic-v2 invariant and
+correlation checks, head-prediction summaries, PCA cluster plots for the
+representation hierarchy, and a linear-probe/nearest-centroid representation
+summary. It also writes offline interactive 3D HTML point clouds under
+`interactive/`, with hover metadata, color-mode switching, and selectable
+episode paths through the latent manifold. Categorical legends can be clicked
+to hide or show terrain/gate groups while inspecting the same coordinates.
+
+```bash
+uv run python scripts/velocity_eval/plot_stair_latent_report.py \
+  --input-file eval_outputs/velocity/.../latents_slowlatent_repr_v1.npz \
+  --phase-bins 8 \
+  --phase-bin 2
+```
+
+For 3D t-SNE HTML diagnostics, run:
+
+```bash
+uv run python scripts/velocity_eval/plot_stair_latent_report.py \
+  --input-file eval_outputs/velocity/.../latents_slowlatent_repr_v1.npz \
+  --embedding-method tsne \
+  --embedding-dim 3 \
+  --interactive-features h_t,z_memory,z_state,z_shape,semantic
+```
+
+This produces files such as `interactive/z_shape_tsne3d.html` and static
+orthogonal screenshots such as `static/z_shape_tsne3d_xy.png`.
+
+To inspect riser height without the normal/write/memory state switch dominating
+the plot, filter to upstairs memory samples and color the HTML by `Riser height`:
+
+```bash
+uv run python scripts/velocity_eval/plot_stair_latent_report.py \
+  --input-file eval_outputs/velocity/.../latents_long_stair_riser_grid_v1.npz \
+  --output-dir eval_outputs/velocity/.../riser_memory_tsne3d \
+  --embedding-method tsne \
+  --embedding-dim 3 \
+  --interactive-features h_t,z_memory,z_shape,semantic \
+  --terrain-kind-filter upstairs \
+  --gate-mode-filter memory \
+  --min-memory-age 20
+```
+
+For long t-SNE runs, watch output progress from another terminal:
+
+```bash
+uv run python scripts/velocity_eval/watch_latent_report_progress.py \
+  --input-file eval_outputs/velocity/.../latents_slowlatent_repr_v1.npz \
+  --embedding-method tsne \
+  --embedding-dim 3 \
+  --interactive-features h_t,z_memory,z_state,z_shape,semantic
+```
