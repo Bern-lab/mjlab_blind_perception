@@ -112,6 +112,17 @@ class G1SlowLatentRewardParams:
       r".*wrist.*": 0.3,
     }
   )
+  arm_pose_weight: float = 0.8
+  arm_pose_std: dict[str, float] = field(
+    default_factory=lambda: {
+      r".*shoulder_pitch.*": 0.15,
+      r".*shoulder_roll.*": 0.10,
+      r".*shoulder_yaw.*": 0.10,
+      r".*elbow.*": 0.12,
+      r".*wrist.*": 0.08,
+    }
+  )
+  arm_joint_vel_l2_weight: float = -0.002
 
   # Foot placement, gait, and stance-shape rewards.
   foot_clearance_weight: float = -2.0
@@ -162,7 +173,7 @@ class G1SlowLatentRewardParams:
   foot_lip_ignore_boundary_layers: int = 0
 
   toe_slab_weight: float = -4.2
-  toe_slab_depth: float = 0.10
+  toe_slab_depth: float = 0.05
   toe_slab_u_margin: float = 0.02
   toe_slab_v_margin: float = 0.05
   toe_x_min: float = 0.08
@@ -171,8 +182,8 @@ class G1SlowLatentRewardParams:
   nearest_boundaries: int = 4
   min_terrain_level: int = 3
 
-  toe_contact_penalty_scale: float = 0.5
-  toe_contact_time_scale: float = 0.20
+  toe_contact_penalty_scale: float = 0.65
+  toe_contact_time_scale: float = 0.10
   toe_contact_force_threshold: float = 15.0
   toe_contact_force_scale: float = 60.0
   toe_contact_vertical_normal_z_max: float = 0.4
@@ -193,30 +204,57 @@ class G1SlowLatentRewardParams:
   toe_stair_touchdown_lip_height_band: float = 0.06
   toe_safe_stride_containment_margin: float = 0.003
   stride_phase_weight: float = 1.0
-  stride_phase_probe_scale: float = 2.0
+  stride_phase_probe_scale: float = 3.0
   stride_phase_confirmation_scale: float = 1.0
-  stride_phase_backoff_scale: float = 2.4
-  stride_phase_lock_scale: float = 1.2
+  stride_phase_backoff_scale: float = 4.0
+  stride_phase_lock_scale: float = 2.0
   stride_phase_probe_growth_scale: float = 0.05
+  stride_phase_probe_min_progress: float = 0.01
   stride_phase_probe_reference_tolerance: float = 0.025
   stride_phase_probe_growth_weight: float = 0.50
   stride_phase_probe_target_progress_weight: float = 0.50
   stride_phase_probe_completion_start: float = 0.03
   stride_phase_probe_completion_span: float = 0.02
-  stride_phase_probe_completion_bonus: float = 0.35
+  stride_phase_probe_completion_bonus: float = 1.00
+  stride_phase_probe_convex_bonus: float = 2.50
+  stride_phase_probe_post_target_decay_scale: float = 0.012
   stride_phase_probe_overshoot_penalty: float = 1.0
+  stride_phase_probe_stall_penalty: float = 0.50
+  stride_phase_probe_swing_fraction: float = 0.70
+  stride_phase_swing_invalid_grace_steps: int = 2
+  stride_phase_entry_reward_scale: float = 0.75
+  stride_phase_entry_swing_fraction: float = 0.20
+  stride_phase_entry_target: float = 0.05
+  stride_phase_entry_target_tolerance: float = 0.01
+  stride_phase_entry_completion_bonus: float = 1.00
+  stride_phase_entry_post_target_decay_scale: float = 0.010
+  stride_phase_entry_overshoot_penalty: float = 1.0
   stride_phase_backoff_progress_scale: float = 0.03
   stride_phase_backoff_tolerance: float = 0.06
-  stride_phase_backoff_progress_weight: float = 0.80
-  stride_phase_backoff_proximity_weight: float = 0.20
-  stride_phase_backoff_completion_lower_tolerance: float = 0.025
-  stride_phase_backoff_completion_upper_tolerance: float = 0.025
-  stride_phase_backoff_min_reduction: float = 0.005
-  stride_phase_backoff_completion_bonus: float = 0.50
-  stride_phase_recovery_offset: float = 0.04
+  stride_phase_backoff_progress_weight: float = 0.65
+  stride_phase_backoff_proximity_weight: float = 0.35
+  stride_phase_backoff_overretreat_penalty: float = 1.0
+  stride_phase_backoff_overretreat_tolerance: float = 0.020
+  stride_phase_backoff_completion_lower_tolerance: float = 0.015
+  stride_phase_backoff_completion_upper_tolerance: float = 0.015
+  stride_phase_backoff_min_reduction: float = 0.020
+  stride_phase_recovery_min_backoff: float = 0.025
+  stride_phase_recovery_max_backoff: float = 0.050
+  stride_phase_recovery_depth_min: float = 0.25
+  stride_phase_recovery_depth_max: float = 0.35
+  stride_phase_recovery_effective_sole_length: float = 0.185
+  stride_phase_recovery_rear_support_margin: float = 0.015
+  stride_phase_backoff_completion_bonus: float = 1.00
+  stride_phase_backoff_stall_penalty: float = 0.75
+  stride_phase_backoff_swing_fraction: float = 0.80
+  stride_phase_backoff_swing_window_min: float = 0.025
+  stride_phase_backoff_swing_window_max: float = 0.050
+  stride_phase_backoff_forward_decay_scale: float = 0.010
+  stride_phase_backoff_forward_penalty: float = 0.50
   stride_phase_lock_progress_scale: float = 0.03
   stride_phase_lock_tolerance: float = 0.05
-  stride_phase_lock_intent_tolerance: float = 0.03
+  stride_phase_lock_swing_fraction: float = 0.70
+  stride_phase_lock_intent_tolerance: float = 0.015
   stride_phase_lock_progress_weight: float = 0.40
   stride_phase_lock_tracking_weight: float = 0.60
   stair_entry_evidence_time: float = 0.80
@@ -225,6 +263,9 @@ class G1SlowLatentRewardParams:
   safe_stride_riser_weight: float = 3.0
   toe_collision_risk_margin: float = 0.06
   toe_stair_command_threshold: float = 0.05
+  swing_toe_support_edge_weight: float = -2.0
+  swing_toe_support_edge_radius: float = 0.05
+  swing_toe_support_edge_direction_cos: float = 0.90
   stair_skip_layer_weight: float = -1.0
 
   # Target-foot dense shaping toward the expected tread-depth midline.  This
@@ -420,6 +461,16 @@ def configure_g1_step_danger_rewards(
       "asset_cfg": foot_asset_cfg(),
     },
   )
+  cfg.rewards["swing_toe_support_edge_cylinder_penalty"] = RewardTermCfg(
+    func=mdp.swing_toe_support_edge_cylinder_penalty,
+    weight=params.swing_toe_support_edge_weight,
+    params={
+      "radius": params.swing_toe_support_edge_radius,
+      "toe_x_min": params.toe_x_min,
+      "direction_cos_threshold": params.swing_toe_support_edge_direction_cos,
+      "asset_cfg": foot_asset_cfg(),
+    },
+  )
   cfg.rewards["stair_stride_phase_reward"] = RewardTermCfg(
     func=mdp.stair_stride_phase_reward,
     weight=params.stride_phase_weight,
@@ -437,16 +488,44 @@ def configure_g1_step_danger_rewards(
       "probe_completion_start": params.stride_phase_probe_completion_start,
       "probe_completion_span": params.stride_phase_probe_completion_span,
       "probe_completion_bonus": params.stride_phase_probe_completion_bonus,
+      "probe_convex_bonus": params.stride_phase_probe_convex_bonus,
+      "probe_post_target_decay_scale": (
+        params.stride_phase_probe_post_target_decay_scale
+      ),
       "probe_overshoot_penalty": params.stride_phase_probe_overshoot_penalty,
+      "probe_stall_penalty": params.stride_phase_probe_stall_penalty,
+      "probe_swing_fraction": params.stride_phase_probe_swing_fraction,
+      "swing_invalid_grace_steps": params.stride_phase_swing_invalid_grace_steps,
+      "entry_reward_scale": params.stride_phase_entry_reward_scale,
+      "entry_swing_fraction": params.stride_phase_entry_swing_fraction,
+      "entry_target": params.stride_phase_entry_target,
+      "entry_target_tolerance": params.stride_phase_entry_target_tolerance,
+      "entry_completion_bonus": params.stride_phase_entry_completion_bonus,
+      "entry_post_target_decay_scale": (
+        params.stride_phase_entry_post_target_decay_scale
+      ),
+      "entry_overshoot_penalty": params.stride_phase_entry_overshoot_penalty,
       "backoff_progress_scale": params.stride_phase_backoff_progress_scale,
       "backoff_tolerance": params.stride_phase_backoff_tolerance,
       "backoff_progress_weight": params.stride_phase_backoff_progress_weight,
       "backoff_proximity_weight": params.stride_phase_backoff_proximity_weight,
+      "backoff_overretreat_penalty": (params.stride_phase_backoff_overretreat_penalty),
+      "backoff_overretreat_tolerance": (
+        params.stride_phase_backoff_overretreat_tolerance
+      ),
       "backoff_completion_bonus": params.stride_phase_backoff_completion_bonus,
+      "backoff_stall_penalty": params.stride_phase_backoff_stall_penalty,
+      "backoff_swing_fraction": params.stride_phase_backoff_swing_fraction,
+      "backoff_swing_window_min": params.stride_phase_backoff_swing_window_min,
+      "backoff_swing_window_max": params.stride_phase_backoff_swing_window_max,
+      "backoff_forward_decay_scale": (params.stride_phase_backoff_forward_decay_scale),
+      "backoff_forward_penalty": params.stride_phase_backoff_forward_penalty,
       "lock_progress_scale": params.stride_phase_lock_progress_scale,
       "lock_tolerance": params.stride_phase_lock_tolerance,
+      "lock_swing_fraction": params.stride_phase_lock_swing_fraction,
       "lock_progress_weight": params.stride_phase_lock_progress_weight,
       "lock_tracking_weight": params.stride_phase_lock_tracking_weight,
+      "intent_tolerance": params.stride_phase_lock_intent_tolerance,
       "second_hit_penalty_refund_weight": abs(params.toe_slab_weight),
     },
   )
@@ -599,6 +678,12 @@ def _configure_slow_latent_rewards(
   def foot_site_cfg() -> SceneEntityCfg:
     return SceneEntityCfg("robot", site_names=("left_foot", "right_foot"))
 
+  def arm_joint_cfg() -> SceneEntityCfg:
+    return SceneEntityCfg(
+      "robot",
+      joint_names=(r".*shoulder.*", r".*elbow.*", r".*wrist.*"),
+    )
+
   def foot_body_cfg() -> SceneEntityCfg:
     return SceneEntityCfg(
       "robot",
@@ -636,6 +721,19 @@ def _configure_slow_latent_rewards(
       "std_walking": dict(params.pose_std_walking),
       "std_running": dict(params.pose_std_running),
     }
+  )
+  cfg.rewards["arm_pose"] = RewardTermCfg(
+    func=mdp.posture,
+    weight=params.arm_pose_weight,
+    params={
+      "std": dict(params.arm_pose_std),
+      "asset_cfg": arm_joint_cfg(),
+    },
+  )
+  cfg.rewards["arm_joint_vel_l2"] = RewardTermCfg(
+    func=mdp.joint_vel_l2,
+    weight=params.arm_joint_vel_l2_weight,
+    params={"asset_cfg": arm_joint_cfg()},
   )
 
   cfg.rewards["foot_clearance"].weight = params.foot_clearance_weight
@@ -777,6 +875,7 @@ def _configure_latent_observations(
         "gait_period": params.rewards.foot_gait_period,
         "command_name": "twist",
         "noise_enabled": not play,
+        "post_first_toe_miss_prob": 0.05,
         "ratchet_height_threshold_m": 0.025,
         "ratchet_flat_height_threshold_m": 0.02,
         "ratchet_probe_increment_m": 0.05,
@@ -785,6 +884,11 @@ def _configure_latent_observations(
         "ratchet_probe_cap_m": 0.76,
         "ratchet_probe_target_tolerance_m": 0.025,
         "ratchet_post_first_collision_probe_increment_m": 0.05,
+        "ratchet_probe_min_progress_m": params.rewards.stride_phase_probe_min_progress,
+        "ratchet_entry_target_m": params.rewards.stride_phase_entry_target,
+        "ratchet_entry_target_tolerance_m": (
+          params.rewards.stride_phase_entry_target_tolerance
+        ),
         "ratchet_sequence_min_confidence": 0.30,
         "ratchet_sequence_height_tolerance_m": 0.06,
         "ratchet_sequence_max_adjacent_height_m": 0.24,
@@ -801,7 +905,24 @@ def _configure_latent_observations(
         "ratchet_recovery_min_reduction_m": (
           params.rewards.stride_phase_backoff_min_reduction
         ),
-        "ratchet_recovery_offset_m": params.rewards.stride_phase_recovery_offset,
+        "ratchet_recovery_min_backoff_m": (
+          params.rewards.stride_phase_recovery_min_backoff
+        ),
+        "ratchet_recovery_max_backoff_m": (
+          params.rewards.stride_phase_recovery_max_backoff
+        ),
+        "ratchet_recovery_depth_min_m": (
+          params.rewards.stride_phase_recovery_depth_min
+        ),
+        "ratchet_recovery_depth_max_m": (
+          params.rewards.stride_phase_recovery_depth_max
+        ),
+        "ratchet_recovery_effective_sole_length_m": (
+          params.rewards.stride_phase_recovery_effective_sole_length
+        ),
+        "ratchet_recovery_rear_support_margin_m": (
+          params.rewards.stride_phase_recovery_rear_support_margin
+        ),
         "ratchet_lock_probe_lower_margin_m": 0.01,
         "ratchet_lock_margin_m": 0.005,
         "ratchet_lock_intent_tolerance_m": (

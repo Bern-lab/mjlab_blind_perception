@@ -81,17 +81,31 @@ from .stair_geometry import (
   STAIR_SEQUENCE_ID_KEY,
   STAIR_SHAPE_LABEL_VALID_KEY,
   STAIR_SKIP_LAYER_PENALTY_KEY,
+  STAIR_STRIDE_CONTROL_FOOT_MASK_KEY,
+  STAIR_STRIDE_CONTROL_PHASE_KEY,
+  STAIR_STRIDE_CONTROL_REFERENCE_KEY,
+  STAIR_STRIDE_CONTROL_TARGET_KEY,
+  STAIR_STRIDE_CONTROL_VALID_KEY,
   STAIR_STRIDE_EVENT_BACKOFF_TOUCHDOWN,
+  STAIR_STRIDE_EVENT_ENTRY_TOUCHDOWN,
   STAIR_STRIDE_EVENT_LOCK_TOUCHDOWN,
+  STAIR_STRIDE_EVENT_NONE,
   STAIR_STRIDE_EVENT_PROBE_TOUCHDOWN,
   STAIR_STRIDE_EVENT_VALID_SECOND_HIT,
+  STAIR_STRIDE_INTENT_CLOSER,
+  STAIR_STRIDE_INTENT_FARTHER,
+  STAIR_STRIDE_INTENT_HOLD,
   STAIR_STRIDE_PHASE_EVENT_ACTUAL_KEY,
   STAIR_STRIDE_PHASE_EVENT_COLLISION_PENALTY_KEY,
   STAIR_STRIDE_PHASE_EVENT_COMPLETED_KEY,
+  STAIR_STRIDE_PHASE_EVENT_FOOT_ID_KEY,
   STAIR_STRIDE_PHASE_EVENT_ID_KEY,
+  STAIR_STRIDE_PHASE_EVENT_INTENT_KEY,
   STAIR_STRIDE_PHASE_EVENT_PREVIOUS_KEY,
   STAIR_STRIDE_PHASE_EVENT_TARGET_KEY,
   STAIR_STRIDE_PHASE_EVENT_TYPE_KEY,
+  STAIR_STRIDE_SWING_STRIDE_KEY,
+  STAIR_STRIDE_SWING_VALID_KEY,
   STAIR_TARGET_FOOT_KEY,
   STAIR_TOE_RISER_HIT_LAYER_KEY,
   STAIR_TOE_RISER_TOTAL_PENALTY_KEY,
@@ -102,6 +116,7 @@ from .stair_geometry import (
   TOE_RISER_NEW_HIT_KEY,
   cached_stair_shape,
   stair_shape_for_sequence,
+  support_edge_toe_brush_mask,
 )
 
 
@@ -429,6 +444,51 @@ def _blocked_swing_event_evidence(
   return abrupt, persistent, abrupt | persistent
 
 
+def _stair_swing_activity(
+  stair_phase: torch.Tensor,
+  target_foot: torch.Tensor,
+  ground_contact: torch.Tensor,
+  attempt_air_seen: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+  """Return current swing activity and its first airborne frame."""
+  num_feet = ground_contact.shape[1]
+  target_valid = (target_foot >= 0) & (target_foot < num_feet)
+  target_ids = target_foot.clamp(0, max(0, num_feet - 1)).long()
+  env_ids = torch.arange(target_foot.shape[0], device=target_foot.device)
+  target_airborne = (
+    (stair_phase >= 1) & target_valid & ~ground_contact[env_ids, target_ids].bool()
+  )
+  return attempt_air_seen | target_airborne, target_airborne & ~attempt_air_seen
+
+
+def _filter_passed_riser_ground_contacts(
+  ground_contact: torch.Tensor,
+  ground_first_contact: torch.Tensor,
+  ignored_passed_riser_contact: torch.Tensor,
+  horizontal_terrain_contact: torch.Tensor,
+  previous_filtered_contact: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+  """Remove vertical passed-riser brushes from tread-contact state."""
+  if not (
+    ground_contact.shape
+    == ground_first_contact.shape
+    == ignored_passed_riser_contact.shape
+    == horizontal_terrain_contact.shape
+    == previous_filtered_contact.shape
+  ):
+    raise ValueError("Passed-riser ground-contact masks must have matching shapes.")
+  suppressed = ignored_passed_riser_contact & ~horizontal_terrain_contact
+  filtered_contact = ground_contact & ~suppressed
+  filtered_first_contact = (ground_first_contact & ~suppressed) | (
+    filtered_contact & ~previous_filtered_contact
+  )
+  return (
+    filtered_contact,
+    filtered_first_contact,
+    suppressed,
+  )
+
+
 class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
   """Penalty-only riser slab term plus safe stair-entry state tracking.
 
@@ -585,6 +645,9 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     )
     self._current_ground_contact = torch.zeros(
       env.num_envs, num_feet, device=env.device, dtype=torch.bool
+    )
+    self._previous_filtered_ground_contact = torch.zeros_like(
+      self._current_ground_contact
     )
     self._current_stair_support = torch.zeros_like(self._current_ground_contact)
     self._current_support_fraction = torch.zeros(
@@ -867,6 +930,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     self._adjacent_support_pair_valid[env_ids] = False
     self._adjacent_support_pair_event[env_ids] = False
     self._current_ground_contact[env_ids] = False
+    self._previous_filtered_ground_contact[env_ids] = False
     self._current_stair_support[env_ids] = False
     self._current_support_fraction[env_ids] = 0.0
     self._current_support_layer[env_ids] = 0
@@ -1051,6 +1115,14 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     level_active: torch.Tensor,
     boundaries: torch.Tensor,
     boundary_layers: torch.Tensor,
+    boundary_sequence_ids: torch.Tensor,
+    ground_contact: torch.Tensor,
+    foot_layers: torch.Tensor,
+    foot_layers_valid: torch.Tensor,
+    sequence_ids: torch.Tensor,
+    swing_foot_ids: torch.Tensor,
+    swing_active: torch.Tensor,
+    swing_started_now: torch.Tensor,
     toe_velocity_w: torch.Tensor,
     command_forward: torch.Tensor,
     toe_x_min: float,
@@ -1112,15 +1184,37 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       min=0.0,
       max=1.0,
     )
-    vertical_riser_contact = found & is_toe_contact & is_vertical_face
+    contact_layers, contact_boundary_idx = self._contact_boundary_layers(
+      contact_pos_w, boundaries, boundary_layers
+    )
+    expanded_sequence_ids = boundary_sequence_ids[:, None, None, :].expand(
+      *contact_boundary_idx.shape,
+      boundary_sequence_ids.shape[-1],
+    )
+    contact_sequence_ids = torch.gather(
+      expanded_sequence_ids,
+      dim=-1,
+      index=contact_boundary_idx[..., None],
+    ).squeeze(-1)
+    raw_vertical_riser_contact = found & is_toe_contact & is_vertical_face
+    horizontal_terrain_contact_by_foot = torch.any(found & ~is_vertical_face, dim=-1)
+    ignored_support_edge_brush = support_edge_toe_brush_mask(
+      raw_vertical_riser_contact,
+      contact_layers,
+      contact_sequence_ids,
+      ground_contact,
+      foot_layers,
+      foot_layers_valid,
+      sequence_ids,
+      swing_foot_ids,
+      swing_active,
+    )
+    vertical_riser_contact = raw_vertical_riser_contact & ~ignored_support_edge_brush
     riser_hit = vertical_riser_contact & (hit_strength > 0.0)
     active_hit = riser_hit & level_active[:, None, None]
     active_riser_contact = vertical_riser_contact & level_active[:, None, None]
     hit_by_foot = torch.any(active_hit, dim=-1)
 
-    contact_layers, contact_boundary_idx = self._contact_boundary_layers(
-      contact_pos_w, boundaries, boundary_layers
-    )
     boundary_contact = active_hit & (contact_layers > 0)
     event_boundary_contact = active_riser_contact & (contact_layers > 0)
     layer1_event_boundary_contact = event_boundary_contact & (contact_layers == 1)
@@ -1213,6 +1307,61 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     log["Metrics/toe_riser_force_gt_threshold_ratio"] = hit_by_foot.float().mean()
     log["Metrics/toe_riser_contact_penalty_mean"] = contact_penalty.mean()
     log["Metrics/toe_riser_contact_time_mean"] = env_contact_time.mean()
+    raw_contact_count = raw_vertical_riser_contact.float().sum().clamp_min(1.0)
+    foot_ids = torch.arange(num_feet, device=env.device)
+    support_ids = 1 - foot_ids
+    launch_layers = foot_layers
+    support_layers = foot_layers[:, support_ids]
+    ignored_launch_layer = ignored_support_edge_brush & (
+      contact_layers == launch_layers[:, :, None]
+    )
+    ignored_support_layer = ignored_support_edge_brush & (
+      contact_layers == support_layers[:, :, None]
+    )
+    ignored_lower_passed_layer = ignored_support_edge_brush & (
+      contact_layers < launch_layers[:, :, None]
+    )
+    ignored_intermediate_passed_layer = (
+      ignored_support_edge_brush
+      & (contact_layers > launch_layers[:, :, None])
+      & (contact_layers < support_layers[:, :, None])
+    )
+    ignored_first_swing_frame = (
+      ignored_support_edge_brush & swing_started_now[:, None, None]
+    )
+    log["Metrics/toe_riser_support_edge_brush_ignored_ratio"] = (
+      ignored_support_edge_brush.float().sum() / raw_contact_count
+    )
+    log["Metrics/toe_riser_support_edge_brush_ignored_env_ratio"] = (
+      torch.any(ignored_support_edge_brush, dim=(1, 2)).float().mean()
+    )
+    log["Metrics/toe_riser_passed_brush_ignored_ratio"] = (
+      ignored_support_edge_brush.float().sum() / raw_contact_count
+    )
+    log["Metrics/toe_riser_passed_brush_ignored_env_ratio"] = (
+      torch.any(ignored_support_edge_brush, dim=(1, 2)).float().mean()
+    )
+    log["Metrics/toe_riser_raw_vertical_contact_env_ratio"] = (
+      torch.any(raw_vertical_riser_contact, dim=(1, 2)).float().mean()
+    )
+    log["Metrics/toe_riser_filtered_vertical_contact_env_ratio"] = (
+      torch.any(vertical_riser_contact, dim=(1, 2)).float().mean()
+    )
+    log["Metrics/toe_riser_launch_layer_brush_ignored_ratio"] = (
+      ignored_launch_layer.float().sum() / raw_contact_count
+    )
+    log["Metrics/toe_riser_support_layer_brush_ignored_ratio"] = (
+      ignored_support_layer.float().sum() / raw_contact_count
+    )
+    log["Metrics/toe_riser_lower_passed_brush_ignored_ratio"] = (
+      ignored_lower_passed_layer.float().sum() / raw_contact_count
+    )
+    log["Metrics/toe_riser_intermediate_passed_brush_ignored_ratio"] = (
+      ignored_intermediate_passed_layer.float().sum() / raw_contact_count
+    )
+    log["Metrics/toe_riser_first_swing_frame_brush_ignored_ratio"] = (
+      ignored_first_swing_frame.float().sum() / raw_contact_count
+    )
     return {
       "contact_penalty": contact_penalty,
       "new_hit_by_foot": new_hit_by_foot,
@@ -1223,6 +1372,9 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       "event_boundary_contact": layer1_event_boundary_contact,
       "contact_layers": contact_layers,
       "contact_boundary_idx": contact_boundary_idx,
+      "contact_sequence_ids": contact_sequence_ids,
+      "ignored_support_edge_brush": ignored_support_edge_brush,
+      "horizontal_terrain_contact_by_foot": horizontal_terrain_contact_by_foot,
       "contact_pos_w": contact_pos_w,
       "contact_normal_w": normal_w,
       "contact_force_w": force_w,
@@ -1495,8 +1647,64 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     toe_vel = point_vel_w[:, :, toe_mask, :]
     num_envs, num_feet = toe_points.shape[:2]
 
+    if contact_sensor_name is None:
+      ground_first_contact = torch.zeros(
+        num_envs, num_feet, device=env.device, dtype=torch.bool
+      )
+      ground_contact = ground_first_contact
+      ground_contact_time = ground_first_contact.float()
+    else:
+      ground_sensor = env.scene[ground_contact_sensor_name]
+      assert isinstance(ground_sensor, ContactSensor), (
+        f"Safe stair touchdown requires ContactSensor {ground_contact_sensor_name!r}."
+      )
+      ground_first_contact = ground_sensor.compute_first_contact(dt=env.step_dt)
+      if ground_first_contact.shape[-1] != num_feet:
+        raise RuntimeError("Safe stair touchdown requires one channel per foot.")
+      ground_contact_time = ground_sensor.data.current_contact_time
+      if ground_contact_time is None:
+        ground_contact = ground_first_contact
+        ground_contact_time = ground_first_contact.float() * env.step_dt
+      else:
+        if ground_contact_time.shape[-1] != num_feet:
+          if ground_contact_time.shape[-1] % num_feet != 0:
+            raise RuntimeError("Safe stair touchdown requires one channel per foot.")
+          ground_contact_time = (
+            ground_contact_time.view(num_envs, num_feet, -1).max(dim=-1).values
+          )
+        ground_contact = ground_contact_time > 0.0
+
     level_active = _terrain_level_active(env, min_terrain_level)
     base_valid = valid_boundaries & level_active[:, None]
+    _swing_active_now, swing_started_now = _stair_swing_activity(
+      self._stair_phase,
+      self._target_foot,
+      ground_contact,
+      self._attempt_air_seen,
+    )
+    target_valid_for_filter = (self._target_foot >= 0) & (self._target_foot < num_feet)
+    passed_filter_active = (self._stair_phase >= 1) & target_valid_for_filter
+    boundary_layers_by_foot = boundary_layers[:, None, :].expand(num_envs, num_feet, -1)
+    boundary_sequences_by_foot = boundary_sequence_ids[:, None, :].expand_as(
+      boundary_layers_by_foot
+    )
+    boundary_candidate_by_foot = base_valid[:, None, :].expand_as(
+      boundary_layers_by_foot
+    )
+    ignored_passed_boundary_by_foot = support_edge_toe_brush_mask(
+      boundary_candidate_by_foot,
+      boundary_layers_by_foot,
+      boundary_sequences_by_foot,
+      ground_contact,
+      self._foot_support_layers,
+      self._foot_support_layers_valid,
+      self._sequence_id,
+      self._target_foot,
+      passed_filter_active,
+    )
+    geometry_valid_by_foot = (
+      boundary_candidate_by_foot & ~ignored_passed_boundary_by_foot
+    )
     foot_ref_w = self._foot_ref_w(env, asset_cfg)
     ref_dist = self._riser_slab_ref_distance(
       foot_ref_w, boundaries, slab_depth, u_margin, v_margin, surface_tol
@@ -1505,13 +1713,15 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       self._local_points[toe_mask] - self._foot_ref_local, dim=-1
     ).max()
     masked_ref_dist = torch.where(
-      base_valid[:, None, :], ref_dist, torch.full_like(ref_dist, torch.inf)
+      geometry_valid_by_foot,
+      ref_dist,
+      torch.full_like(ref_dist, torch.inf),
     )
     slab_clearance = (
       torch.amin(masked_ref_dist, dim=(1, 2)) - toe_ref_radius
     ).clamp_min(0.0)
     all_boundaries = boundaries[:, None, :, :].expand(num_envs, num_feet, -1, -1)
-    all_valid = base_valid[:, None, :].expand(num_envs, num_feet, -1)
+    all_valid = geometry_valid_by_foot
     lip_min_dist = self._lip_min_dist(
       points_w,
       all_boundaries,
@@ -1519,10 +1729,19 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       stair_touchdown_lip_height_band,
     )
     lip_clearance = torch.amin(lip_min_dist, dim=(1, 2))
-    slab_unsafe_all = stair_tread_landing_reward._toe_slab_mask(
+    raw_slab_unsafe_all = stair_tread_landing_reward._toe_slab_mask(
       toe_points,
       boundaries,
       base_valid,
+      slab_depth,
+      u_margin,
+      v_margin,
+      surface_tol,
+    )
+    slab_unsafe_all = stair_tread_landing_reward._toe_slab_mask(
+      toe_points,
+      boundaries,
+      geometry_valid_by_foot,
       slab_depth,
       u_margin,
       v_margin,
@@ -1536,11 +1755,11 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       torch.maximum(proximity_risk, torch.any(slab_unsafe_all, dim=-1).float())
     )
     selected_idx, fallback = self._nearest_boundary_indices(
-      ref_dist, base_valid, toe_ref_radius, nearest_boundaries
+      ref_dist, geometry_valid_by_foot, toe_ref_radius, nearest_boundaries
     )
     if selected_idx is None:
       selected_boundaries = boundaries[:, None, :, :].expand(num_envs, num_feet, -1, -1)
-      selected_valid = base_valid[:, None, :].expand(num_envs, num_feet, -1)
+      selected_valid = geometry_valid_by_foot
       point_penalty, active, impact_speed, _ = self._riser_slab_point_penalty(
         toe_points,
         toe_vel,
@@ -1556,7 +1775,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     else:
       assert fallback is not None
       selected_boundaries = self._gather_by_foot(boundaries, selected_idx)
-      selected_valid = self._gather_mask_by_foot(base_valid, selected_idx)
+      selected_valid = self._gather_mask_by_foot(geometry_valid_by_foot, selected_idx)
       point_penalty, active, impact_speed, _ = self._riser_slab_point_penalty(
         toe_points,
         toe_vel,
@@ -1571,7 +1790,7 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       fallback_ratio = fallback.float().mean()
       if bool(torch.any(fallback).item()):
         all_boundaries = boundaries[:, None, :, :].expand(num_envs, num_feet, -1, -1)
-        all_valid = base_valid[:, None, :].expand(num_envs, num_feet, -1)
+        all_valid = geometry_valid_by_foot
         full_penalty, full_active, full_impact, _ = self._riser_slab_point_penalty(
           toe_points,
           toe_vel,
@@ -1596,6 +1815,22 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
     log["Metrics/toe_riser_slab_active_ratio"] = active.float().mean()
     log["Metrics/toe_riser_slab_impact_speed_mean"] = impact_speed_mean
     log["Metrics/toe_riser_slab_nearest_fallback_ratio"] = fallback_ratio
+    ignored_slab_unsafe = raw_slab_unsafe_all & ~slab_unsafe_all
+    log["Metrics/toe_riser_passed_slab_ignored_env_ratio"] = (
+      torch.any(ignored_slab_unsafe, dim=-1).float().mean()
+    )
+    target_ids_for_log = self._target_foot.clamp(0, max(0, num_feet - 1)).long()
+    env_ids_for_log = torch.arange(num_envs, device=env.device)
+    target_valid_for_log = (self._target_foot >= 0) & (self._target_foot < num_feet)
+    target_ignored_slab = (
+      ignored_slab_unsafe[env_ids_for_log, target_ids_for_log] & target_valid_for_log
+    )
+    log["Metrics/toe_riser_passed_slab_ignored_target_ratio"] = (
+      target_ignored_slab.float().mean()
+    )
+    log["Metrics/toe_riser_passed_filter_active_ratio"] = (
+      passed_filter_active.float().mean()
+    )
     if log_only:
       return torch.zeros_like(slab_penalty)
 
@@ -1618,6 +1853,14 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         level_active,
         boundaries,
         boundary_layers,
+        boundary_sequence_ids,
+        ground_contact,
+        self._foot_support_layers,
+        self._foot_support_layers_valid,
+        self._sequence_id,
+        self._target_foot,
+        passed_filter_active,
+        swing_started_now,
         toe_vel.mean(dim=2),
         command_forward,
         toe_x_min,
@@ -1647,6 +1890,37 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       event_boundary_contact = contact["event_boundary_contact"].bool()
       contact_layers = contact["contact_layers"].long()
       contact_boundary_idx = contact["contact_boundary_idx"].long()
+      contact_sequence_ids = contact["contact_sequence_ids"].long()
+      ignored_passed_contact_by_foot = torch.any(
+        contact["ignored_support_edge_brush"].bool(), dim=-1
+      )
+      horizontal_terrain_contact_by_foot = contact[
+        "horizontal_terrain_contact_by_foot"
+      ].bool()
+      raw_ground_first_contact = ground_first_contact
+      (
+        ground_contact,
+        ground_first_contact,
+        suppressed_passed_ground_contact,
+      ) = _filter_passed_riser_ground_contacts(
+        ground_contact,
+        ground_first_contact,
+        ignored_passed_contact_by_foot,
+        horizontal_terrain_contact_by_foot,
+        self._previous_filtered_ground_contact,
+      )
+      self._previous_filtered_ground_contact.copy_(ground_contact)
+      ground_contact_time = torch.where(
+        suppressed_passed_ground_contact,
+        torch.zeros_like(ground_contact_time),
+        ground_contact_time,
+      )
+      log["Metrics/toe_riser_passed_ground_contact_suppressed_ratio"] = (
+        suppressed_passed_ground_contact.float().mean()
+      )
+      log["Metrics/toe_riser_passed_first_contact_suppressed_ratio"] = (
+        (suppressed_passed_ground_contact & raw_ground_first_contact).float().mean()
+      )
       contact_pos_w = contact["contact_pos_w"]
       contact_normal_w = contact["contact_normal_w"]
       contact_force_w = contact["contact_force_w"]
@@ -1658,14 +1932,6 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       self._toe_riser_hit_layer.copy_(
         torch.amax(new_hit_layers.reshape(num_envs, -1), dim=-1)
       )
-      expanded_sequence_ids = boundary_sequence_ids[:, None, None, :].expand(
-        *contact_boundary_idx.shape, boundary_sequence_ids.shape[-1]
-      )
-      contact_sequence_ids = torch.gather(
-        expanded_sequence_ids,
-        dim=-1,
-        index=contact_boundary_idx[..., None],
-      ).squeeze(-1)
       hit_strength = contact["hit_strength"]
       foot_pos_w = contact["foot_pos_w"]
       env_ids = torch.arange(num_envs, device=env.device)
@@ -1932,25 +2198,6 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
         env, boundaries, valid_boundaries
       )
 
-      ground_sensor = env.scene[ground_contact_sensor_name]
-      assert isinstance(ground_sensor, ContactSensor), (
-        f"Safe stair touchdown requires ContactSensor {ground_contact_sensor_name!r}."
-      )
-      ground_first_contact = ground_sensor.compute_first_contact(dt=env.step_dt)
-      if ground_first_contact.shape[-1] != num_feet:
-        raise RuntimeError("Safe stair touchdown requires one channel per foot.")
-      ground_contact_time = ground_sensor.data.current_contact_time
-      if ground_contact_time is None:
-        ground_contact = ground_first_contact
-        ground_contact_time = ground_first_contact.float() * env.step_dt
-      else:
-        if ground_contact_time.shape[-1] != num_feet:
-          if ground_contact_time.shape[-1] % num_feet != 0:
-            raise RuntimeError("Safe stair touchdown requires one channel per foot.")
-          ground_contact_time = (
-            ground_contact_time.view(num_envs, num_feet, -1).max(dim=-1).values
-          )
-        ground_contact = ground_contact_time > 0.0
       self._current_ground_contact.copy_(ground_contact)
       self._current_contact_duration.copy_(ground_contact_time)
       following_before = self._stair_phase == 2
@@ -3074,6 +3321,19 @@ class toe_step_riser_slab_penalty(_StepBoundaryFootVolume):
       self._adjacent_support_pair_active.zero_()
       log["Metrics/toe_riser_contact_penalty_mean"] = zero
       log["Metrics/toe_riser_contact_time_mean"] = zero
+      log["Metrics/toe_riser_support_edge_brush_ignored_ratio"] = zero
+      log["Metrics/toe_riser_support_edge_brush_ignored_env_ratio"] = zero
+      log["Metrics/toe_riser_passed_brush_ignored_ratio"] = zero
+      log["Metrics/toe_riser_passed_brush_ignored_env_ratio"] = zero
+      log["Metrics/toe_riser_raw_vertical_contact_env_ratio"] = zero
+      log["Metrics/toe_riser_filtered_vertical_contact_env_ratio"] = zero
+      log["Metrics/toe_riser_launch_layer_brush_ignored_ratio"] = zero
+      log["Metrics/toe_riser_support_layer_brush_ignored_ratio"] = zero
+      log["Metrics/toe_riser_lower_passed_brush_ignored_ratio"] = zero
+      log["Metrics/toe_riser_intermediate_passed_brush_ignored_ratio"] = zero
+      log["Metrics/toe_riser_first_swing_frame_brush_ignored_ratio"] = zero
+      log["Metrics/toe_riser_passed_ground_contact_suppressed_ratio"] = zero
+      log["Metrics/toe_riser_passed_first_contact_suppressed_ratio"] = zero
       log["Metrics/stair_exit_candidate_ratio"] = zero
       log["Metrics/stair_exit_flat_step_ratio"] = zero
       log["Metrics/stair_exit_confirmed_ratio"] = zero
@@ -3100,10 +3360,11 @@ class toe_step_riser_approach_penalty(toe_step_riser_slab_penalty):
 
 
 class stair_stride_phase_reward:
-  """Score probe, confirmation, recovery, and hold events without shaping swings."""
+  """Distribute phase-target potential across swings and settle touchdown events."""
 
   def __init__(self, cfg: RewardTermCfg, env) -> None:
     self._last_event_id = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
+    self._init_swing_state(env)
     self._event_producer = None
     observation_group = cfg.params.get("event_observation_group_name")
     observation_term = cfg.params.get("event_observation_term_name")
@@ -3116,10 +3377,56 @@ class stair_stride_phase_reward:
         raise TypeError("Stride phase event observation term must be callable.")
       self._event_producer = term_cfg.func
 
+  def _init_swing_state(self, env) -> None:
+    self._swing_active = torch.zeros(
+      env.num_envs,
+      2,
+      device=env.device,
+      dtype=torch.bool,
+    )
+    self._swing_phase_snapshot = torch.full(
+      (env.num_envs, 2),
+      STAIR_STRIDE_EVENT_NONE,
+      device=env.device,
+      dtype=torch.long,
+    )
+    self._swing_target_snapshot = torch.zeros(env.num_envs, 2, device=env.device)
+    self._swing_reference_snapshot = torch.zeros_like(self._swing_target_snapshot)
+    self._swing_start_stride_snapshot = torch.zeros_like(self._swing_target_snapshot)
+    self._swing_last_quality = torch.zeros_like(self._swing_target_snapshot)
+    self._swing_pending_credit = torch.zeros_like(self._swing_target_snapshot)
+    self._swing_invalid_steps = torch.zeros(
+      env.num_envs,
+      2,
+      device=env.device,
+      dtype=torch.long,
+    )
+    self._swing_continuation_steps = torch.zeros_like(self._swing_invalid_steps)
+
+  def _ensure_swing_state(self, env) -> None:
+    active = getattr(self, "_swing_active", None)
+    env_device = torch.device(env.device)
+    if (
+      not isinstance(active, torch.Tensor)
+      or active.shape != (env.num_envs, 2)
+      or active.device != env_device
+    ):
+      self._init_swing_state(env)
+
   def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
     if env_ids is None:
       env_ids = slice(None)
     self._last_event_id[env_ids] = 0
+    if hasattr(self, "_swing_active"):
+      self._swing_active[env_ids] = False
+      self._swing_phase_snapshot[env_ids] = STAIR_STRIDE_EVENT_NONE
+      self._swing_target_snapshot[env_ids] = 0.0
+      self._swing_reference_snapshot[env_ids] = 0.0
+      self._swing_start_stride_snapshot[env_ids] = 0.0
+      self._swing_last_quality[env_ids] = 0.0
+      self._swing_pending_credit[env_ids] = 0.0
+      self._swing_invalid_steps[env_ids] = 0
+      self._swing_continuation_steps[env_ids] = 0
 
   @staticmethod
   def _probe_score(
@@ -3175,6 +3482,159 @@ class stair_stride_phase_reward:
     return directional_progress, target_progress, completion_progress, overshoot
 
   @staticmethod
+  def _probe_nonlinear_score(
+    actual: torch.Tensor,
+    previous: torch.Tensor,
+    target: torch.Tensor,
+    directional_progress: torch.Tensor,
+    target_progress: torch.Tensor,
+    completion_progress: torch.Tensor,
+    overshoot: torch.Tensor,
+    probe_scale: float,
+    growth_weight: float,
+    target_progress_weight: float,
+    completion_start: float,
+    completion_span: float,
+    completion_bonus: float,
+    convex_bonus: float,
+    post_target_decay_scale: float,
+    overshoot_penalty: float,
+  ) -> torch.Tensor:
+    """Keep the linear probe floor, then favor growth near the target."""
+    forward_target = target > previous + 1.0e-6
+    normalized_progress = directional_progress.clamp(0.0, 1.0)
+    nonlinear_bonus = (
+      float(convex_bonus)
+      * normalized_progress.square()
+      * forward_target.to(actual.dtype)
+    )
+    score = float(probe_scale) * (
+      float(growth_weight) * directional_progress
+      + float(target_progress_weight) * target_progress
+    )
+    score = score + float(completion_bonus) * completion_progress
+    score = score + nonlinear_bonus
+
+    target_distance = torch.relu(target - previous)
+    target_completion = (
+      (target_distance - float(completion_start)) / max(float(completion_span), 1.0e-6)
+    ).clamp(0.0, 1.0)
+    peak_score = actual.new_full(
+      actual.shape,
+      float(probe_scale) * (float(growth_weight) + float(target_progress_weight))
+      + float(convex_bonus),
+    )
+    peak_score = peak_score + float(completion_bonus) * target_completion
+    post_target_distance = torch.relu(actual - target)
+    post_target_decay = torch.exp(
+      -torch.square(post_target_distance / max(float(post_target_decay_scale), 1.0e-6))
+    )
+    past_forward_target = forward_target & (actual > target)
+    score = torch.where(
+      past_forward_target,
+      peak_score * post_target_decay,
+      score,
+    )
+    return score - float(overshoot_penalty) * overshoot
+
+  @staticmethod
+  def _probe_swing_quality(
+    stride: torch.Tensor,
+    start_stride: torch.Tensor,
+    target: torch.Tensor,
+    probe_scale: float,
+    growth_scale: float,
+    convex_bonus: float,
+    post_target_decay_scale: float,
+    reference_tolerance: float,
+    overshoot_penalty: float,
+  ) -> torch.Tensor:
+    desired_gap = (target - start_stride).clamp_min(1.0e-6)
+    progress = ((stride - start_stride) / desired_gap).clamp(0.0, 1.0)
+    quality = float(probe_scale) * progress + float(convex_bonus) * progress.square()
+
+    peak = float(probe_scale) + float(convex_bonus)
+    overrun = torch.relu(stride - target)
+    decay = torch.exp(
+      -torch.square(overrun / max(float(post_target_decay_scale), 1.0e-6))
+    )
+    overshoot = (
+      torch.relu(overrun - float(reference_tolerance))
+      / max(float(growth_scale), 1.0e-6)
+    ).clamp(0.0, 1.0)
+    overrun_quality = peak * decay - float(overshoot_penalty) * overshoot
+    return torch.where(stride > target, overrun_quality, quality)
+
+  @staticmethod
+  def _entry_swing_quality(
+    clearance: torch.Tensor,
+    entry_target: float,
+    entry_reward_scale: float,
+    probe_scale: float,
+    convex_bonus: float,
+    post_target_decay_scale: float,
+    overshoot_penalty: float,
+  ) -> torch.Tensor:
+    target = max(float(entry_target), 1.0e-6)
+    progress = (clearance / target).clamp(0.0, 1.0)
+    quality = float(probe_scale) * progress + float(convex_bonus) * progress.square()
+
+    overrun = torch.relu(clearance - target)
+    normalized_overrun = overrun / max(float(post_target_decay_scale), 1.0e-6)
+    decay = torch.exp(-normalized_overrun.square())
+    peak = float(probe_scale) + float(convex_bonus)
+    overrun_penalty = float(overshoot_penalty) * normalized_overrun.square().clamp(
+      0.0,
+      1.0,
+    )
+    overrun_quality = peak * decay - overrun_penalty
+    quality = torch.where(clearance > target, overrun_quality, quality)
+    return float(entry_reward_scale) * quality
+
+  @staticmethod
+  def _backoff_swing_quality(
+    stride: torch.Tensor,
+    target: torch.Tensor,
+    start_stride: torch.Tensor,
+    backoff_scale: float,
+    window_min: float,
+    window_max: float,
+    forward_decay_scale: float,
+    forward_penalty: float,
+  ) -> torch.Tensor:
+    fallback_window = max(float(window_max), max(float(window_min), 1.0e-6))
+    effective_start = torch.where(
+      start_stride < target - 1.0e-6,
+      start_stride,
+      target - fallback_window,
+    )
+    travel = (target - effective_start).clamp_min(1.0e-6)
+    progress = ((stride - effective_start) / travel).clamp(0.0, 1.0)
+    quality = float(backoff_scale) * (0.35 * progress + 0.65 * progress.square())
+
+    forward_overrun = torch.relu(stride - target)
+    normalized_overrun = forward_overrun / max(float(forward_decay_scale), 1.0e-6)
+    overrun_quality = (
+      float(backoff_scale) * torch.exp(-normalized_overrun.square())
+      - float(forward_penalty) * float(backoff_scale) * normalized_overrun.square()
+    )
+    overrun_quality = overrun_quality.clamp(
+      -float(backoff_scale),
+      float(backoff_scale),
+    )
+    return torch.where(stride > target, overrun_quality, quality)
+
+  @staticmethod
+  def _lock_swing_quality(
+    stride: torch.Tensor,
+    target: torch.Tensor,
+    lock_scale: float,
+    tolerance: float,
+  ) -> torch.Tensor:
+    normalized_error = (stride - target) / max(float(tolerance), 1.0e-6)
+    return float(lock_scale) * torch.exp(-torch.square(normalized_error))
+
+  @staticmethod
   def _backoff_components(
     actual: torch.Tensor,
     previous: torch.Tensor,
@@ -3184,9 +3644,10 @@ class stair_stride_phase_reward:
   ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     previous_error = torch.abs(previous - target)
     current_error = torch.abs(actual - target)
-    improvement = (
-      (previous_error - current_error) / max(progress_scale, 1.0e-6)
-    ).clamp(-1.0, 1.0)
+    progress_normalizer = previous_error.clamp_min(max(progress_scale, 1.0e-6))
+    improvement = ((previous_error - current_error) / progress_normalizer).clamp(
+      -1.0, 1.0
+    )
     tracking = (1.0 - current_error / max(tolerance, 1.0e-6)).clamp(0.0, 1.0)
     return improvement, tracking, current_error
 
@@ -3218,32 +3679,57 @@ class stair_stride_phase_reward:
   def __call__(
     self,
     env,
-    probe_scale: float = 2.0,
+    probe_scale: float = 3.0,
     confirmation_scale: float = 1.0,
-    backoff_scale: float = 2.4,
-    lock_scale: float = 1.2,
+    backoff_scale: float = 4.0,
+    lock_scale: float = 2.0,
     probe_growth_scale: float = 0.05,
     probe_reference_tolerance: float = 0.025,
     probe_growth_weight: float = 0.50,
     probe_target_progress_weight: float = 0.50,
     probe_completion_start: float = 0.03,
     probe_completion_span: float = 0.02,
-    probe_completion_bonus: float = 0.35,
+    probe_completion_bonus: float = 1.00,
+    probe_convex_bonus: float = 2.50,
+    probe_post_target_decay_scale: float = 0.012,
     probe_overshoot_penalty: float = 1.0,
+    probe_stall_penalty: float = 0.50,
+    probe_swing_fraction: float = 0.70,
+    swing_invalid_grace_steps: int = 2,
+    entry_reward_scale: float = 0.75,
+    entry_swing_fraction: float = 0.70,
+    entry_target: float = 0.05,
+    entry_target_tolerance: float = 0.01,
+    entry_completion_bonus: float = 1.00,
+    entry_post_target_decay_scale: float = 0.010,
+    entry_overshoot_penalty: float = 1.0,
     backoff_progress_scale: float = 0.03,
     backoff_tolerance: float = 0.06,
-    backoff_progress_weight: float = 0.80,
-    backoff_proximity_weight: float = 0.20,
-    backoff_completion_bonus: float = 0.50,
+    backoff_progress_weight: float = 0.65,
+    backoff_proximity_weight: float = 0.35,
+    backoff_overretreat_penalty: float = 1.0,
+    backoff_overretreat_tolerance: float = 0.020,
+    backoff_completion_bonus: float = 1.00,
+    backoff_stall_penalty: float = 0.75,
+    backoff_swing_fraction: float = 0.80,
+    backoff_swing_window_min: float = 0.025,
+    backoff_swing_window_max: float = 0.050,
+    backoff_forward_decay_scale: float = 0.010,
+    backoff_forward_penalty: float = 0.50,
     lock_progress_scale: float = 0.03,
     lock_tolerance: float = 0.05,
+    lock_swing_fraction: float = 0.70,
     lock_progress_weight: float = 0.40,
     lock_tracking_weight: float = 0.60,
+    intent_tolerance: float = 0.015,
     second_hit_penalty_refund_weight: float = 0.0,
     event_observation_group_name: str | None = None,
     event_observation_term_name: str | None = None,
   ) -> torch.Tensor:
     del event_observation_group_name, event_observation_term_name
+    if swing_invalid_grace_steps < 0:
+      raise ValueError("swing_invalid_grace_steps must be non-negative.")
+    self._ensure_swing_state(env)
     if self._event_producer is not None:
       self._event_producer(env)
 
@@ -3252,6 +3738,8 @@ class stair_stride_phase_reward:
     actual = env.extras.get(STAIR_STRIDE_PHASE_EVENT_ACTUAL_KEY)
     previous = env.extras.get(STAIR_STRIDE_PHASE_EVENT_PREVIOUS_KEY)
     target = env.extras.get(STAIR_STRIDE_PHASE_EVENT_TARGET_KEY)
+    event_intent = env.extras.get(STAIR_STRIDE_PHASE_EVENT_INTENT_KEY)
+    event_foot_id = env.extras.get(STAIR_STRIDE_PHASE_EVENT_FOOT_ID_KEY)
     completed = env.extras.get(STAIR_STRIDE_PHASE_EVENT_COMPLETED_KEY)
     collision_penalty = env.extras.get(STAIR_STRIDE_PHASE_EVENT_COLLISION_PENALTY_KEY)
     if not all(
@@ -3273,12 +3761,69 @@ class stair_stride_phase_reward:
     actual = actual.to(device=env.device, dtype=torch.float32)
     previous = previous.to(device=env.device, dtype=torch.float32)
     target = target.to(device=env.device, dtype=torch.float32)
+    if isinstance(event_intent, torch.Tensor):
+      event_intent = event_intent.to(device=env.device, dtype=torch.long)
+    else:
+      event_intent = torch.full(
+        (env.num_envs,),
+        STAIR_STRIDE_INTENT_HOLD,
+        device=env.device,
+        dtype=torch.long,
+      )
+    if isinstance(event_foot_id, torch.Tensor):
+      event_foot_id = event_foot_id.to(device=env.device, dtype=torch.long)
+    else:
+      event_foot_id = torch.full(
+        (env.num_envs,),
+        -1,
+        device=env.device,
+        dtype=torch.long,
+      )
     completed = completed.to(device=env.device, dtype=torch.bool)
     collision_penalty = collision_penalty.to(device=env.device, dtype=torch.float32)
+    swing_stride = env.extras.get(STAIR_STRIDE_SWING_STRIDE_KEY)
+    swing_valid = env.extras.get(STAIR_STRIDE_SWING_VALID_KEY)
+    control_phase = env.extras.get(STAIR_STRIDE_CONTROL_PHASE_KEY)
+    control_target = env.extras.get(STAIR_STRIDE_CONTROL_TARGET_KEY)
+    control_reference = env.extras.get(STAIR_STRIDE_CONTROL_REFERENCE_KEY)
+    control_valid = env.extras.get(STAIR_STRIDE_CONTROL_VALID_KEY)
+    control_foot_mask = env.extras.get(STAIR_STRIDE_CONTROL_FOOT_MASK_KEY)
+    if not isinstance(swing_stride, torch.Tensor):
+      swing_stride = torch.zeros(env.num_envs, 2, device=env.device)
+    if not isinstance(swing_valid, torch.Tensor):
+      swing_valid = torch.zeros(env.num_envs, 2, device=env.device, dtype=torch.bool)
+    if not isinstance(control_phase, torch.Tensor):
+      control_phase = torch.full(
+        (env.num_envs,),
+        STAIR_STRIDE_EVENT_NONE,
+        device=env.device,
+        dtype=torch.long,
+      )
+    if not isinstance(control_target, torch.Tensor):
+      control_target = torch.zeros(env.num_envs, device=env.device)
+    if not isinstance(control_reference, torch.Tensor):
+      control_reference = torch.zeros(env.num_envs, device=env.device)
+    if not isinstance(control_valid, torch.Tensor):
+      control_valid = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+    if not isinstance(control_foot_mask, torch.Tensor):
+      control_foot_mask = torch.ones(
+        env.num_envs,
+        2,
+        device=env.device,
+        dtype=torch.bool,
+      )
+    swing_stride = swing_stride.to(device=env.device, dtype=torch.float32)
+    swing_valid = swing_valid.to(device=env.device, dtype=torch.bool)
+    control_phase = control_phase.to(device=env.device, dtype=torch.long)
+    control_target = control_target.to(device=env.device, dtype=torch.float32)
+    control_reference = control_reference.to(device=env.device, dtype=torch.float32)
+    control_valid = control_valid.to(device=env.device, dtype=torch.bool)
+    control_foot_mask = control_foot_mask.to(device=env.device, dtype=torch.bool)
     new_event = event_id != self._last_event_id
     self._last_event_id.copy_(event_id)
 
     probe = event_type == STAIR_STRIDE_EVENT_PROBE_TOUCHDOWN
+    entry = event_type == STAIR_STRIDE_EVENT_ENTRY_TOUCHDOWN
     confirmation = event_type == STAIR_STRIDE_EVENT_VALID_SECOND_HIT
     backoff = event_type == STAIR_STRIDE_EVENT_BACKOFF_TOUCHDOWN
     lock = event_type == STAIR_STRIDE_EVENT_LOCK_TOUCHDOWN
@@ -3305,16 +3850,26 @@ class stair_stride_phase_reward:
     probe_overshot = probe_direction * (actual - target) > float(
       probe_reference_tolerance
     )
-    probe_score = float(probe_scale) * (
-      float(probe_growth_weight) * probe_progress
-      + float(probe_target_progress_weight) * probe_tracking
+    probe_score = self._probe_nonlinear_score(
+      actual,
+      previous,
+      target,
+      probe_progress,
+      probe_tracking,
+      probe_completion_progress,
+      probe_overshoot_penalty_score,
+      probe_scale,
+      probe_growth_weight,
+      probe_target_progress_weight,
+      probe_completion_start,
+      probe_completion_span,
+      probe_completion_bonus,
+      probe_convex_bonus,
+      probe_post_target_decay_scale,
+      probe_overshoot_penalty,
     )
-    probe_score = (
-      probe_score + float(probe_completion_bonus) * probe_completion_progress
-    )
-    probe_score = (
-      probe_score - float(probe_overshoot_penalty) * probe_overshoot_penalty_score
-    )
+    probe_stalled = probe & (probe_growth <= 1.0e-4)
+    probe_score = probe_score - probe_stalled.float() * float(probe_stall_penalty)
     backoff_progress, backoff_tracking, backoff_error = self._backoff_components(
       actual,
       previous,
@@ -3323,12 +3878,52 @@ class stair_stride_phase_reward:
       backoff_tolerance,
     )
     backoff_complete = backoff & completed
-    backoff_score = float(backoff_scale) * (
-      float(backoff_progress_weight) * backoff_progress
-      + float(backoff_proximity_weight) * backoff_tracking
+    backoff_score = self._backoff_swing_quality(
+      actual,
+      target,
+      previous,
+      backoff_scale,
+      backoff_swing_window_min,
+      backoff_swing_window_max,
+      backoff_forward_decay_scale,
+      backoff_forward_penalty,
     )
-    backoff_score = backoff_score + backoff_complete.float() * float(
-      backoff_completion_bonus
+    backoff_overretreat = (
+      torch.relu(target - actual - float(backoff_overretreat_tolerance))
+      / max(float(backoff_overretreat_tolerance), 1.0e-6)
+    ).clamp(0.0, 1.0)
+    backoff_score = backoff_score - (
+      float(backoff_scale) * float(backoff_overretreat_penalty) * backoff_overretreat
+    )
+    backoff_completion_decay = torch.exp(
+      -torch.square(
+        torch.relu(actual - target) / max(float(backoff_forward_decay_scale), 1.0e-6)
+      )
+    )
+    backoff_score = backoff_score + (
+      backoff_complete.float()
+      * float(backoff_completion_bonus)
+      * backoff_completion_decay
+    )
+    backoff_stalled = backoff & ~backoff_complete & (backoff_progress <= 1.0e-4)
+    backoff_score = backoff_score - backoff_stalled.float() * float(
+      backoff_stall_penalty
+    )
+    entry_score = self._entry_swing_quality(
+      actual,
+      entry_target,
+      entry_reward_scale,
+      probe_scale,
+      probe_convex_bonus,
+      entry_post_target_decay_scale,
+      entry_overshoot_penalty,
+    )
+    entry_complete = entry & completed
+    entry_score = entry_score + (
+      entry_complete.float() * float(entry_reward_scale) * float(entry_completion_bonus)
+    )
+    entry_overshot = entry & (
+      actual > float(entry_target) + float(entry_target_tolerance)
     )
     lock_progress, lock_tracking = self._lock_components(
       actual,
@@ -3348,6 +3943,11 @@ class stair_stride_phase_reward:
       score,
     )
     score = torch.where(
+      entry,
+      entry_score,
+      score,
+    )
+    score = torch.where(
       confirmation,
       torch.full_like(score, float(confirmation_scale)),
       score,
@@ -3363,20 +3963,323 @@ class stair_stride_phase_reward:
       score,
     )
 
-    dt = max(float(env.step_dt), 1.0e-6)
+    foot_ids = torch.arange(2, device=env.device, dtype=torch.long)
+    event_foot_match = event_foot_id[:, None] == foot_ids[None, :]
+    event_foot_known = (event_foot_id >= 0) & (event_foot_id < 2)
+    event_foot_match = event_foot_match & event_foot_known[:, None]
+    event_closes_swing = (
+      new_event & (entry | probe | backoff | lock | confirmation) & event_foot_known
+    )
+    event_close_mask = event_foot_match & event_closes_swing[:, None]
+
+    phase_is_entry = control_phase == STAIR_STRIDE_EVENT_ENTRY_TOUCHDOWN
+    phase_is_probe = control_phase == STAIR_STRIDE_EVENT_PROBE_TOUCHDOWN
+    phase_is_backoff = control_phase == STAIR_STRIDE_EVENT_BACKOFF_TOUCHDOWN
+    phase_is_lock = control_phase == STAIR_STRIDE_EVENT_LOCK_TOUCHDOWN
+    live_control = control_valid & (
+      phase_is_entry | phase_is_probe | phase_is_backoff | phase_is_lock
+    )
+    live_control_by_foot = live_control[:, None] & control_foot_mask & swing_valid
+    start_blocked_by_event = event_foot_match & (new_event & confirmation)[:, None]
+    swing_start = ~self._swing_active & live_control_by_foot & ~start_blocked_by_event
+    self._swing_active = self._swing_active | swing_start
+    self._swing_phase_snapshot = torch.where(
+      swing_start,
+      control_phase[:, None],
+      self._swing_phase_snapshot,
+    )
+    self._swing_target_snapshot = torch.where(
+      swing_start,
+      control_target[:, None],
+      self._swing_target_snapshot,
+    )
+    self._swing_reference_snapshot = torch.where(
+      swing_start,
+      control_reference[:, None],
+      self._swing_reference_snapshot,
+    )
+    self._swing_start_stride_snapshot = torch.where(
+      swing_start,
+      swing_stride,
+      self._swing_start_stride_snapshot,
+    )
+    self._swing_pending_credit = torch.where(
+      swing_start,
+      torch.zeros_like(self._swing_pending_credit),
+      self._swing_pending_credit,
+    )
+    self._swing_invalid_steps = torch.where(
+      swing_start,
+      torch.zeros_like(self._swing_invalid_steps),
+      self._swing_invalid_steps,
+    )
+    self._swing_continuation_steps = torch.where(
+      swing_start,
+      torch.zeros_like(self._swing_continuation_steps),
+      self._swing_continuation_steps,
+    )
+
+    snapshot_entry = self._swing_phase_snapshot == STAIR_STRIDE_EVENT_ENTRY_TOUCHDOWN
+    snapshot_probe = self._swing_phase_snapshot == STAIR_STRIDE_EVENT_PROBE_TOUCHDOWN
+    snapshot_backoff = (
+      self._swing_phase_snapshot == STAIR_STRIDE_EVENT_BACKOFF_TOUCHDOWN
+    )
+    snapshot_lock = self._swing_phase_snapshot == STAIR_STRIDE_EVENT_LOCK_TOUCHDOWN
+    same_phase_live = control_phase[:, None] == self._swing_phase_snapshot
+    swing_score_valid = (
+      self._swing_active
+      & live_control_by_foot
+      & same_phase_live
+      & (snapshot_entry | snapshot_probe | snapshot_backoff | snapshot_lock)
+    )
+    entry_swing_quality = self._entry_swing_quality(
+      swing_stride,
+      entry_target,
+      entry_reward_scale,
+      probe_scale,
+      probe_convex_bonus,
+      entry_post_target_decay_scale,
+      entry_overshoot_penalty,
+    )
+    probe_swing_quality = self._probe_swing_quality(
+      swing_stride,
+      self._swing_start_stride_snapshot,
+      self._swing_target_snapshot,
+      probe_scale,
+      probe_growth_scale,
+      probe_convex_bonus,
+      probe_post_target_decay_scale,
+      probe_reference_tolerance,
+      probe_overshoot_penalty,
+    )
+    backoff_swing_quality = self._backoff_swing_quality(
+      swing_stride,
+      self._swing_target_snapshot,
+      self._swing_start_stride_snapshot,
+      backoff_scale,
+      backoff_swing_window_min,
+      backoff_swing_window_max,
+      backoff_forward_decay_scale,
+      backoff_forward_penalty,
+    )
+    lock_swing_quality = self._lock_swing_quality(
+      swing_stride,
+      self._swing_target_snapshot,
+      lock_scale,
+      lock_tolerance,
+    )
+    swing_quality = torch.where(
+      snapshot_entry,
+      entry_swing_quality,
+      torch.where(
+        snapshot_probe,
+        probe_swing_quality,
+        torch.where(
+          snapshot_backoff,
+          backoff_swing_quality,
+          torch.where(
+            snapshot_lock, lock_swing_quality, torch.zeros_like(swing_stride)
+          ),
+        ),
+      ),
+    )
+    swing_fraction = torch.where(
+      snapshot_entry,
+      torch.full_like(swing_stride, float(entry_swing_fraction)),
+      torch.where(
+        snapshot_probe,
+        torch.full_like(swing_stride, float(probe_swing_fraction)),
+        torch.where(
+          snapshot_backoff,
+          torch.full_like(swing_stride, float(backoff_swing_fraction)),
+          torch.where(
+            snapshot_lock,
+            torch.full_like(swing_stride, float(lock_swing_fraction)),
+            torch.zeros_like(swing_stride),
+          ),
+        ),
+      ),
+    )
+    previous_swing_quality = torch.where(
+      swing_start,
+      swing_quality,
+      self._swing_last_quality,
+    )
+    swing_delta = torch.where(
+      swing_score_valid & ~swing_start,
+      swing_fraction * (swing_quality - previous_swing_quality),
+      torch.zeros_like(swing_quality),
+    )
+    swing_continuation = swing_score_valid & ~swing_start
+    swing_quality_changed = swing_continuation & (
+      torch.abs(swing_quality - previous_swing_quality) > 1.0e-6
+    )
+    self._swing_continuation_steps = torch.where(
+      swing_continuation,
+      self._swing_continuation_steps + 1,
+      self._swing_continuation_steps,
+    )
+    self._swing_pending_credit = torch.where(
+      swing_score_valid,
+      self._swing_pending_credit + swing_delta,
+      self._swing_pending_credit,
+    )
+    self._swing_last_quality = torch.where(
+      swing_score_valid,
+      swing_quality,
+      self._swing_last_quality,
+    )
+
     collision_refund = torch.where(
       confirmation,
       collision_penalty * float(second_hit_penalty_refund_weight),
       torch.zeros_like(collision_penalty),
     )
-    reward = score / dt + collision_refund
-    reward = torch.where(new_event, reward, torch.zeros_like(reward))
+    pending_for_event = (self._swing_pending_credit * event_foot_match.float()).sum(
+      dim=-1
+    )
+    residual_event = new_event & (entry | probe | backoff | lock) & event_foot_known
+    event_score = torch.where(residual_event, score - pending_for_event, score)
+    invalid_now = self._swing_active & ~swing_score_valid & ~event_close_mask
+    self._swing_invalid_steps = torch.where(
+      swing_score_valid | event_close_mask,
+      torch.zeros_like(self._swing_invalid_steps),
+      torch.where(
+        invalid_now,
+        self._swing_invalid_steps + 1,
+        self._swing_invalid_steps,
+      ),
+    )
+    invalid_cancel = invalid_now & (
+      self._swing_invalid_steps > int(swing_invalid_grace_steps)
+    )
+    invalid_grace_hold = invalid_now & ~invalid_cancel
+    swing_active_before_close = self._swing_active
+    closed_continuation_count = (
+      self._swing_continuation_steps.float() * event_close_mask.float()
+    ).sum() / event_close_mask.float().sum().clamp_min(1.0)
+    closed_with_two_continuations = (
+      (self._swing_continuation_steps >= 2).float() * event_close_mask.float()
+    ).sum() / event_close_mask.float().sum().clamp_min(1.0)
+    cancel_score_by_foot = torch.where(
+      invalid_cancel,
+      -torch.relu(self._swing_pending_credit),
+      torch.zeros_like(self._swing_pending_credit),
+    )
+    cancel_score = cancel_score_by_foot.sum(dim=-1)
+    close_mask = event_close_mask | invalid_cancel
+    self._swing_active = self._swing_active & ~close_mask
+    self._swing_phase_snapshot = torch.where(
+      close_mask,
+      torch.full_like(self._swing_phase_snapshot, STAIR_STRIDE_EVENT_NONE),
+      self._swing_phase_snapshot,
+    )
+    self._swing_target_snapshot = torch.where(
+      close_mask,
+      torch.zeros_like(self._swing_target_snapshot),
+      self._swing_target_snapshot,
+    )
+    self._swing_reference_snapshot = torch.where(
+      close_mask,
+      torch.zeros_like(self._swing_reference_snapshot),
+      self._swing_reference_snapshot,
+    )
+    self._swing_start_stride_snapshot = torch.where(
+      close_mask,
+      torch.zeros_like(self._swing_start_stride_snapshot),
+      self._swing_start_stride_snapshot,
+    )
+    self._swing_last_quality = torch.where(
+      close_mask,
+      torch.zeros_like(self._swing_last_quality),
+      self._swing_last_quality,
+    )
+    self._swing_pending_credit = torch.where(
+      close_mask,
+      torch.zeros_like(self._swing_pending_credit),
+      self._swing_pending_credit,
+    )
+    self._swing_invalid_steps = torch.where(
+      close_mask,
+      torch.zeros_like(self._swing_invalid_steps),
+      self._swing_invalid_steps,
+    )
+    self._swing_continuation_steps = torch.where(
+      close_mask,
+      torch.zeros_like(self._swing_continuation_steps),
+      self._swing_continuation_steps,
+    )
+
+    dt = max(float(env.step_dt), 1.0e-6)
+    swing_delta_score = swing_delta.sum(dim=-1)
+    reward = torch.where(
+      new_event,
+      event_score / dt + collision_refund,
+      torch.zeros_like(score),
+    )
+    reward = reward + (swing_delta_score + cancel_score) / dt
 
     log = env.extras.get("log")
     if isinstance(log, dict):
+      current_ground_contact = env.extras.get(STAIR_CURRENT_GROUND_CONTACT_KEY)
+      if not isinstance(current_ground_contact, torch.Tensor):
+        current_ground_contact = torch.zeros_like(swing_valid)
+      else:
+        current_ground_contact = current_ground_contact.to(
+          device=env.device,
+          dtype=torch.bool,
+        )
+      intended_control_by_foot = live_control[:, None] & control_foot_mask
+      control_count = intended_control_by_foot.float().sum().clamp_min(1.0)
+      continuation_count = swing_continuation.float().sum().clamp_min(1.0)
+      log["Metrics/stair_stride_phase_swing_control_active_ratio"] = (
+        live_control.float().mean()
+      )
+      log["Metrics/stair_stride_phase_swing_valid_ratio"] = (
+        live_control_by_foot.float().sum() / control_count
+      )
+      log["Metrics/stair_stride_phase_swing_start_ratio"] = swing_start.float().mean()
+      log["Metrics/stair_stride_phase_swing_active_ratio"] = (
+        swing_active_before_close.float().mean()
+      )
+      log["Metrics/stair_stride_phase_swing_continuation_ratio"] = (
+        swing_continuation.float().mean()
+      )
+      log["Metrics/stair_stride_phase_swing_quality_changed_ratio"] = (
+        swing_quality_changed.float().sum() / continuation_count
+      )
+      log["Metrics/stair_stride_phase_swing_ground_contact_block_ratio"] = (
+        intended_control_by_foot & current_ground_contact
+      ).float().sum() / control_count
+      active_count = swing_active_before_close.float().sum().clamp_min(1.0)
+      log["Metrics/stair_stride_phase_swing_active_ground_contact_ratio"] = (
+        swing_active_before_close & current_ground_contact
+      ).float().sum() / active_count
+      log["Metrics/stair_stride_phase_swing_grace_hold_ratio"] = (
+        invalid_grace_hold.float().mean()
+      )
+      log["Metrics/stair_stride_phase_swing_closed_continuation_steps_mean"] = (
+        closed_continuation_count
+      )
+      log["Metrics/stair_stride_phase_swing_closed_ge2_continuation_ratio"] = (
+        closed_with_two_continuations
+      )
+      log["Metrics/stair_stride_phase_entry_swing_continuation_ratio"] = (
+        (swing_continuation & snapshot_entry).float().mean()
+      )
+      log["Metrics/stair_stride_phase_probe_swing_continuation_ratio"] = (
+        (swing_continuation & snapshot_probe).float().mean()
+      )
+      log["Metrics/stair_stride_phase_backoff_swing_continuation_ratio"] = (
+        (swing_continuation & snapshot_backoff).float().mean()
+      )
+      log["Metrics/stair_stride_phase_lock_swing_continuation_ratio"] = (
+        (swing_continuation & snapshot_lock).float().mean()
+      )
       event_f = new_event.float()
       event_count = event_f.sum().clamp_min(1.0)
       log["Metrics/stair_stride_phase_event_ratio"] = event_f.mean()
+      log["Metrics/stair_stride_phase_entry_ratio"] = (new_event & entry).float().mean()
       log["Metrics/stair_stride_phase_probe_ratio"] = (new_event & probe).float().mean()
       log["Metrics/stair_stride_phase_confirmation_ratio"] = (
         (new_event & confirmation).float().mean()
@@ -3388,12 +4291,48 @@ class stair_stride_phase_reward:
       log["Metrics/stair_stride_phase_score_mean"] = (
         score * event_f
       ).sum() / event_count
+      target_error = target - previous
+      expected_intent = torch.full_like(event_intent, STAIR_STRIDE_INTENT_HOLD)
+      expected_intent = torch.where(
+        target_error > 1.0e-4,
+        torch.full_like(expected_intent, STAIR_STRIDE_INTENT_FARTHER),
+        expected_intent,
+      )
+      expected_intent = torch.where(
+        target_error < -1.0e-4,
+        torch.full_like(expected_intent, STAIR_STRIDE_INTENT_CLOSER),
+        expected_intent,
+      )
+      expected_intent = torch.where(
+        lock & (torch.abs(target_error) <= float(intent_tolerance)),
+        torch.full_like(expected_intent, STAIR_STRIDE_INTENT_HOLD),
+        expected_intent,
+      )
+      alignment_event_f = (new_event & (entry | probe | backoff | lock)).float()
+      alignment_count = alignment_event_f.sum().clamp_min(1.0)
+      log["Metrics/stair_stride_phase_intent_reward_alignment_ratio"] = (
+        (event_intent == expected_intent).float() * alignment_event_f
+      ).sum() / alignment_count
       log["Metrics/stair_stride_phase_actual_mean"] = (
         actual * event_f
       ).sum() / event_count
       log["Metrics/stair_stride_phase_target_mean"] = (
         target * event_f
       ).sum() / event_count
+      entry_event_f = (new_event & entry).float()
+      entry_count = entry_event_f.sum().clamp_min(1.0)
+      log["Metrics/stair_stride_phase_entry_score_mean"] = (
+        score * entry_event_f
+      ).sum() / entry_count
+      log["Metrics/stair_stride_phase_entry_clearance_mean"] = (
+        actual * entry_event_f
+      ).sum() / entry_count
+      log["Metrics/stair_stride_phase_entry_completion_ratio"] = (
+        entry_complete.float() * entry_event_f
+      ).sum() / entry_count
+      log["Metrics/stair_stride_phase_entry_overshoot_ratio"] = (
+        entry_overshot.float() * entry_event_f
+      ).sum() / entry_count
       probe_event_f = (new_event & probe).float()
       probe_count = probe_event_f.sum().clamp_min(1.0)
       log["Metrics/stair_stride_phase_probe_growth_mean"] = (
@@ -3431,6 +4370,9 @@ class stair_stride_phase_reward:
       log["Metrics/stair_stride_phase_probe_completion_ratio"] = (
         probe_complete.float() * probe_event_f
       ).sum() / probe_count
+      log["Metrics/stair_stride_phase_probe_stall_ratio"] = (
+        probe_stalled.float() * probe_event_f
+      ).sum() / probe_count
       confirmation_event_f = (new_event & confirmation).float()
       confirmation_count = confirmation_event_f.sum().clamp_min(1.0)
       log["Metrics/stair_stride_phase_confirmation_score_mean"] = (
@@ -3453,6 +4395,9 @@ class stair_stride_phase_reward:
       log["Metrics/stair_stride_phase_backoff_completion_ratio"] = (
         backoff_complete.float() * backoff_event_f
       ).sum() / backoff_count
+      log["Metrics/stair_stride_phase_backoff_stall_ratio"] = (
+        backoff_stalled.float() * backoff_event_f
+      ).sum() / backoff_count
       lock_event_f = (new_event & lock).float()
       lock_count = lock_event_f.sum().clamp_min(1.0)
       log["Metrics/stair_stride_phase_lock_score_mean"] = (
@@ -3470,6 +4415,52 @@ class stair_stride_phase_reward:
       log["Metrics/stair_stride_phase_collision_refund_mean"] = (
         collision_refund * event_f
       ).sum() / event_count
+      entry_swing_f = (swing_score_valid & snapshot_entry).float()
+      entry_swing_count = entry_swing_f.sum().clamp_min(1.0)
+      probe_swing_f = (swing_score_valid & snapshot_probe).float()
+      probe_swing_count = probe_swing_f.sum().clamp_min(1.0)
+      backoff_swing_f = (swing_score_valid & snapshot_backoff).float()
+      backoff_swing_count = backoff_swing_f.sum().clamp_min(1.0)
+      log["Metrics/stair_stride_phase_entry_swing_delta_mean"] = (
+        swing_delta * entry_swing_f
+      ).sum() / entry_swing_count
+      log["Metrics/stair_stride_phase_entry_pending_credit_mean"] = (
+        self._swing_pending_credit * (self._swing_active & snapshot_entry).float()
+      ).sum() / (self._swing_active & snapshot_entry).float().sum().clamp_min(1.0)
+      log["Metrics/stair_stride_phase_entry_negative_delta_ratio"] = (
+        (swing_delta < 0.0) & swing_score_valid & snapshot_entry
+      ).float().sum() / entry_swing_count
+      log["Metrics/stair_stride_phase_probe_swing_delta_mean"] = (
+        swing_delta * probe_swing_f
+      ).sum() / probe_swing_count
+      log["Metrics/stair_stride_phase_probe_pending_credit_mean"] = (
+        self._swing_pending_credit * (self._swing_active & snapshot_probe).float()
+      ).sum() / (self._swing_active & snapshot_probe).float().sum().clamp_min(1.0)
+      log["Metrics/stair_stride_phase_probe_negative_delta_ratio"] = (
+        (swing_delta < 0.0) & swing_score_valid & snapshot_probe
+      ).float().sum() / probe_swing_count
+      log["Metrics/stair_stride_phase_backoff_swing_delta_mean"] = (
+        swing_delta * backoff_swing_f
+      ).sum() / backoff_swing_count
+      log["Metrics/stair_stride_phase_backoff_pending_credit_mean"] = (
+        self._swing_pending_credit * (self._swing_active & snapshot_backoff).float()
+      ).sum() / (self._swing_active & snapshot_backoff).float().sum().clamp_min(1.0)
+      log["Metrics/stair_stride_phase_backoff_over_target_ratio"] = (
+        (swing_stride > self._swing_target_snapshot)
+        & swing_score_valid
+        & snapshot_backoff
+      ).float().sum() / backoff_swing_count
+      log["Metrics/stair_stride_phase_swing_credit_commit_ratio"] = (
+        event_close_mask.any(dim=-1).float().mean()
+      )
+      log["Metrics/stair_stride_phase_swing_credit_cancel_ratio"] = (
+        invalid_cancel.any(dim=-1).float().mean()
+      )
+      swing_abs = swing_delta_score.abs().sum()
+      event_abs = (event_score * event_f).abs().sum() + cancel_score.abs().sum()
+      log["Metrics/stair_stride_phase_swing_reward_share"] = swing_abs / (
+        swing_abs + event_abs
+      ).clamp_min(1.0e-6)
     return reward
 
 
@@ -3958,7 +4949,14 @@ class stair_tread_landing_reward(_StepBoundaryFootVolume):
       torch.abs(v) <= 0.5 * (z_high - z_low) + v_margin
     )
     inside_slab = (s >= -surface_tol) & (s <= slab_depth)
-    valid = valid_boundaries[:, None, None, :]
+    if valid_boundaries.ndim == 2:
+      valid = valid_boundaries[:, None, None, :]
+    elif valid_boundaries.ndim == 3:
+      valid = valid_boundaries[:, :, None, :]
+    else:
+      raise ValueError(
+        "valid_boundaries must have shape [env, boundary] or [env, foot, boundary]."
+      )
     return torch.any(valid & inside_face & inside_slab, dim=(2, 3))
 
   def __call__(

@@ -104,6 +104,8 @@ STAIR_STRIDE_PHASE_EVENT_TYPE_KEY = "slow_latent_stair_stride_phase_event_type"
 STAIR_STRIDE_PHASE_EVENT_ACTUAL_KEY = "slow_latent_stair_stride_phase_event_actual"
 STAIR_STRIDE_PHASE_EVENT_PREVIOUS_KEY = "slow_latent_stair_stride_phase_event_previous"
 STAIR_STRIDE_PHASE_EVENT_TARGET_KEY = "slow_latent_stair_stride_phase_event_target"
+STAIR_STRIDE_PHASE_EVENT_INTENT_KEY = "slow_latent_stair_stride_phase_event_intent"
+STAIR_STRIDE_PHASE_EVENT_FOOT_ID_KEY = "slow_latent_stair_stride_phase_event_foot_id"
 STAIR_STRIDE_PHASE_EVENT_COMPLETED_KEY = (
   "slow_latent_stair_stride_phase_event_completed"
 )
@@ -111,12 +113,22 @@ STAIR_STRIDE_PHASE_EVENT_COLLISION_PENALTY_KEY = (
   "slow_latent_stair_stride_phase_event_collision_penalty"
 )
 STAIR_TOE_RISER_TOTAL_PENALTY_KEY = "slow_latent_stair_toe_riser_total_penalty"
-
+STAIR_STRIDE_SWING_STRIDE_KEY = "slow_latent_stair_stride_swing_stride"
+STAIR_STRIDE_SWING_VALID_KEY = "slow_latent_stair_stride_swing_valid"
+STAIR_STRIDE_CONTROL_PHASE_KEY = "slow_latent_stair_stride_control_phase"
+STAIR_STRIDE_CONTROL_TARGET_KEY = "slow_latent_stair_stride_control_target"
+STAIR_STRIDE_CONTROL_REFERENCE_KEY = "slow_latent_stair_stride_control_reference"
+STAIR_STRIDE_CONTROL_VALID_KEY = "slow_latent_stair_stride_control_valid"
+STAIR_STRIDE_CONTROL_FOOT_MASK_KEY = "slow_latent_stair_stride_control_foot_mask"
 STAIR_STRIDE_EVENT_NONE = 0
 STAIR_STRIDE_EVENT_PROBE_TOUCHDOWN = 1
 STAIR_STRIDE_EVENT_VALID_SECOND_HIT = 2
 STAIR_STRIDE_EVENT_BACKOFF_TOUCHDOWN = 3
 STAIR_STRIDE_EVENT_LOCK_TOUCHDOWN = 4
+STAIR_STRIDE_EVENT_ENTRY_TOUCHDOWN = 5
+STAIR_STRIDE_INTENT_FARTHER = 0
+STAIR_STRIDE_INTENT_CLOSER = 1
+STAIR_STRIDE_INTENT_HOLD = 2
 _STAIR_SHAPE_CACHE_KEY = "_privileged_stair_shape_cache"
 
 
@@ -129,6 +141,61 @@ def stride_target_interval_contains(
   """Return whether a stride is inside an asymmetric target interval."""
   return (actual >= target - float(lower_tolerance)) & (
     actual <= target + float(upper_tolerance)
+  )
+
+
+def support_edge_toe_brush_mask(
+  toe_contact_by_slot: torch.Tensor,
+  contact_layers: torch.Tensor,
+  contact_sequence_ids: torch.Tensor,
+  ground_contact: torch.Tensor,
+  foot_layers: torch.Tensor,
+  foot_layers_valid: torch.Tensor,
+  sequence_ids: torch.Tensor,
+  swing_foot_ids: torch.Tensor,
+  swing_active: torch.Tensor,
+) -> torch.Tensor:
+  """Identify swing-toe contacts with already passed sequence-local risers."""
+  if (
+    toe_contact_by_slot.ndim != 3
+    or toe_contact_by_slot.shape[1] != 2
+    or contact_layers.shape != toe_contact_by_slot.shape
+    or contact_sequence_ids.shape != toe_contact_by_slot.shape
+    or ground_contact.shape != toe_contact_by_slot.shape[:2]
+    or foot_layers.shape != toe_contact_by_slot.shape[:2]
+    or foot_layers_valid.shape != toe_contact_by_slot.shape[:2]
+    or sequence_ids.shape != toe_contact_by_slot.shape[:1]
+    or swing_foot_ids.shape != toe_contact_by_slot.shape[:1]
+    or swing_active.shape != toe_contact_by_slot.shape[:1]
+  ):
+    return torch.zeros_like(toe_contact_by_slot)
+
+  foot_ids = torch.arange(2, device=toe_contact_by_slot.device)
+  opposite_ids = 1 - foot_ids
+  support_grounded = ground_contact[:, opposite_ids]
+  support_layers = foot_layers[:, opposite_ids]
+  support_layers_valid = foot_layers_valid[:, opposite_ids]
+  swing_layers_below_support = foot_layers < support_layers
+  support_context = (
+    support_grounded
+    & support_layers_valid
+    & foot_layers_valid
+    & (support_layers > 0)
+    & swing_layers_below_support
+  )
+  target_foot = (foot_ids[None, :] == swing_foot_ids[:, None]) & swing_active[
+    :, None
+  ].bool()
+  same_sequence = contact_sequence_ids == sequence_ids[:, None, None]
+  passed_or_occupied_edge = (contact_layers > 0) & (
+    contact_layers <= support_layers[:, :, None]
+  )
+  return (
+    toe_contact_by_slot
+    & target_foot[:, :, None]
+    & support_context[:, :, None]
+    & same_sequence
+    & passed_or_occupied_edge
   )
 
 

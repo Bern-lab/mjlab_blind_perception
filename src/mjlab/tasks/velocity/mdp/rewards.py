@@ -17,10 +17,17 @@ from mjlab.utils.lab_api.string import (
 )
 
 from .stair_geometry import (
+  STAIR_ASCENT_DIR_KEY,
   STAIR_CLEARANCE_ASCENT_DIR_KEY,
   STAIR_CLEARANCE_FOOT_LAYERS_KEY,
   STAIR_CLEARANCE_FOOT_LAYERS_VALID_KEY,
   STAIR_CLEARANCE_SEQUENCE_ID_KEY,
+  STAIR_CURRENT_GROUND_CONTACT_KEY,
+  STAIR_CURRENT_STAIR_SUPPORT_KEY,
+  STAIR_CURRENT_SUPPORT_LAYER_KEY,
+  STAIR_PHASE_KEY,
+  STAIR_SEQUENCE_ID_KEY,
+  STAIR_TARGET_FOOT_KEY,
 )
 
 if TYPE_CHECKING:
@@ -283,7 +290,14 @@ class _StepBoundaryFootVolume:
     indices: torch.Tensor,
   ) -> torch.Tensor:
     num_envs, num_feet, num_selected = indices.shape
-    expanded = values[:, None, :].expand(num_envs, num_feet, -1)
+    if values.ndim == 2:
+      expanded = values[:, None, :].expand(num_envs, num_feet, -1)
+    elif values.ndim == 3 and values.shape[:2] == (num_envs, num_feet):
+      expanded = values
+    else:
+      raise ValueError(
+        "Boundary masks must have shape [env, boundary] or [env, foot, boundary]."
+      )
     return torch.gather(expanded, dim=2, index=indices)
 
   def _nearest_boundary_indices(
@@ -301,12 +315,20 @@ class _StepBoundaryFootVolume:
     ):
       return None, None
 
+    if valid_boundaries.ndim == 2:
+      per_foot_valid = valid_boundaries[:, None, :]
+    elif valid_boundaries.shape == ref_distance.shape:
+      per_foot_valid = valid_boundaries
+    else:
+      raise ValueError(
+        "Boundary masks must have shape [env, boundary] or match ref_distance."
+      )
     candidate_count = torch.sum(
-      (ref_distance <= influence_radius) & valid_boundaries[:, None, :], dim=-1
+      (ref_distance <= influence_radius) & per_foot_valid, dim=-1
     )
     fallback = candidate_count > nearest_boundaries
     masked_distance = torch.where(
-      valid_boundaries[:, None, :],
+      per_foot_valid,
       ref_distance,
       torch.full_like(ref_distance, torch.inf),
     )
@@ -734,6 +756,169 @@ class shank_front_edge_clearance_penalty:
     log["Metrics/shank_front_edge_closest_u_mean"] = (
       closest_edge_u * unique_edge.float()
     ).sum() / valid_count
+    return penalty
+
+
+class swing_toe_support_edge_cylinder_penalty(_StepBoundaryFootVolume):
+  """Penalize swing-toe intrusion around the support tread's outer edge."""
+
+  @staticmethod
+  def _cylinder_intrusion(
+    points_w: torch.Tensor,
+    edge_start_w: torch.Tensor,
+    edge_end_w: torch.Tensor,
+    radius: float,
+  ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return minimum radial distance and linear intrusion into a finite cylinder."""
+    edge = edge_end_w - edge_start_w
+    edge_len_sq = torch.sum(edge.square(), dim=-1)
+    point_delta = points_w - edge_start_w[:, None, :]
+    projection = torch.sum(point_delta * edge[:, None, :], dim=-1)
+    projection = projection / edge_len_sq[:, None].clamp_min(1.0e-12)
+    radial_delta = point_delta - projection[..., None] * edge[:, None, :]
+    radial_distance = torch.norm(radial_delta, dim=-1)
+    on_segment = (
+      (edge_len_sq[:, None] > 1.0e-12) & (projection >= 0.0) & (projection <= 1.0)
+    )
+    point_distance = torch.where(
+      on_segment,
+      radial_distance,
+      torch.full_like(radial_distance, torch.inf),
+    )
+    min_distance = torch.amin(point_distance, dim=-1)
+    intrusion = torch.clamp(
+      (float(radius) - min_distance) / max(float(radius), 1.0e-6),
+      min=0.0,
+      max=1.0,
+    )
+    return min_distance, intrusion
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    radius: float = 0.05,
+    toe_x_min: float = 0.08,
+    direction_cos_threshold: float = 0.90,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FOOT_BODY_CFG,
+  ) -> torch.Tensor:
+    if radius <= 0.0:
+      raise ValueError("radius must be positive.")
+
+    boundaries, valid_boundaries = _current_step_boundaries(env)
+    boundary_sequence_ids, boundary_layers = _current_step_boundary_metadata(env)
+    stair_phase = env.extras.get(STAIR_PHASE_KEY)
+    sequence_ids = env.extras.get(STAIR_SEQUENCE_ID_KEY)
+    ascent_dir = env.extras.get(STAIR_ASCENT_DIR_KEY)
+    target_foot = env.extras.get(STAIR_TARGET_FOOT_KEY)
+    ground_contact = env.extras.get(STAIR_CURRENT_GROUND_CONTACT_KEY)
+    stair_support = env.extras.get(STAIR_CURRENT_STAIR_SUPPORT_KEY)
+    support_layers = env.extras.get(STAIR_CURRENT_SUPPORT_LAYER_KEY)
+    launch_layers = env.extras.get(STAIR_CLEARANCE_FOOT_LAYERS_KEY)
+    launch_layers_valid = env.extras.get(STAIR_CLEARANCE_FOOT_LAYERS_VALID_KEY)
+    required_tensors = (
+      stair_phase,
+      sequence_ids,
+      ascent_dir,
+      target_foot,
+      ground_contact,
+      stair_support,
+      support_layers,
+      launch_layers,
+      launch_layers_valid,
+    )
+    if (
+      boundaries is None
+      or valid_boundaries is None
+      or boundary_sequence_ids is None
+      or boundary_layers is None
+      or not all(isinstance(value, torch.Tensor) for value in required_tensors)
+    ):
+      return torch.zeros(env.num_envs, device=env.device)
+
+    assert isinstance(stair_phase, torch.Tensor)
+    assert isinstance(sequence_ids, torch.Tensor)
+    assert isinstance(ascent_dir, torch.Tensor)
+    assert isinstance(target_foot, torch.Tensor)
+    assert isinstance(ground_contact, torch.Tensor)
+    assert isinstance(stair_support, torch.Tensor)
+    assert isinstance(support_layers, torch.Tensor)
+    assert isinstance(launch_layers, torch.Tensor)
+    assert isinstance(launch_layers_valid, torch.Tensor)
+    if ground_contact.shape != (env.num_envs, 2):
+      raise RuntimeError(
+        "swing_toe_support_edge_cylinder_penalty requires two contact channels."
+      )
+
+    toe_mask = self._local_x >= float(toe_x_min)
+    if not bool(torch.any(toe_mask).item()):
+      return torch.zeros(env.num_envs, device=env.device)
+    points_w, _point_vel_w = self._foot_points_w(env, asset_cfg)
+    if points_w.shape[1] != 2:
+      raise RuntimeError(
+        "swing_toe_support_edge_cylinder_penalty requires exactly two feet."
+      )
+
+    env_ids = torch.arange(env.num_envs, device=env.device)
+    target_valid = (target_foot >= 0) & (target_foot < 2)
+    target_ids = target_foot.clamp(0, 1).long()
+    support_ids = 1 - target_ids
+    target_grounded = ground_contact[env_ids, target_ids].bool()
+    support_grounded = ground_contact[env_ids, support_ids].bool()
+    support_on_stair = stair_support[env_ids, support_ids].bool()
+    support_layer = support_layers[env_ids, support_ids].long()
+    launch_layer = launch_layers[env_ids, target_ids].long()
+    launch_valid = launch_layers_valid[env_ids, target_ids].bool()
+    crossing_support_edge = launch_valid & (launch_layer < support_layer)
+    swing_active = (
+      (stair_phase >= 1)
+      & target_valid
+      & ~target_grounded
+      & support_grounded
+      & support_on_stair
+      & (support_layer > 0)
+      & crossing_support_edge
+    )
+
+    boundary_ascent = -boundaries[..., 6:8]
+    boundary_ascent = boundary_ascent / torch.norm(
+      boundary_ascent, dim=-1, keepdim=True
+    ).clamp_min(1.0e-6)
+    direction_cos = torch.sum(boundary_ascent * ascent_dir[:, None, :], dim=-1)
+    candidate = (
+      valid_boundaries
+      & (boundary_sequence_ids == sequence_ids[:, None])
+      & (boundary_layers == support_layer[:, None])
+      & (direction_cos >= float(direction_cos_threshold))
+    )
+    candidate_count = candidate.sum(dim=-1)
+    unique_edge = candidate_count == 1
+    edge_idx = torch.argmax(candidate.long(), dim=-1)
+    selected_edge = boundaries[env_ids, edge_idx]
+    target_toe_points = points_w[env_ids, target_ids][:, toe_mask, :]
+    min_distance, intrusion = self._cylinder_intrusion(
+      target_toe_points,
+      selected_edge[:, 0:3],
+      selected_edge[:, 3:6],
+      radius,
+    )
+    distance_valid = torch.isfinite(min_distance)
+    active = swing_active & unique_edge & distance_valid
+    penalty = torch.where(active, intrusion, torch.zeros_like(intrusion))
+
+    log = env.extras["log"]
+    active_count = active.float().sum().clamp_min(1.0)
+    log["Metrics/swing_toe_support_edge_cylinder_active_ratio"] = active.float().mean()
+    log["Metrics/swing_toe_support_edge_cylinder_intrusion_ratio"] = (
+      active & (intrusion > 0.0)
+    ).float().sum() / active_count
+    log["Metrics/swing_toe_support_edge_cylinder_min_distance_mean"] = (
+      torch.where(active, min_distance, torch.zeros_like(min_distance)).sum()
+      / active_count
+    )
+    log["Metrics/swing_toe_support_edge_cylinder_penalty_mean"] = penalty.mean()
+    log["Metrics/swing_toe_support_edge_cylinder_missing_ratio"] = (
+      swing_active & ~unique_edge
+    ).float().sum() / swing_active.float().sum().clamp_min(1.0)
     return penalty
 
 
