@@ -8,6 +8,8 @@ from mjlab.managers.observation_manager import ObservationGroupCfg
 from mjlab.tasks.registry import list_tasks, load_env_cfg
 
 MAIN_BRANCH_TASK_IDS = (
+  "Mjlab-Velocity-Blind-Rough-TargetNavigation-FootprintDetector-"
+  "SlowLatent-TeacherKL-Unitree-G1",
   "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2GeometryProbe-Unitree-G1",
   "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2SafeStrideProbe-Unitree-G1",
   "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2Shadow-TeacherKL-Unitree-G1",
@@ -173,6 +175,10 @@ def test_step_boundary_rewards_scoped_to_target_stair_tasks(
   slow_latent_task = (
     "Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1"
   )
+  footprint_detector_task = (
+    "Mjlab-Velocity-Blind-Rough-TargetNavigation-FootprintDetector-"
+    "SlowLatent-TeacherKL-Unitree-G1"
+  )
   semantic_geometry_task = (
     "Mjlab-Velocity-Blind-Rough-TargetNavigation-SemanticV2GeometryProbe-Unitree-G1"
   )
@@ -188,6 +194,14 @@ def test_step_boundary_rewards_scoped_to_target_stair_tasks(
   }
   slab_penalty_tasks = lip_penalty_tasks | {
     slow_latent_task,
+    footprint_detector_task,
+    semantic_geometry_task,
+    semantic_shadow_task,
+    semantic_probe_task,
+  }
+  slow_latent_family = {
+    slow_latent_task,
+    footprint_detector_task,
     semantic_geometry_task,
     semantic_shadow_task,
     semantic_probe_task,
@@ -210,6 +224,7 @@ def test_step_boundary_rewards_scoped_to_target_stair_tasks(
       slab_params = cfg.rewards["toe_step_riser_slab_penalty"].params
       assert slab_params["min_terrain_level"] == 3
       assert slab_params["nearest_boundaries"] == 4
-      assert slab_params["slab_depth"] == 0.10
+      expected_slab_depth = 0.05 if task_id in slow_latent_family else 0.10
+      assert slab_params["slab_depth"] == expected_slab_depth
     else:
       assert "toe_step_riser_slab_penalty" not in cfg.rewards

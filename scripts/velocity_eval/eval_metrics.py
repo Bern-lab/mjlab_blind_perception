@@ -12,7 +12,10 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
 from mjlab.sensor.terrain_height_sensor import TerrainHeightSensor
 from mjlab.tasks.velocity import mdp
-from mjlab.tasks.velocity.mdp.rewards import _StepBoundaryFootVolume
+from mjlab.tasks.velocity.mdp.rewards import (
+  _current_step_boundary_metadata,
+  _StepBoundaryFootVolume,
+)
 from mjlab.tasks.velocity.mdp.stair_geometry import cached_stair_shape
 from mjlab.utils.lab_api.math import quat_apply_inverse
 
@@ -57,11 +60,46 @@ LEVEL_EVENT_NAMES = (
 )
 
 
+def _passed_or_occupied_riser_toe_contact_mask(
+  toe_contact_by_slot: torch.Tensor,
+  contact_layers: torch.Tensor,
+  contact_sequence_ids: torch.Tensor,
+  foot_layers: torch.Tensor,
+  foot_layers_valid: torch.Tensor,
+  foot_sequence_ids: torch.Tensor,
+) -> torch.Tensor:
+  """Mask toe contacts on risers already occupied or passed by either foot."""
+  if (
+    toe_contact_by_slot.ndim != 3
+    or contact_layers.shape != toe_contact_by_slot.shape
+    or contact_sequence_ids.shape != toe_contact_by_slot.shape
+    or foot_layers.shape != toe_contact_by_slot.shape[:2]
+    or foot_layers_valid.shape != toe_contact_by_slot.shape[:2]
+    or foot_sequence_ids.shape != toe_contact_by_slot.shape[:2]
+  ):
+    return torch.zeros_like(toe_contact_by_slot)
+
+  matching_reached_foot = (
+    foot_layers_valid[:, None, None, :]
+    & (foot_layers[:, None, None, :] > 0)
+    & (foot_sequence_ids[:, None, None, :] >= 0)
+    & (contact_sequence_ids[:, :, :, None] == foot_sequence_ids[:, None, None, :])
+  )
+  highest_reached_layer = torch.where(
+    matching_reached_foot,
+    foot_layers[:, None, None, :],
+    torch.zeros_like(foot_layers[:, None, None, :]),
+  ).amax(dim=-1)
+  reached_or_passed = (contact_layers > 0) & (contact_layers <= highest_reached_layer)
+  return toe_contact_by_slot & matching_reached_foot.any(dim=-1) & reached_or_passed
+
+
 @dataclass(frozen=True)
 class StairMetricParams:
   """Geometry parameters for stair interaction events."""
 
   contact_sensor_name: str = "toe_terrain_contact"
+  ground_contact_sensor_name: str = "feet_ground_contact"
   vertical_normal_z_max: float = 0.4
   contact_force_threshold: float = 5.0
   contact_cooldown_s: float = 0.10
@@ -77,6 +115,9 @@ class StairMetricParams:
   v_margin: float = 0.06
   surface_tol: float = 0.005
   nearest_boundaries: int = 4
+  support_layer_height_tolerance: float = 0.08
+  support_layer_min_fraction: float = 0.05
+  ignore_passed_support_riser_toe_contacts: bool = True
 
 
 class StairEventDetector:
@@ -97,6 +138,13 @@ class StairEventDetector:
     num_feet = len(self._foot_body_ids())
 
     self._contact_sensor = self._get_contact_sensor(env)
+    self._ground_contact_sensor = self._get_named_contact_sensor(
+      env, self.params.ground_contact_sensor_name
+    )
+    self._foot_volume = _StepBoundaryFootVolume(
+      RewardTermCfg(func=StairEventDetector, weight=0.0, params={}),
+      env,
+    )
     self.event_source = (
       "true_contact" if self._contact_sensor is not None else "geometry_risk_zone"
     )
@@ -110,6 +158,15 @@ class StairEventDetector:
     self._heel_contact_cooldown = torch.zeros(env.num_envs, num_feet, device=env.device)
     self._last_true_contact_slots: dict[str, torch.Tensor] | None = None
     self._last_true_contact_pos_w: torch.Tensor | None = None
+    self._reached_foot_layers = torch.zeros(
+      env.num_envs, num_feet, device=env.device, dtype=torch.long
+    )
+    self._reached_foot_sequence_ids = torch.full(
+      (env.num_envs, num_feet), -1, device=env.device, dtype=torch.long
+    )
+    self._reached_foot_layers_valid = torch.zeros(
+      env.num_envs, num_feet, device=env.device, dtype=torch.bool
+    )
 
     self.toe_params = {
       "slab_depth": self.params.slab_depth,
@@ -173,8 +230,14 @@ class StairEventDetector:
     )
 
   def _get_contact_sensor(self, env: ManagerBasedRlEnv) -> ContactSensor | None:
+    return self._get_named_contact_sensor(env, self.params.contact_sensor_name)
+
+  @staticmethod
+  def _get_named_contact_sensor(
+    env: ManagerBasedRlEnv, name: str
+  ) -> ContactSensor | None:
     try:
-      sensor = env.scene[self.params.contact_sensor_name]
+      sensor = env.scene[name]
     except (KeyError, AttributeError):
       return None
     if isinstance(sensor, ContactSensor):
@@ -186,6 +249,151 @@ class StairEventDetector:
     if not isinstance(body_ids, list):
       raise RuntimeError("StairEventDetector foot body IDs were not resolved.")
     return body_ids
+
+  def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+    """Clear detector cooldowns and eval-owned stair-foot memory."""
+    if env_ids is None:
+      env_ids = slice(None)
+    self._prev_toe_contact[env_ids] = False
+    self._prev_heel_contact[env_ids] = False
+    self._toe_contact_cooldown[env_ids] = 0.0
+    self._heel_contact_cooldown[env_ids] = 0.0
+    self._reached_foot_layers[env_ids] = 0
+    self._reached_foot_sequence_ids[env_ids] = -1
+    self._reached_foot_layers_valid[env_ids] = False
+    if self._last_true_contact_slots is not None:
+      for active_slots in self._last_true_contact_slots.values():
+        active_slots[env_ids] = False
+
+  def _ground_contact_by_foot(self) -> torch.Tensor | None:
+    sensor = self._ground_contact_sensor
+    if sensor is None:
+      return None
+    contact_time = sensor.data.current_contact_time
+    if contact_time is None:
+      return None
+    num_feet = self._reached_foot_layers.shape[1]
+    if contact_time.shape[-1] != num_feet:
+      if contact_time.shape[-1] % num_feet != 0:
+        return None
+      contact_time = contact_time.view(contact_time.shape[0], num_feet, -1).amax(dim=-1)
+    return contact_time > 0.0
+
+  def _update_reached_foot_layers(self, env: ManagerBasedRlEnv) -> None:
+    ground_contact = self._ground_contact_by_foot()
+    if ground_contact is None:
+      return
+    boundaries, valid_boundaries = _current_step_boundaries(env)
+    boundary_sequence_ids, boundary_layers = _current_step_boundary_metadata(env)
+    if (
+      boundaries is None
+      or valid_boundaries is None
+      or boundary_sequence_ids is None
+      or boundary_layers is None
+    ):
+      return
+
+    boundary_valid = valid_boundaries & (boundary_layers > 0)
+    tread_depth, _riser_height, shape_valid = cached_stair_shape(
+      env, boundaries, valid_boundaries
+    )
+    foot_points_w, _foot_point_vel_w = self._foot_volume._foot_points_w(
+      env, self.foot_asset_cfg
+    )
+    sole_z = torch.min(self._foot_volume._local_points[:, 2])
+    sole_mask = self._foot_volume._local_points[:, 2] <= sole_z + 1.0e-6
+    sole_points_w = foot_points_w[:, :, sole_mask, :]
+    support_fraction = mdp.toe_step_riser_slab_penalty._tread_support_fraction(
+      sole_points_w,
+      boundaries,
+      tread_depth,
+    )
+    foot_ref_w = self._foot_volume._foot_ref_w(env, self.foot_asset_cfg)
+    height_error = torch.abs(foot_ref_w[:, :, None, 2] - boundaries[:, None, :, 10])
+    candidate = (
+      ground_contact[:, :, None]
+      & shape_valid[:, None, None]
+      & boundary_valid[:, None, :]
+      & (height_error <= self.params.support_layer_height_tolerance)
+      & (support_fraction >= self.params.support_layer_min_fraction)
+    )
+    candidate_support = torch.where(
+      candidate,
+      support_fraction,
+      torch.full_like(support_fraction, -torch.inf),
+    )
+    best_support, best_boundary_idx = torch.max(candidate_support, dim=-1)
+    support_valid = torch.isfinite(best_support)
+    expanded_layers = boundary_layers[:, None, :].expand(
+      env.num_envs, self._reached_foot_layers.shape[1], -1
+    )
+    expanded_sequences = boundary_sequence_ids[:, None, :].expand_as(expanded_layers)
+    selected_layers = torch.gather(
+      expanded_layers, dim=-1, index=best_boundary_idx[..., None]
+    ).squeeze(-1)
+    selected_sequences = torch.gather(
+      expanded_sequences, dim=-1, index=best_boundary_idx[..., None]
+    ).squeeze(-1)
+    self._reached_foot_layers.copy_(
+      torch.where(support_valid, selected_layers, self._reached_foot_layers)
+    )
+    self._reached_foot_sequence_ids.copy_(
+      torch.where(
+        support_valid,
+        selected_sequences,
+        self._reached_foot_sequence_ids,
+      )
+    )
+    self._reached_foot_layers_valid.logical_or_(support_valid)
+
+  def _filter_passed_or_occupied_riser_toe_contacts(
+    self,
+    env: ManagerBasedRlEnv,
+    toe_hit_by_slot: torch.Tensor,
+    contact_pos_w: torch.Tensor,
+  ) -> torch.Tensor:
+    if not self.params.ignore_passed_support_riser_toe_contacts:
+      return toe_hit_by_slot
+
+    boundaries, valid_boundaries = _current_step_boundaries(env)
+    boundary_sequence_ids, boundary_layers = _current_step_boundary_metadata(env)
+    if (
+      boundaries is None
+      or valid_boundaries is None
+      or boundary_sequence_ids is None
+      or boundary_layers is None
+    ):
+      return toe_hit_by_slot
+    boundary_layers = torch.where(
+      valid_boundaries,
+      boundary_layers,
+      torch.zeros_like(boundary_layers),
+    )
+    contact_layers, contact_boundary_idx = (
+      mdp.toe_step_riser_slab_penalty._contact_boundary_layers(
+        contact_pos_w,
+        boundaries,
+        boundary_layers,
+      )
+    )
+    expanded_sequence_ids = boundary_sequence_ids[:, None, None, :].expand(
+      *contact_boundary_idx.shape,
+      boundary_sequence_ids.shape[-1],
+    )
+    contact_sequence_ids = torch.gather(
+      expanded_sequence_ids,
+      dim=-1,
+      index=contact_boundary_idx[..., None],
+    ).squeeze(-1)
+    ignored = _passed_or_occupied_riser_toe_contact_mask(
+      toe_hit_by_slot,
+      contact_layers,
+      contact_sequence_ids,
+      self._reached_foot_layers,
+      self._reached_foot_layers_valid,
+      self._reached_foot_sequence_ids,
+    )
+    return toe_hit_by_slot & ~ignored
 
   def compute_events(self, env: ManagerBasedRlEnv) -> dict[str, torch.Tensor]:
     """Return per-env binary event indicators for this step."""
@@ -285,6 +493,11 @@ class StairEventDetector:
     toe_hit_by_slot = valid_riser_contact & (
       contact_pos_b[..., 0] >= self.params.toe_x_min
     )
+    toe_hit_by_slot = self._filter_passed_or_occupied_riser_toe_contacts(
+      env,
+      toe_hit_by_slot,
+      contact_pos_w,
+    )
     heel_hit_by_slot = valid_riser_contact & (
       contact_pos_b[..., 0] <= self.params.heel_x_max
     )
@@ -323,6 +536,7 @@ class StairEventDetector:
       "heel": heel_hit_by_slot & new_heel_by_foot[:, :, None],
     }
     self._last_true_contact_pos_w = contact_pos_w
+    self._update_reached_foot_layers(env)
 
     zeros = torch.zeros(num_envs, device=env.device)
     return {

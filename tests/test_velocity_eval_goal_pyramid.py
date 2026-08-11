@@ -10,6 +10,7 @@ from scripts.velocity_eval.eval_metrics import (
   LANDING_SUM_NAMES,
   LEVEL_EVENT_NAMES,
   MEAN_METRIC_NAMES,
+  _passed_or_occupied_riser_toe_contact_mask,
 )
 from scripts.velocity_eval.eval_policy_goal_pyramid import (
   GoalPyramidEvalConfig,
@@ -23,11 +24,108 @@ from scripts.velocity_eval.eval_policy_goal_pyramid import (
 )
 
 
+def test_occupied_riser_contacts_are_not_eval_collisions() -> None:
+  toe_hit_by_slot = torch.tensor([[[True, True, True], [True, True, True]]])
+  contact_layers = torch.tensor([[[2, 3, 4], [2, 3, 4]]])
+  contact_sequence_ids = torch.full_like(contact_layers, 7)
+  foot_layers = torch.tensor([[3, 2]])
+  foot_sequence_ids = torch.tensor([[7, 7]])
+
+  foot_layers_valid = torch.tensor([[True, True]])
+  ignored = _passed_or_occupied_riser_toe_contact_mask(
+    toe_hit_by_slot,
+    contact_layers,
+    contact_sequence_ids,
+    foot_layers,
+    foot_layers_valid,
+    foot_sequence_ids,
+  )
+
+  assert ignored.tolist() == [[[True, True, False], [True, True, False]]]
+
+
+def test_toe_contact_is_kept_without_matching_stair_sequence() -> None:
+  toe_hit_by_slot = torch.tensor([[[False], [True]]])
+  contact_layers = torch.tensor([[[0], [3]]])
+  contact_sequence_ids = torch.tensor([[[0], [8]]])
+  foot_layers = torch.tensor([[3, 2]])
+  foot_sequence_ids = torch.tensor([[7, 7]])
+
+  foot_layers_valid = torch.tensor([[True, True]])
+  ignored = _passed_or_occupied_riser_toe_contact_mask(
+    toe_hit_by_slot,
+    contact_layers,
+    contact_sequence_ids,
+    foot_layers,
+    foot_layers_valid,
+    foot_sequence_ids,
+  )
+
+  assert not ignored.any()
+
+
+def test_eval_filter_does_not_depend_on_target_swing_foot() -> None:
+  toe_hit_by_slot = torch.tensor([[[True, True], [True, True]]])
+  contact_layers = torch.tensor([[[2, 3], [2, 3]]])
+  contact_sequence_ids = torch.full_like(contact_layers, 7)
+  foot_layers = torch.tensor([[3, 2]])
+  foot_layers_valid = torch.tensor([[True, True]])
+
+  ignored = _passed_or_occupied_riser_toe_contact_mask(
+    toe_hit_by_slot,
+    contact_layers,
+    contact_sequence_ids,
+    foot_layers,
+    foot_layers_valid,
+    torch.tensor([[7, 7]]),
+  )
+
+  assert ignored.all()
+
+
+def test_eval_filter_keeps_first_riser_contact_without_stair_footprints() -> None:
+  toe_hit_by_slot = torch.tensor([[[True], [False]]])
+  contact_layers = torch.tensor([[[1], [0]]])
+  contact_sequence_ids = torch.tensor([[[7], [0]]])
+
+  ignored = _passed_or_occupied_riser_toe_contact_mask(
+    toe_hit_by_slot,
+    contact_layers,
+    contact_sequence_ids,
+    torch.zeros(1, 2, dtype=torch.long),
+    torch.zeros(1, 2, dtype=torch.bool),
+    torch.full((1, 2), -1, dtype=torch.long),
+  )
+
+  assert not ignored.any()
+
+
+def test_eval_filter_tracks_each_physical_stair_sequence_independently() -> None:
+  toe_hit_by_slot = torch.tensor([[[True, True], [False, False]]])
+  contact_layers = torch.tensor([[[4, 4], [0, 0]]])
+  contact_sequence_ids = torch.tensor([[[7, 8], [0, 0]]])
+
+  ignored = _passed_or_occupied_riser_toe_contact_mask(
+    toe_hit_by_slot,
+    contact_layers,
+    contact_sequence_ids,
+    torch.tensor([[3, 5]]),
+    torch.tensor([[True, True]]),
+    torch.tensor([[7, 8]]),
+  )
+
+  assert ignored.tolist() == [[[False, True], [False, False]]]
+
+
 class _FakeDetector:
   event_source = "true_contact"
 
   def __init__(self) -> None:
     self._updates = 0
+    self.resets = []
+
+  def reset(self, env_ids=None):
+    self.resets.append(env_ids)
 
   def compute_events(self, env):
     del env
@@ -80,6 +178,8 @@ def test_goal_pyramid_toe_riser_contact_markers_persist_until_reset():
   assert all(sphere[2] == (1.0, 0.0, 0.0, 1.0) for sphere in visualizer.spheres)
 
   markers.reset(torch.tensor([0]))
+  assert len(detector.resets) == 1
+  assert torch.equal(detector.resets[0], torch.tensor([0]))
   visualizer = _FakeVisualizer(show_all_envs=True)
   markers.debug_vis(visualizer)
 

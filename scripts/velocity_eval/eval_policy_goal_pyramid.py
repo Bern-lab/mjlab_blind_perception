@@ -143,6 +143,7 @@ class GoalPyramidToeRiserContactMarkers:
     self._points_by_env: list[list[np.ndarray]] = [[] for _ in range(env.num_envs)]
 
   def reset(self, env_ids: torch.Tensor | None = None) -> None:
+    self._detector.reset(env_ids)
     if env_ids is None:
       for points in self._points_by_env:
         points.clear()

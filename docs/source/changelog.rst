@@ -420,6 +420,16 @@ Changed
 Fixed
 ^^^^^
 
+- Goal-pyramid toe-riser collision metrics and play markers now keep their own
+  geometry-derived per-foot stair-layer history, so swing-toe brushes against
+  already occupied or passed risers are neither counted nor displayed.
+- SlowLatent stair collision tracking now applies the same passed-riser filter
+  to contact events, slab risk, penalties, and supervision labels, including
+  the first airborne frame, and reports raw-versus-filtered diagnostics.
+- SlowLatent stride-phase shaping now keeps swing credit alive across brief
+  contact gaps, distributes probe and recovery potential across the full swing,
+  alternates unfinished recovery across feet, and continuously shapes locked
+  swings around the frozen geometry target.
 - SafeStride full-interval supervision now requires a confirmed collision with
   the expected layer-2-or-later riser. Layer-1 repeats and tread contact continue
   to supervise only the lower bound. Training logs distinguish interval-valid
