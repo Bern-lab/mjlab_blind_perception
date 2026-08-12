@@ -81,6 +81,14 @@ Added
 - Added a long-stair riser-height latent collection preset and report filters
   for memory-only upstairs samples, so riser organization can be inspected
   without post-stair platform samples dominating the embedding.
+- Added a SlowLatent semantic rollout video recorder that overlays gate
+  switches, Semantic-v2 state channels, decoded stair geometry, SafeStride
+  forward/hold/backoff cues, stance/swing foot estimates, and eval-filtered red
+  toe-riser contact markers on rendered long-stair climbs. The default camera
+  now uses a slightly yawed right-side view, keeps a compact stair-ascent inset
+  in the upper-left scene, draws a single bottom signal panel over walked
+  distance for gate/cue/update changes and toe-riser hits, and records a short
+  top-platform tail after stair completion.
 - Added a standalone long stair-runway terrain for G1 target-navigation
   training, with fixed start/end target points, matched high-stair size ranges,
   and runway-specific reset and termination handling.

@@ -567,3 +567,38 @@ uv run python scripts/velocity_eval/watch_latent_report_progress.py \
   --embedding-dim 3 \
   --interactive-features h_t,z_memory,z_state,z_shape,semantic
 ```
+
+## SlowLatent Semantic Rollout Video
+
+Use `record_slow_latent_semantic_video.py` to record one rendered long-stair
+rollout with a synchronized semantic HUD. The video overlays the SlowLatent
+gate state, event/stair probabilities, write/memory/release progress, decoded
+riser height, SafeStride interval, SafeStride trend cue, and left/right
+stance-swing estimates. By default it also enables the eval toe-riser contact
+sensor and draws persistent red markers for filtered toe-riser contact events,
+using the same passed/occupied-riser filtering as goal-pyramid play markers. It
+uses a slightly yawed right-side camera to expose the stair riser faces and
+toe tips, keeps a compact stair-ascent shape inset in the upper-left corner,
+and draws one bottom signal panel over walked distance for gate state,
+forward/hold/backoff cue, event/stair probability, update strength, and
+toe-riser hits. It records a short top-platform tail after stair completion and
+writes a frame-aligned CSV trace for plotting the same signals later.
+
+```bash
+uv run python scripts/velocity_eval/record_slow_latent_semantic_video.py \
+  Mjlab-Velocity-Blind-Rough-TargetNavigation-SlowLatent-TeacherKL-Unitree-G1 \
+  --checkpoint-file logs/rsl_rl/.../model.pt \
+  --terrain-set long_stair_riser_grid_v1 \
+  --terrain-label h15 \
+  --max-episode-length-s 18 \
+  --render-every 2
+```
+
+For a larger on-video hit marker, add e.g. `--toe-riser-contact-marker-radius
+0.08`.
+
+Outputs are timestamped by default:
+
+- `semantic_rollout_h15.mp4`
+- `semantic_rollout_h15.csv`
+- `semantic_rollout_h15.json`
