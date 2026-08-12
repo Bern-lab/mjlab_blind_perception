@@ -221,9 +221,9 @@ class G1SlowLatentRewardParams:
   stride_phase_probe_overshoot_penalty: float = 1.0
   stride_phase_probe_stall_penalty: float = 0.50
   stride_phase_probe_swing_fraction: float = 0.70
-  stride_phase_swing_invalid_grace_steps: int = 2
+  stride_phase_swing_invalid_grace_steps: int = 0
   stride_phase_entry_reward_scale: float = 0.75
-  stride_phase_entry_swing_fraction: float = 0.20
+  stride_phase_entry_swing_fraction: float = 0.70
   stride_phase_entry_target: float = 0.05
   stride_phase_entry_target_tolerance: float = 0.01
   stride_phase_entry_completion_bonus: float = 1.00
@@ -253,7 +253,7 @@ class G1SlowLatentRewardParams:
   stride_phase_backoff_forward_penalty: float = 0.50
   stride_phase_lock_progress_scale: float = 0.03
   stride_phase_lock_tolerance: float = 0.05
-  stride_phase_lock_swing_fraction: float = 0.70
+  stride_phase_lock_swing_fraction: float = 0.0
   stride_phase_lock_intent_tolerance: float = 0.015
   stride_phase_lock_progress_weight: float = 0.40
   stride_phase_lock_tracking_weight: float = 0.60
@@ -263,9 +263,6 @@ class G1SlowLatentRewardParams:
   safe_stride_riser_weight: float = 3.0
   toe_collision_risk_margin: float = 0.06
   toe_stair_command_threshold: float = 0.05
-  swing_toe_support_edge_weight: float = -2.0
-  swing_toe_support_edge_radius: float = 0.05
-  swing_toe_support_edge_direction_cos: float = 0.90
   stair_skip_layer_weight: float = -1.0
 
   # Target-foot dense shaping toward the expected tread-depth midline.  This
@@ -458,16 +455,6 @@ def configure_g1_step_danger_rewards(
       "collision_risk_margin": params.toe_collision_risk_margin,
       "command_threshold": params.toe_stair_command_threshold,
       "ground_contact_sensor_name": "feet_ground_contact",
-      "asset_cfg": foot_asset_cfg(),
-    },
-  )
-  cfg.rewards["swing_toe_support_edge_cylinder_penalty"] = RewardTermCfg(
-    func=mdp.swing_toe_support_edge_cylinder_penalty,
-    weight=params.swing_toe_support_edge_weight,
-    params={
-      "radius": params.swing_toe_support_edge_radius,
-      "toe_x_min": params.toe_x_min,
-      "direction_cos_threshold": params.swing_toe_support_edge_direction_cos,
       "asset_cfg": foot_asset_cfg(),
     },
   )

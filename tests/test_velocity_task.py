@@ -626,17 +626,7 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
   assert toe_reward_params["collision_risk_margin"] == 0.06
   assert not any("probe" in name for name in toe_reward_params)
   assert toe_reward_params["ground_contact_sensor_name"] == "feet_ground_contact"
-  support_edge_reward = env_cfg.rewards["swing_toe_support_edge_cylinder_penalty"]
-  support_edge_params = support_edge_reward.params
-  assert support_edge_reward.func is swing_toe_support_edge_cylinder_penalty
-  assert support_edge_reward.weight == -2.0
-  assert support_edge_params["radius"] == 0.05
-  assert support_edge_params["toe_x_min"] == 0.08
-  assert support_edge_params["direction_cos_threshold"] == 0.90
-  assert support_edge_params["asset_cfg"].body_names == (
-    "left_ankle_roll_link",
-    "right_ankle_roll_link",
-  )
+  assert "swing_toe_support_edge_cylinder_penalty" not in env_cfg.rewards
   shank_reward = env_cfg.rewards["shank_front_edge_clearance_penalty"]
   shank_params = shank_reward.params
   assert shank_reward.weight == -3.0
@@ -674,9 +664,9 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
     "probe_overshoot_penalty": 1.0,
     "probe_stall_penalty": 0.50,
     "probe_swing_fraction": 0.70,
-    "swing_invalid_grace_steps": 2,
+    "swing_invalid_grace_steps": 0,
     "entry_reward_scale": 0.75,
-    "entry_swing_fraction": 0.20,
+    "entry_swing_fraction": 0.70,
     "entry_target": 0.05,
     "entry_target_tolerance": 0.01,
     "entry_completion_bonus": 1.00,
@@ -697,7 +687,7 @@ def test_slow_latent_target_navigation_exposes_latent_inputs() -> None:
     "backoff_forward_penalty": 0.50,
     "lock_progress_scale": 0.03,
     "lock_tolerance": 0.05,
-    "lock_swing_fraction": 0.70,
+    "lock_swing_fraction": 0.0,
     "lock_progress_weight": 0.40,
     "lock_tracking_weight": 0.60,
     "intent_tolerance": 0.015,
